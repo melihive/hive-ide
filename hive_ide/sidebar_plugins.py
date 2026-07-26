@@ -1,0 +1,315 @@
+"""Extensible semantic providers for sidebar state and icon slots."""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from importlib.metadata import entry_points
+from pathlib import Path
+from typing import Any, Literal, Protocol
+
+from .errors import UsageError
+from .git_status import inspect_linked_checkout
+from .state_compat import StateIO
+
+
+SidebarRegion = Literal["state", "slot"]
+
+
+class SidebarProvider(Protocol):
+    """A provider that can be normalized before isolated panes start."""
+
+    id: str
+    region: SidebarRegion
+    default_icons: dict[str, str]
+
+    def value(self, state_home: Path, session: dict[str, Any]) -> str | None: ...
+    def snapshot(self) -> dict[str, Any]: ...
+
+
+def _age_seconds(iso: str | None) -> float:
+    if not iso:
+        return float("inf")
+    try:
+        observed = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return float("inf")
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - observed).total_seconds())
+
+
+class ActivityProvider:
+    id = "activity"
+    region: SidebarRegion = "state"
+    default_icons = {
+        "task": "📋",
+        "default": "📋",
+        "release": "🚀",
+        "blocked": "⛔",
+        "compacting": "🧠",
+    }
+    stale_seconds = 1800
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "region": self.region,
+            "kind": "builtin",
+            "default_icons": dict(self.default_icons),
+        }
+
+    def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
+        activity = StateIO.read_session_activity(state_home, session)
+        if not activity or _age_seconds(activity.get("ts")) > self.stale_seconds:
+            return None
+        if activity.get("state") == "blocked":
+            return "blocked"
+        kind = activity.get("kind")
+        return kind if isinstance(kind, str) and kind else None
+
+
+class PlanProvider:
+    id = "plan"
+    region: SidebarRegion = "slot"
+    default_icons = {"active": "📝", "done": "📦"}
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "region": self.region,
+            "kind": "builtin",
+            "default_icons": dict(self.default_icons),
+        }
+
+    def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
+        plan = session.get("plan")
+        path = plan.get("path") if isinstance(plan, dict) else plan
+        if not path:
+            return None
+        hive = ((session.get("host") or {}).get("hive") or {})
+        legacy = hive.get("legacy_record") or {}
+        status = (
+            session.get("plan_status")
+            or hive.get("plan_status")
+            or legacy.get("plan_status")
+            or ""
+        ).lower()
+        return "done" if status in {"merged", "done"} or "/_archive/" in path else "active"
+
+
+class CheckoutProvider:
+    id = "checkout"
+    region: SidebarRegion = "slot"
+    default_icons = {
+        "live": "🔀",
+        "shipped": "🚢",
+        "missing": "✅",
+        "unknown": "🔀",
+    }
+    cache_seconds = 5
+
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[float, str | None]] = {}
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "region": self.region,
+            "kind": "builtin",
+            "default_icons": dict(self.default_icons),
+        }
+
+    def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
+        hive = ((session.get("host") or {}).get("hive") or {})
+        legacy = hive.get("legacy_record") or {}
+        if (
+            session.get("worktree_merged")
+            or hive.get("worktree_merged")
+            or legacy.get("worktree_merged")
+        ):
+            return "missing"
+        ahead = (
+            session.get("worktree_ahead")
+            if "worktree_ahead" in session
+            else hive.get("worktree_ahead", legacy.get("worktree_ahead"))
+        )
+        if ahead is False:
+            return "shipped"
+        working_dir = session.get("working_dir") or session.get("cwd")
+        if not working_dir:
+            return None
+        now = time.monotonic()
+        cached = self._cache.get(str(working_dir))
+        if cached is None or now - cached[0] >= self.cache_seconds:
+            status = inspect_linked_checkout(working_dir)
+            value = status.state if status else None
+            self._cache[str(working_dir)] = (now, value)
+        else:
+            value = cached[1]
+        return value
+
+
+class FieldProvider:
+    """Pane-safe provider that reads a semantic value from normalized JSON."""
+
+    def __init__(
+        self,
+        provider_id: str,
+        region: SidebarRegion,
+        *,
+        source: str,
+        path: list[str],
+        default_icons: dict[str, str],
+    ) -> None:
+        if source not in {"session", "activity"}:
+            raise UsageError(
+                f"Sidebar provider {provider_id!r} source must be session or activity."
+            )
+        if not path or not all(isinstance(part, str) and part for part in path):
+            raise UsageError(
+                f"Sidebar provider {provider_id!r} needs a non-empty string path."
+            )
+        self.id = provider_id
+        self.region = region
+        self.source = source
+        self.path = list(path)
+        self.default_icons = dict(default_icons)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "region": self.region,
+            "kind": "field",
+            "source": self.source,
+            "path": list(self.path),
+            "default_icons": dict(self.default_icons),
+        }
+
+    def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
+        value: Any
+        if self.source == "activity":
+            value = StateIO.read_session_activity(state_home, session)
+        else:
+            value = session
+        for part in self.path:
+            if not isinstance(value, dict):
+                return None
+            value = value.get(part)
+        return value if isinstance(value, str) and value else None
+
+
+class SidebarProviderRegistry:
+    """Bundled providers plus `hive_ide.sidebar_providers` entry points."""
+
+    def __init__(self) -> None:
+        self._providers: dict[str, SidebarProvider] = {
+            provider.id: provider
+            for provider in (ActivityProvider(), PlanProvider(), CheckoutProvider())
+        }
+
+    def load_entry_points(self) -> None:
+        discovered = entry_points()
+        selected = (
+            discovered.select(group="hive_ide.sidebar_providers")
+            if hasattr(discovered, "select")
+            else []
+        )
+        for item in selected:
+            self.register(item.load()())
+
+    def register(self, provider: SidebarProvider) -> None:
+        if provider.id in self._providers:
+            raise UsageError(
+                f"Sidebar provider plugin id {provider.id!r} conflicts with an existing provider."
+            )
+        if provider.region not in {"state", "slot"}:
+            raise UsageError(
+                f"Sidebar provider {provider.id!r} has invalid region {provider.region!r}."
+            )
+        snapshot = provider.snapshot()
+        if snapshot.get("kind") != "field":
+            raise UsageError(
+                f"External sidebar provider {provider.id!r} must normalize to a field provider."
+            )
+        self._providers[provider.id] = provider
+
+    def register_field(self, provider_id: str, definition: dict[str, Any]) -> None:
+        if not isinstance(definition, dict):
+            raise UsageError(
+                f"Sidebar provider definition {provider_id!r} must be an object."
+            )
+        region = definition.get("region")
+        if region not in {"state", "slot"}:
+            raise UsageError(
+                f"Sidebar provider {provider_id!r} has invalid region {region!r}."
+            )
+        icons = definition.get("icons") or {}
+        if not isinstance(icons, dict):
+            raise UsageError(
+                f"Sidebar provider {provider_id!r} icons must be an object."
+            )
+        self.register(
+            FieldProvider(
+                provider_id,
+                region,
+                source=definition.get("source") or "session",
+                path=definition.get("path") or [],
+                default_icons=icons,
+            )
+        )
+
+    def get(self, provider_id: str, region: SidebarRegion | None = None) -> SidebarProvider:
+        try:
+            provider = self._providers[provider_id]
+        except KeyError as exc:
+            known = ", ".join(sorted(self._providers))
+            raise UsageError(
+                f"Unknown sidebar provider {provider_id!r}. Available: {known}."
+            ) from exc
+        if region is not None and provider.region != region:
+            raise UsageError(
+                f"Sidebar provider {provider_id!r} belongs in {provider.region}, not {region}."
+            )
+        return provider
+
+    def ids(self) -> list[str]:
+        return sorted(self._providers)
+
+    def snapshot(self, provider_ids: list[str]) -> dict[str, dict[str, Any]]:
+        return {
+            provider_id: self.get(provider_id).snapshot()
+            for provider_id in provider_ids
+        }
+
+    @classmethod
+    def from_snapshot(
+        cls, definitions: dict[str, Any]
+    ) -> "SidebarProviderRegistry":
+        registry = cls()
+        for provider_id, definition in definitions.items():
+            if not isinstance(definition, dict):
+                raise UsageError(
+                    f"Sidebar provider snapshot {provider_id!r} must be an object."
+                )
+            if definition.get("kind") == "builtin":
+                registry.get(provider_id, definition.get("region"))
+                continue
+            if definition.get("kind") != "field":
+                raise UsageError(
+                    f"Sidebar provider {provider_id!r} has unknown snapshot kind."
+                )
+            if provider_id in registry._providers:
+                raise UsageError(
+                    f"Sidebar provider snapshot {provider_id!r} conflicts with a builtin."
+                )
+            registry.register(
+                FieldProvider(
+                    provider_id,
+                    definition.get("region"),
+                    source=definition.get("source"),
+                    path=definition.get("path") or [],
+                    default_icons=definition.get("default_icons") or {},
+                )
+            )
+        return registry

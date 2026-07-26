@@ -1,0 +1,14 @@
+.venv-dev/
+.venv-stable/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.state_local/
+temp/
+.env
+.env.*

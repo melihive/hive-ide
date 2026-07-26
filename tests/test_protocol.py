@@ -1,0 +1,903 @@
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from hive_ide import PROTOCOL_VERSION, SCHEMA_VERSION
+from hive_ide.activity import IdeActivity
+from hive_ide.adapters import (
+    DefaultCommandSurface,
+    DefaultPlanAdapter,
+    DefaultWorkspaceAdapter,
+)
+from hive_ide.cli import main
+from hive_ide.config import _editor_argv
+from hive_ide.drivers import bundled_drivers
+from hive_ide.errors import SchemaVersionError, UsageError
+from hive_ide.environments import EnvironmentManager, managed_interpreter
+from hive_ide.frame import Frame
+from hive_ide.hook import IdeHook
+from hive_ide.hooks import HookInstaller
+from hive_ide.seen import IdeSeen
+from hive_ide.sidebar import IdeSidebar
+from hive_ide.source import resolve_source
+from hive_ide.store import StateStore
+
+
+def _source() -> dict:
+    return {"kind": "stable", "interpreter": sys.executable, "version": "test"}
+
+
+def _term() -> dict:
+    return bundled_drivers()["term"].resolve(
+        name="TEST", working_dir=str(Path.cwd()), conversation_reference=None
+    )
+
+
+def test_store_is_workspace_scoped_and_id_keyed(tmp_path):
+    first = StateStore(tmp_path, tmp_path / "one")
+    second = StateStore(tmp_path, tmp_path / "two")
+    record = first.create_session(
+        name="TEST",
+        working_dir=tmp_path,
+        source=_source(),
+        driver=_term(),
+    )
+
+    assert first.find_session(record["id"])["name"] == "TEST"
+    assert second.list("sessions") == []
+    assert first.path("sessions", record["id"]).is_file()
+    assert not list(first.collection("sessions").glob("*.tmp"))
+
+
+def test_rename_archive_and_resume_keep_the_same_id_path(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BEFORE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    session_id = record["id"]
+    active_path = store.path("sessions", session_id)
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            store.workspace_key,
+            "rename",
+            "--session-id",
+            session_id,
+            "--name",
+            "AFTER",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert active_path.is_file()
+    assert store.find_session(session_id)["name"] == "AFTER"
+    assert {path.name for path in store.collection("sessions").glob("*.json")} == {
+        f"{session_id}.json"
+    }
+
+    store.archive_session(session_id)
+    assert not active_path.exists()
+    assert store.path("archive", session_id).is_file()
+    store.resume_session(session_id)
+    assert active_path.is_file()
+    assert not store.path("archive", session_id).exists()
+    assert store.find_session(session_id)["name"] == "AFTER"
+
+
+def test_store_refuses_incompatible_schema(tmp_path):
+    store = StateStore(tmp_path, tmp_path / "workspace")
+    path = store.path("sessions", "bad")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION + 1,
+                "workspace_key": store.workspace_key,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SchemaVersionError):
+        store.read("sessions", "bad")
+
+
+def test_missing_config_uses_safe_defaults(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    missing = tmp_path / "does-not-exist.json"
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--config",
+            str(missing),
+            "--workspace-key",
+            str(workspace),
+            "create",
+            "--name",
+            "DEFAULTS",
+            "--driver",
+            "term",
+        ]
+    ) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["driver"]["id"] == "term"
+    assert record["source"]["kind"] == "stable"
+
+
+def test_editor_resolution_is_custom_then_micro_then_less(monkeypatch):
+    monkeypatch.setenv("HIVE_IDE_EDITOR", "nvim --clean")
+    assert _editor_argv({}) == ["nvim", "--clean"]
+    assert _editor_argv({"editor": ["vim", "-f"]}) == ["vim", "-f"]
+
+    monkeypatch.delenv("HIVE_IDE_EDITOR")
+    monkeypatch.setattr("hive_ide.config.shutil.which", lambda name: "/bin/micro")
+    assert _editor_argv({}) == ["micro"]
+    monkeypatch.setattr("hive_ide.config.shutil.which", lambda name: None)
+    assert _editor_argv({}) == ["less"]
+
+
+def test_bundled_driver_capabilities_are_explicit():
+    drivers = bundled_drivers()
+    assert set(drivers) == {"claude", "codex", "antigravity", "term"}
+    assert drivers["claude"].resolve(
+        name="X", working_dir="/tmp", conversation_reference="abc"
+    )["launch_argv"] == ["claude", "--resume", "abc"]
+    assert drivers["codex"].resolve(
+        name="X", working_dir="/tmp", conversation_reference="abc"
+    )["launch_argv"] == ["codex", "resume", "abc"]
+    assert drivers["antigravity"].resolve(
+        name="X", working_dir="/tmp", conversation_reference="continue"
+    )["resume"]["strategy"] == "workspace_continue"
+    assert drivers["term"].resolve(
+        name="X", working_dir="/tmp", conversation_reference=None
+    )["capabilities"] == ["launch"]
+
+
+def test_frame_internal_commands_use_isolated_modules(tmp_path):
+    store = StateStore(tmp_path, tmp_path / "workspace")
+    frame = Frame(store)
+    command = frame._module("sidebar", ["--example"])
+    assert " -I -m hive_ide.sidebar " in f" {command} "
+    assert "hive-ide" not in shlex.split(command)[1:]
+    sidebar = frame._sidebar_command(
+        {
+            "id": "abc",
+            "name": "TEST",
+            "working_dir": store.workspace_key,
+            "source": {"interpreter": sys.executable},
+        }
+    )
+    assert "--state-home" in sidebar
+    assert "--workspace-key" in sidebar
+    assert "--session-id abc" in sidebar
+
+
+def test_cli_runs_in_isolated_mode():
+    result = subprocess.run(
+        [sys.executable, "-I", "-m", "hive_ide.cli", "version"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    document = json.loads(result.stdout)
+    assert document["protocol_version"] == PROTOCOL_VERSION
+    assert document["schema_version"] == SCHEMA_VERSION
+
+
+def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["codex"]
+    record = store.create_session(
+        name="HOOK",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="HOOK", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "waiting",
+            "--driver",
+            "codex",
+            '{"thread-id":"conversation-1"}',
+        ]
+    ) == 0
+    status = store.read("status", record["id"])
+    assert status["state"] == "waiting"
+    assert status["conversation_reference"] == "conversation-1"
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["resume"]["reference"] == "conversation-1"
+    assert updated["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "conversation-1",
+    ]
+
+
+def test_hook_identity_survives_display_name_change(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BEFORE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    record["name"] = "AFTER"
+    store.write("sessions", record["id"], record)
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_SESSION", "BEFORE")
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "term",
+            "{}",
+        ]
+    ) == 0
+    status = store.read("status", record["id"])
+    assert status["session_id"] == record["id"]
+    assert store.find_session(record["id"])["name"] == "AFTER"
+
+
+def test_compaction_hooks_set_and_clear_activity(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="COMPACT",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+
+    common = [
+        "--state-home",
+        str(store.home),
+        "--driver",
+        "term",
+    ]
+    assert IdeHook.main([*common, "--activity", "compacting"]) == 0
+    activity = store.read("activity", record["id"])
+    assert activity["kind"] == "compacting"
+    assert activity["state"] == "running"
+    assert activity["label"] == "Compacting context"
+
+    assert IdeHook.main([*common, "--activity", "clear"]) == 0
+    assert store.read("activity", record["id"]) is None
+
+
+def test_current_plan_and_conversation_mutations_are_id_targeted(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="TARGET",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir()
+    plan.write_text("# Example\n", encoding="utf-8")
+
+    assert main(["current"]) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == record["id"]
+
+    assert main(
+        [
+            "plan-set",
+            f"--session-id={record['id']}",
+            "--path=plans/example.md",
+            "--active-task=Build",
+        ]
+    ) == 0
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["plan"] == {
+        "path": "plans/example.md",
+        "active_task": "Build",
+    }
+
+    assert main(
+        [
+            "attach-conversation",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+            "--reference=conversation-1",
+        ]
+    ) == 0
+    attached = json.loads(capsys.readouterr().out)
+    assert attached["id"] == record["id"]
+    assert attached["driver"]["resume"]["reference"] == "conversation-1"
+    assert attached["driver"]["launch_argv"] == ["codex", "resume", "conversation-1"]
+
+
+def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {})
+    monkeypatch.setenv("HIVE_IDE_EDITOR", "editor --wait")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
+    result = frame.current_plan(record)
+
+    assert result["opened"] == "terminal"
+    assert calls == [(["editor", "--wait", str(plan)], {})]
+
+
+def test_current_chat_uses_recorded_resume_command_outside_frame(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {})
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
+    result = frame.current_chat(record)
+
+    assert result == {
+        "session_id": record["id"],
+        "driver": "codex",
+        "opened": "terminal",
+    }
+    assert calls == [
+        (
+            ["codex", "resume", "conversation-1"],
+            {"cwd": str(workspace)},
+        )
+    ]
+
+
+def test_purge_requires_confirmation_and_removes_all_session_state(
+    tmp_path, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PURGE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    base = [
+        "--state-home",
+        str(store.home),
+        "--workspace-key",
+        store.workspace_key,
+        "purge",
+        f"--session-id={record['id']}",
+        "--tmux-socket=hive-ide-test-purge",
+    ]
+
+    assert main(base) == 2
+    assert "requires --confirm" in capsys.readouterr().err
+    assert store.find_session(record["id"]) is not None
+
+    store.write(
+        "status",
+        record["id"],
+        {
+            "schema_version": 1,
+            "workspace_key": store.workspace_key,
+            "session_id": record["id"],
+        },
+    )
+    assert main([*base, "--confirm"]) == 0
+    assert json.loads(capsys.readouterr().out)["purged"] is True
+    assert all(
+        not store.path(collection, record["id"]).exists()
+        for collection in store.COLLECTIONS
+    )
+
+
+def test_workspace_lock_serializes_cli_mutations(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    env = dict(os.environ)
+    env["HIVE_IDE_CONFIG"] = str(tmp_path / "missing-config.json")
+    command = [
+        sys.executable,
+        "-I",
+        "-m",
+        "hive_ide.cli",
+        "--state-home",
+        str(store.home),
+        "--workspace-key",
+        store.workspace_key,
+        "create",
+        "--name=LOCKED",
+        "--driver=term",
+        f"--source={sys.executable}",
+    ]
+
+    with store.mutation_lock():
+        process = subprocess.Popen(
+            command,
+            cwd=workspace,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.2)
+        assert process.poll() is None
+
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr
+    assert json.loads(stdout)["name"] == "LOCKED"
+
+
+def test_seen_acknowledges_waiting_status(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="SEEN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    store.write(
+        "status",
+        record["id"],
+        {
+            "schema_version": 1,
+            "session_id": record["id"],
+            "workspace_key": store.workspace_key,
+            "state": "waiting",
+            "driver": "term",
+            "conversation_reference": None,
+            "observed_at": "2026-07-23T00:00:00+00:00",
+        },
+    )
+    assert IdeSeen.mark(store.home, store.workspace_key, record["id"])
+    assert store.read("status", record["id"])["state"] == "idle"
+
+
+def test_activity_is_environment_gated(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="ACTIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    for key in ("HIVE_IDE_STATE_HOME", "HIVE_IDE_WORKSPACE_KEY", "HIVE_IDE_SESSION_ID"):
+        monkeypatch.delenv(key, raising=False)
+    assert not IdeActivity.mark(IdeActivity.KIND_TASK)
+
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    assert IdeActivity.mark(IdeActivity.KIND_TASK, label="Tests")
+    assert store.read("activity", record["id"])["label"] == "Tests"
+    assert IdeActivity.clear()
+
+
+def test_default_adapters_are_complete_noops(tmp_path):
+    workspace = DefaultWorkspaceAdapter().resolve(tmp_path)
+    assert workspace.key == str(tmp_path.resolve())
+    plan = DefaultPlanAdapter().resolve(None, workspace)
+    assert plan == {"path": None, "active_task": None}
+    assert DefaultPlanAdapter().active_task(plan) is None
+    assert DefaultCommandSurface().before_create(workspace, "TEST") is None
+    assert DefaultCommandSurface().after_archive({}) is None
+
+
+def test_create_uses_the_configured_default_source(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "default_source": "dev",
+                "sources": {"dev": {"interpreter": sys.executable}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(
+        [
+            "--state-home",
+            str(tmp_path / "state"),
+            "--config",
+            str(config),
+            "--workspace-key",
+            str(workspace),
+            "create",
+            "--name=DEV DEFAULT",
+            "--driver=term",
+        ]
+    ) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["source"]["kind"] == "dev"
+
+
+def test_explicit_source_is_validated_in_isolated_mode():
+    source = resolve_source(
+        sys.executable, {}, default_interpreter="/not-used"
+    )
+    assert source["kind"] == "explicit"
+    assert source["interpreter"] == sys.executable
+
+
+def test_environment_setup_creates_stable_and_editable_dev(monkeypatch, tmp_path):
+    calls = []
+    manager = EnvironmentManager(tmp_path / "envs")
+    dev = tmp_path / "checkout"
+    dev.mkdir()
+    (dev / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+
+    def fake_run(argv, *, purpose):
+        calls.append((argv, purpose))
+        if argv[1:3] == ["-m", "venv"]:
+            target = Path(argv[-1])
+            (target / "bin").mkdir(parents=True)
+            (target / "bin" / "python").touch()
+
+    monkeypatch.setattr(manager, "_run", fake_run)
+    monkeypatch.setattr(
+        "hive_ide.environments.inspect_interpreter",
+        lambda interpreter: {
+            "interpreter": str(interpreter),
+            "package_version": "1.2.3",
+        },
+    )
+    result = manager.setup(stable_spec="hive-ide==1.2.3", dev_checkout=dev)
+
+    assert result["stable"]["interpreter"] == str(
+        managed_interpreter("stable", manager.home)
+    )
+    assert result["dev"]["editable"] is True
+    installs = [argv for argv, _ in calls if "pip" in argv]
+    assert installs == [
+        [
+            str(managed_interpreter("stable", manager.home)),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "hive-ide==1.2.3",
+        ],
+        [
+            str(managed_interpreter("dev", manager.home)),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--editable",
+            str(dev),
+        ],
+    ]
+
+
+def test_environment_setup_force_refreshes_local_artifacts(monkeypatch, tmp_path):
+    manager = EnvironmentManager(tmp_path / "envs")
+    interpreter = tmp_path / "envs" / "stable" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+    wheel = tmp_path / "hive_ide-0.1.0.dev0-py3-none-any.whl"
+    wheel.touch()
+    calls = []
+
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, *, purpose: calls.append((argv, purpose)),
+    )
+    monkeypatch.setattr(
+        "hive_ide.environments.inspect_interpreter",
+        lambda selected: {
+            "interpreter": str(selected),
+            "package_version": "0.1.0.dev0",
+        },
+    )
+
+    manager.install("stable", str(wheel))
+    assert calls[0][0] == [
+        str(interpreter),
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--force-reinstall",
+        str(wheel),
+    ]
+
+
+def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "stable": {"interpreter": "/managed/stable/python"},
+                    "dev": {"interpreter": "/managed/dev/python"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = StateStore(state, workspace)
+    first = store.create_session(
+        name="FIRST",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "/managed/stable/python", "version": "1"},
+        driver=_term(),
+    )
+    second = store.create_session(
+        name="SECOND",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "/managed/stable/python", "version": "1"},
+        driver=_term(),
+    )
+    second_path = store.path("sessions", second["id"])
+    untouched = second_path.read_bytes()
+    rebuilt = []
+    monkeypatch.setattr(
+        "hive_ide.source.inspect_interpreter",
+        lambda interpreter: {
+            "interpreter": interpreter,
+            "package_version": "2" if "dev" in interpreter else "1",
+        },
+    )
+    monkeypatch.setattr(
+        "hive_ide.cli.Frame.rebuild",
+        lambda _frame, record: rebuilt.append(record["id"]),
+    )
+
+    common = [
+        "--state-home",
+        str(state),
+        "--config",
+        str(config),
+        "--workspace-key",
+        str(workspace),
+        "source-set",
+        "--session-id",
+        first["id"],
+    ]
+    assert main([*common, "--source", "dev"]) == 0
+    capsys.readouterr()
+    assert store.find_session(first["id"])["source"] == {
+        "kind": "dev",
+        "interpreter": "/managed/dev/python",
+        "version": "2",
+    }
+    assert second_path.read_bytes() == untouched
+
+    assert main([*common, "--source", "stable"]) == 0
+    capsys.readouterr()
+    assert store.find_session(first["id"])["source"]["kind"] == "stable"
+    assert second_path.read_bytes() == untouched
+    assert rebuilt == [first["id"], first["id"]]
+
+
+def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    stable = tmp_path / "stable" / "bin" / "python"
+    stable.parent.mkdir(parents=True)
+    stable.touch()
+    claude = home / ".claude" / "settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "echo keep"},
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        "/old/python -I -m hive_ide.hook "
+                                        "--state waiting --driver claude || true"
+                                    ),
+                                },
+                            ]
+                        }
+                    ]
+                },
+                "other": {"kept": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hive_ide.hooks.inspect_interpreter",
+        lambda _interpreter: {
+            "interpreter": str(stable),
+            "package_version": "1.2.3",
+        },
+    )
+    installer = HookInstaller(
+        home=home,
+        stable_python=stable,
+        selected_state_home=tmp_path / "state",
+    )
+
+    preview = installer.setup(apply=False)
+    assert len(preview["changes"]) == 2
+    assert not (home / ".codex" / "hooks.json").exists()
+    assert json.loads(claude.read_text(encoding="utf-8"))["other"] == {"kept": True}
+
+    applied = installer.setup(apply=True)
+    assert len(applied["changes"]) == 2
+    assert applied["codex_trust_required"] is True
+    merged = json.loads(claude.read_text(encoding="utf-8"))
+    commands = [
+        handler["command"]
+        for groups in merged["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ]
+    assert "echo keep" in commands
+    assert not any("/old/python" in command for command in commands)
+    assert all(
+        command.endswith("|| true")
+        for command in commands
+        if "-m hive_ide.hook" in command
+    )
+    precompact_commands = [
+        handler["command"]
+        for group in merged["hooks"]["PreCompact"]
+        for handler in group["hooks"]
+    ]
+    assert any("--activity compacting" in command for command in precompact_commands)
+    assert merged["other"] == {"kept": True}
+    assert claude.with_suffix(".json.hive-ide.bak").is_file()
+    assert installer.setup(apply=True)["changes"] == []
+    assert installer.verify() == []
+    merged["hooks"].pop("Notification")
+    claude.write_text(json.dumps(merged), encoding="utf-8")
+    assert any("Notification" in finding for finding in installer.verify())
+
+
+def test_hook_setup_rejects_malformed_existing_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    path = home / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{", encoding="utf-8")
+    stable = tmp_path / "python"
+    stable.touch()
+    monkeypatch.setattr(
+        "hive_ide.hooks.inspect_interpreter",
+        lambda _interpreter: {
+            "interpreter": str(stable),
+            "package_version": "1.2.3",
+        },
+    )
+    installer = HookInstaller(home=home, stable_python=stable)
+    with pytest.raises(UsageError, match="not valid JSON"):
+        installer.setup(apply=False)
+
+
+def test_hook_verify_reports_a_missing_stable_interpreter(tmp_path):
+    findings = HookInstaller(
+        home=tmp_path / "home",
+        stable_python=tmp_path / "missing" / "python",
+    ).verify()
+    assert len(findings) == 1
+    assert "not executable" in findings[0]
+
+
+def test_skill_definition_installs_to_an_explicit_target(tmp_path, capsys):
+    target = tmp_path / "skills" / "hive-ide" / "SKILL.md"
+    assert main(["skill-install", "--target", str(target)]) == 0
+    assert target.is_file()
+    assert "name: hive-ide" in target.read_text(encoding="utf-8")
+    assert json.loads(capsys.readouterr().out)["installed"] == str(target)
+
+
+def test_session_error_has_sidebar_priority(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="ERROR",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    store.write(
+        "errors",
+        record["id"],
+        {
+            "schema_version": 1,
+            "workspace_key": store.workspace_key,
+            "session_id": record["id"],
+            "component": "driver:test",
+            "summary": "failed",
+            "detail": "",
+            "retryable": True,
+            "recovery": "retry",
+            "observed_at": "2026-07-23T00:00:00+00:00",
+        },
+    )
+    legacy = {**record, "repo": store.workspace_key}
+    assert IdeSidebar._status_dot(store.home, legacy)[0] == "!"
