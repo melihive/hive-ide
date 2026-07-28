@@ -12,7 +12,7 @@ ESC cancels the whole modal at any point. The driver has a sensible default.
 Stdlib only (like `ide_sidebar`/`ide_nav`); raw cbreak input, so it must not boot the
 foreground runtime during input. The final action invokes the public package CLI.
 
-usage: python3 -I ide_newmodal.py <skill_dir> <repo>
+usage: python -m hive_ide.newmodal --state-home <state> --workspace-key <repo>
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .python_cmd import PythonCommand
 from .state_compat import StateIO
 
 try:                       # POSIX only (tmux is Unix); keep importable elsewhere
@@ -127,17 +128,16 @@ class IdeNewModal:
     def _cli(skill_dir: Path, args: list[str]) -> tuple[bool, str]:
         """Run a public CLI mutation and capture output for the modal."""
         try:
-            command = [
-                sys.executable,
-                "-I",
-                "-m",
-                "hive_ide.cli",
-                "--state-home",
-                str(skill_dir),
-                "--workspace-key",
-                IdeNewModal._workspace_key,
-                *args,
-            ]
+            command = PythonCommand.cli_argv(
+                [
+                    "--state-home",
+                    str(skill_dir),
+                    "--workspace-key",
+                    IdeNewModal._workspace_key,
+                    *args,
+                ],
+                python=sys.executable,
+            )
             p = subprocess.run(
                 command,
                 cwd=IdeNewModal._workspace_key,

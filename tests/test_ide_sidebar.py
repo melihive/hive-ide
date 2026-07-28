@@ -310,7 +310,7 @@ def test_selected_current_row_uses_the_quiet_original_palette():
     assert "48;5;46" not in IdeSidebar.SEL_CUR
 
 
-def test_mutations_use_the_public_isolated_module(tmp_path, monkeypatch):
+def test_mutations_use_the_selected_python_module(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     IdeSidebar._repo_hint = str(workspace)
@@ -320,7 +320,7 @@ def test_mutations_use_the_public_isolated_module(tmp_path, monkeypatch):
 
     assert IdeSidebar._cli(tmp_path, ["ensure", "--session-id=session-id"]) is True
     assert seen["cwd"] == str(workspace)
-    assert seen["argv"][:4] == [sys.executable, "-I", "-m", "hive_ide.cli"]
+    assert seen["argv"][:3] == [sys.executable, "-m", "hive_ide.cli"]
     assert seen["argv"][-2:] == ["ensure", "--session-id=session-id"]
 
 

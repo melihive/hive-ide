@@ -176,7 +176,7 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
                 ("1", "agent", "0"),
                 ("2", "plan", "0"),
             ]
-            assert f"{sys.executable} -I -m hive_ide.sidebar" in rows[0][3]
+            assert f"{sys.executable} -m hive_ide.sidebar" in rows[0][3]
             assert all("unset NO_COLOR;" in row[3] for row in rows)
 
         frame.tmux(["set-environment", "-g", "NO_COLOR", "1"])

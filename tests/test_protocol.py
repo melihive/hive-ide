@@ -27,6 +27,7 @@ from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
 from hive_ide.hooks import HookInstaller
 from hive_ide.info import _card, _keys
+from hive_ide.python_cmd import PythonCommand
 from hive_ide.seen import IdeSeen
 from hive_ide.sidebar import IdeSidebar
 from hive_ide.source import resolve_source
@@ -172,11 +173,12 @@ def test_bundled_driver_capabilities_are_explicit():
     )["capabilities"] == ["launch"]
 
 
-def test_frame_internal_commands_use_isolated_modules(tmp_path):
+def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
     store = StateStore(tmp_path, tmp_path / "workspace")
     frame = Frame(store)
     command = frame._module("sidebar", ["--example"])
-    assert " -I -m hive_ide.sidebar " in f" {command} "
+    assert " -m hive_ide.sidebar " in f" {command} "
+    assert " -I " not in f" {command} "
     assert "hive-ide" not in shlex.split(command)[1:]
     sidebar = frame._sidebar_command(
         {
@@ -191,9 +193,9 @@ def test_frame_internal_commands_use_isolated_modules(tmp_path):
     assert "--session-id abc" in sidebar
 
 
-def test_cli_runs_in_isolated_mode():
+def test_cli_runs_from_normal_python_environment():
     result = subprocess.run(
-        [sys.executable, "-I", "-m", "hive_ide.cli", "version"],
+        [sys.executable, "-m", "hive_ide.cli", "version"],
         capture_output=True,
         text=True,
     )
@@ -201,6 +203,18 @@ def test_cli_runs_in_isolated_mode():
     document = json.loads(result.stdout)
     assert document["protocol_version"] == PROTOCOL_VERSION
     assert document["schema_version"] == SCHEMA_VERSION
+
+
+def test_python_command_centralizes_internal_launch_policy():
+    assert PythonCommand.cli_argv(["version"], python="/py") == [
+        "/py",
+        "-m",
+        "hive_ide.cli",
+        "version",
+    ]
+    command = PythonCommand.module_command("sidebar", ["--example"], python="/py")
+    assert command == "/py -m hive_ide.sidebar --example"
+    assert " -I " not in f" {command} "
 
 
 def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
@@ -576,7 +590,6 @@ def test_workspace_lock_serializes_cli_mutations(tmp_path):
     env["HIVE_IDE_CONFIG"] = str(tmp_path / "missing-config.json")
     command = [
         sys.executable,
-        "-I",
         "-m",
         "hive_ide.cli",
         "--state-home",
@@ -879,7 +892,7 @@ def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):
                                 {
                                     "type": "command",
                                     "command": (
-                                        "/old/python -I -m hive_ide.hook "
+                                        "/old/python -m hive_ide.hook "
                                         "--state waiting --driver claude || true"
                                     ),
                                 },

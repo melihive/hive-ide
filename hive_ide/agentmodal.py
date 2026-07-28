@@ -14,7 +14,7 @@ piece of subtle input logic (the arrow-vs-Escape peek) lives in exactly one plac
 Stdlib only (like `ide_newmodal`); raw cbreak input, so it must not boot the foreground
 runtime. The final action invokes the public package CLI.
 
-usage: python3 -I ide_agentmodal.py <skill_dir> <repo> <window>
+usage: python -m hive_ide.agentmodal --state-home <state> --workspace-key <repo> --session-id <id>
 """
 from __future__ import annotations
 

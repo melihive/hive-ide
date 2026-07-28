@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import shlex
 import subprocess
 import sys
+
+from .python_cmd import PythonCommand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,12 +32,9 @@ def main(argv: list[str] | None = None) -> int:
         "keys": ("62%", "52%"),
     }
     module = modules[args.kind]
-    command = shlex.join(
+    command = PythonCommand.module_command(
+        module,
         [
-            sys.executable,
-            "-I",
-            "-m",
-            f"hive_ide.{module}",
             *(
                 ["--kind", args.kind]
                 if args.kind in {"card", "keys"}
@@ -53,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.tmux_socket and args.kind == "agent"
                 else []
             ),
-        ]
+        ],
+        python=sys.executable,
     )
     width, height = sizes[args.kind]
     tmux = ["tmux"]

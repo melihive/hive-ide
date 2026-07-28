@@ -10,23 +10,24 @@ from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION
 from .errors import UsageError
+from .python_cmd import PythonCommand
 
 
 def inspect_interpreter(interpreter: str | Path) -> dict[str, Any]:
     # Preserve a venv's executable path. Resolving its symlink to /usr/bin/python
-    # discards the environment that contains hive_ide, so isolated import then fails.
+    # discards the environment that contains hive_ide.
     path = str(Path(interpreter).expanduser().absolute())
     if not os.access(path, os.X_OK):
         raise UsageError(f"Selected interpreter is not executable: {path}")
     result = subprocess.run(
-        [path, "-I", "-m", "hive_ide.cli", "version"],
+        PythonCommand.cli_argv(["version"], python=path),
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         raise UsageError(
-            f"Interpreter {path} cannot import hive_ide in isolated mode. "
-            "Install the package into that environment."
+            f"Interpreter {path} cannot import hive_ide. Install the package into "
+            "that environment."
         )
     try:
         document = json.loads(result.stdout)
@@ -62,10 +63,7 @@ def resolve_source(
             else configured
         )
         if not interpreter:
-            from .environments import managed_interpreter
-
-            managed = managed_interpreter("stable")
-            interpreter = str(managed) if managed.is_file() else default_interpreter
+            interpreter = default_interpreter
         kind = "stable"
     elif requested == "dev":
         configured = sources.get("dev")

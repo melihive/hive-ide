@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Live, interactive sidebar for the `ide` tmux frame — one instance per window.
 
-Run as a bare, isolated process in each window's left pane (plan D4/D20):
+Run as a bare process in each window's left pane (plan D4/D20):
 
-    python3 -I .skills/_lib/ide_sidebar.py <skill_dir> <repo> <this_window>
+    python3 -m hive_ide.sidebar --state-home <state> --workspace-key <repo>
 
 Stdlib only — it must NOT boot the foreground CLI runtime (a dozen panes doing so
 would waste memory). It re-reads the per-workspace registry via `StateIO`,
@@ -25,7 +25,6 @@ import os
 import argparse
 import re
 import select
-import shlex
 import subprocess
 import sys
 import time
@@ -43,6 +42,7 @@ except ImportError:
 
 from .config import _sidebar_config
 from .layout import IdeLayout
+from .python_cmd import PythonCommand
 from .sidebar_grid import SidebarGrid
 from .sidebar_plugins import SidebarProviderRegistry
 from .state_compat import StateIO
@@ -353,17 +353,16 @@ class IdeSidebar:
         """Run one public CLI mutation in response to a deliberate user action."""
         try:
             r = subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    "-m",
-                    "hive_ide.cli",
-                    "--state-home",
-                    str(skill_dir),
-                    "--workspace-key",
-                    IdeSidebar._repo_hint,
-                    *args,
-                ],
+                PythonCommand.cli_argv(
+                    [
+                        "--state-home",
+                        str(skill_dir),
+                        "--workspace-key",
+                        IdeSidebar._repo_hint,
+                        *args,
+                    ],
+                    python=sys.executable,
+                ),
                 cwd=IdeSidebar._repo_hint,
                 capture_output=True,
                 text=True,
@@ -538,19 +537,17 @@ class IdeSidebar:
         inline name+Tab prompt. Non-blocking: the popup runs in the tmux server, so this
         returns at once and the sidebar keeps repainting underneath until the modal creates
         the session and switches focus to it."""
-        command = shlex.join(
+        command = PythonCommand.module_command(
+            "newmodal",
             [
-                sys.executable,
-                "-I",
-                "-m",
-                "hive_ide.newmodal",
                 "--state-home",
                 str(skill_dir),
                 "--workspace-key",
                 repo,
                 "--tmux-socket",
                 os.environ.get("HIVE_IDE_TMUX_SOCKET", "hive-ide"),
-            ]
+            ],
+            python=sys.executable,
         )
         subprocess.run(
             ["tmux", "display-popup", "-E", "-w", "52%", "-h", "42%",

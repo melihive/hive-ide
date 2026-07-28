@@ -14,6 +14,7 @@ from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .drivers import DriverRegistry
 from .errors import StateError, UsageError
 from .layout import IdeLayout
+from .python_cmd import PythonCommand
 from .sidebar_grid import SidebarGrid
 from .sidebar_plugins import SidebarProviderRegistry
 
@@ -281,7 +282,7 @@ def normalized_snapshot(
         "workspace_key": workspace_key,
         "workspace_hash": workspace_hash,
         "state_home": str(state_home),
-        "command_argv": [sys.executable, "-I", "-m", "hive_ide.cli"],
+        "command_argv": PythonCommand.cli_argv(python=sys.executable),
         "tmux": {
             "socket": socket,
             "sidebar_width": IdeLayout.SIDEBAR_W,

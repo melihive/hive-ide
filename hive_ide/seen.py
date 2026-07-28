@@ -4,7 +4,7 @@
 Invoked by the ide frame's `session-window-changed` tmux hook, which fires whenever
 the repo workspace switches window:
 
-    python3 -I .skills/_lib/ide_seen.py <skill_dir> <repo> <window_name>
+    python -m hive_ide.seen <state_home> <repo> <window_name>
 
 The cyan `waiting` dot is an UNREAD marker: an agent asked for you. Opening the
 session is what answers it, so the dot must clear **and stay cleared** — not

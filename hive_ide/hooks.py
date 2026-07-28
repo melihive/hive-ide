@@ -14,6 +14,7 @@ from typing import Any
 from .environments import managed_interpreter
 from .errors import StateError, UsageError
 from .paths import state_home
+from .python_cmd import PythonCommand
 from .source import inspect_interpreter
 
 
@@ -48,18 +49,18 @@ class HookInstaller:
 
     def command(self, action: tuple[str, str], driver: str) -> str:
         flag, value = action
-        argv = [
-            str(self.stable_python),
-            "-I",
-            "-m",
-            "hive_ide.hook",
-            "--state-home",
-            str(self.state_home),
-            f"--{flag}",
-            value,
-            "--driver",
-            driver,
-        ]
+        argv = PythonCommand.module_argv(
+            "hook",
+            [
+                "--state-home",
+                str(self.state_home),
+                f"--{flag}",
+                value,
+                "--driver",
+                driver,
+            ],
+            python=str(self.stable_python),
+        )
         # A missing stable environment must never turn a status decoration into a
         # prompt-blocking failure.
         return f"{shlex.join(argv)} || true"

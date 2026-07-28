@@ -5,7 +5,7 @@ Bound to `<prefix> n` / `<prefix> p`. Stdlib only, for the same reason as
 `ide_sidebar.py`: booting the foreground CLI on every keypress would be too expensive.
 It reads the normalized registry directly.
 
-usage: python3 -I ide_nav.py <skill_dir> <repo> <socket> next|prev
+usage: python -m hive_ide.nav <state_home> <repo> <socket> next|prev
 """
 from __future__ import annotations
 

@@ -15,6 +15,7 @@ from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
 from .errors import HiveIdeError, UsageError
 from .layout import IdeLayout
+from .python_cmd import PythonCommand
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
 
@@ -108,20 +109,14 @@ class Frame:
         if shutil.which("tmux") is None:
             raise UsageError("tmux is required but was not found on PATH.")
         handshake = subprocess.run(
-            [
-                self.python,
-                "-I",
-                "-m",
-                "hive_ide.cli",
-                "version",
-            ],
+            PythonCommand.cli_argv(["version"], python=self.python),
             capture_output=True,
             text=True,
         )
         if handshake.returncode != 0:
             raise UsageError(
-                "The selected Python interpreter cannot import hive_ide in isolated mode. "
-                "Install the package into that environment; user-site installs are hidden by -I."
+                "The selected Python interpreter cannot import hive_ide. Install the "
+                "package into that environment."
             )
 
     def exists(self) -> bool:
@@ -173,8 +168,8 @@ class Frame:
     def _module(
         self, module: str, args: list[str], *, interpreter: str | None = None
     ) -> str:
-        return shlex.join(
-            [interpreter or self.python, "-I", "-m", f"hive_ide.{module}", *args]
+        return PythonCommand.module_command(
+            module, args, python=interpreter or self.python
         )
 
     def _environment(self, record: dict[str, Any]) -> list[str]:

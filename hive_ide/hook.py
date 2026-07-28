@@ -4,7 +4,7 @@
 Installed into the agent CLIs' own hook config by `ide setup` and invoked by them
 on turn boundaries:
 
-    python3 -I .skills/_lib/ide_hook.py <skill_dir> <state> <agent>
+    python3 -m hive_ide.hook --state-home <state-home> --state <state> --driver <agent>
 
 Payload: claude sends its hook JSON on **stdin**; codex's `notify` passes it as a
 single **argv** JSON string. Both carry `cwd` and a session/thread id.
@@ -36,6 +36,7 @@ import sys
 
 from .config import configured_registry, load_config
 from .paths import config_path
+from .python_cmd import PythonCommand
 from .store import StateStore, utc_now
 
 
@@ -182,17 +183,19 @@ class IdeHook:
             [
                 "env",
                 *env,
-                sys.executable,
-                "-I",
-                "-m",
-                "hive_ide.hook",
-                "--state-home",
-                parsed.state_home,
-                *action,
-                "--driver",
-                parsed.driver,
-                "--relayed",
-                json.dumps(payload, separators=(",", ":")),
+                *PythonCommand.module_argv(
+                    "hook",
+                    [
+                        "--state-home",
+                        parsed.state_home,
+                        *action,
+                        "--driver",
+                        parsed.driver,
+                        "--relayed",
+                        json.dumps(payload, separators=(",", ":")),
+                    ],
+                    python=sys.executable,
+                ),
             ]
         )
         try:
