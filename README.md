@@ -2,7 +2,7 @@
 
 An agent-aware tmux workspace for running coding agents across multiple sessions.
 
-> **Status: alpha.** Commands and state formats may change before 1.0.
+> **Status: stable.** Version 1.x follows semantic versioning for its public interfaces.
 
 ## Requirements
 
