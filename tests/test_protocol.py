@@ -873,6 +873,13 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
     assert second_path.read_bytes() == untouched
     assert rebuilt == [first["id"], first["id"]]
 
+    assert main([*common, "--source", "dev", "--no-rebuild"]) == 0
+    capsys.readouterr()
+    assert store.find_session(first["id"])["source"]["kind"] == "dev"
+    assert store.find_session(first["id"])["last_active"] == first_last_active
+    assert second_path.read_bytes() == untouched
+    assert rebuilt == [first["id"], first["id"]]
+
 
 def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_path, capsys):
     workspace = tmp_path / "workspace"

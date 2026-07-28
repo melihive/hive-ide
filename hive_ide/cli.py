@@ -404,7 +404,7 @@ def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:
         args.source, config, default_interpreter=sys.executable
     )
     store.write("sessions", record["id"], record)
-    if Path(record["working_dir"]).is_dir():
+    if not args.no_rebuild and Path(record["working_dir"]).is_dir():
         Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
     return record
 
@@ -632,6 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--session-id", required=True)
     source.add_argument("--source", required=True)
     source.add_argument("--tmux-socket")
+    source.add_argument("--no-rebuild", action="store_true")
     source.set_defaults(handler=cmd_source_set)
 
     open_command = sub.add_parser("open")
