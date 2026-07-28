@@ -111,6 +111,7 @@ class IdeSidebar:
     # Sentinel for "the click landed on the header `+`". A negative int can never collide
     # with a real session index, so `_click_index` keeps one return type.
     PLUS_HIT = -1
+    ARCHIVE_HIT = -2
     HEADER = "\x1b[1;38;5;250m"   # bold light grey
     ACTIVE = "\x1b[1;38;5;51m"    # bold bright cyan — the current window
     INACTIVE = "\x1b[38;5;252m"
@@ -458,7 +459,12 @@ class IdeSidebar:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     @staticmethod
-    def _click_index(m: re.Match[bytes], entry_rows: int = ENTRY_ROWS) -> int | None:
+    def _click_index(
+        m: re.Match[bytes],
+        entry_rows: int = ENTRY_ROWS,
+        *,
+        archive_row: int | None = None,
+    ) -> int | None:
         """What one SGR mouse report hit: a session index, PLUS_HIT, or None.
 
         `entry_rows` MUST be the value the current draw used (`_entry_rows`), or clicks
@@ -474,13 +480,20 @@ class IdeSidebar:
         row = int(m.group(3)) - 1                              # 1-based row → 0-based
         if row == 0:
             return IdeSidebar.PLUS_HIT
+        if archive_row is not None and row == archive_row:
+            return IdeSidebar.ARCHIVE_HIT
         # Delegated to the geometry owner, which also computes the row the renderer
         # DRAWS each session on. Same arithmetic, both directions, one place — so the
         # wrong-session bug cannot come back by the two drifting apart.
         return IdeLayout.session_at_row(row, entry_rows)
 
     @staticmethod
-    def _drain(buf: bytes, entry_rows: int = ENTRY_ROWS) -> tuple[int | None, int, bytes, bytes]:
+    def _drain(
+        buf: bytes,
+        entry_rows: int = ENTRY_ROWS,
+        *,
+        archive_row: int | None = None,
+    ) -> tuple[int | None, int, bytes, bytes]:
         """Split an input buffer into (last left-click, net wheel delta, key bytes, tail).
 
         One read can coalesce several reports (a wheel or drag landing just before a
@@ -495,7 +508,7 @@ class IdeSidebar:
         for m in IdeSidebar.MOUSE_RE.finditer(buf):
             keys += buf[end:m.start()]
             end = m.end()
-            idx = IdeSidebar._click_index(m, entry_rows)
+            idx = IdeSidebar._click_index(m, entry_rows, archive_row=archive_row)
             if idx is not None:
                 click = idx
             else:
@@ -953,8 +966,12 @@ class IdeSidebar:
                         else IdeSidebar.PARTIAL_SECONDS)
                 ready, _, _ = select.select([fd], [], [], wait)
                 if ready:
-                    click, wheel, data, buf = IdeSidebar._drain(buf + os.read(fd, 64),
-                                                                entry_rows)
+                    archive_row = None if archive_mode else len(lines) - 1
+                    click, wheel, data, buf = IdeSidebar._drain(
+                        buf + os.read(fd, 64),
+                        entry_rows,
+                        archive_row=archive_row,
+                    )
                     if wheel:
                         # The sidebar OWNS the wheel: move the browse cursor. Handling it
                         # here (instead of letting it fall through to tmux) is what stops
@@ -991,6 +1008,8 @@ class IdeSidebar:
                         # in a superseded UI while every other route showed the modal.
                         on_plus, on_filter, on_archive, query, cursor = False, False, False, "", 0
                         IdeSidebar._launch_new_modal(skill_dir, IdeSidebar._repo_of(skill_dir))
+                    elif click == IdeSidebar.ARCHIVE_HIT:
+                        archive_mode, on_archive, on_filter, query, cursor = True, False, False, "", 0
                     elif 0 <= click < len(names):
                         cursor, on_plus, on_filter, on_archive, query = click, False, False, False, ""
                         IdeSidebar._switch(session_ids[cursor], skill_dir)

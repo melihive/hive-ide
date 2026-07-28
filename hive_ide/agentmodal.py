@@ -42,10 +42,10 @@ class IdeAgentModal:
     # ---- switch (testable, no tty) ----
 
     @staticmethod
-    def _switch(skill_dir: Path, session_id: str, kind: str) -> bool:
+    def _switch(skill_dir: Path, session_id: str, kind: str) -> tuple[bool, str]:
         """Shell the switch through the launcher — the same path `pick_agent` uses, so the
         pane respawn/resume logic stays in one place (`switch_agent`)."""
-        ok, _ = IdeNewModal._cli(
+        ok, out = IdeNewModal._cli(
             skill_dir,
             [
                 "switch-driver",
@@ -58,7 +58,7 @@ class IdeAgentModal:
                 ),
             ],
         )
-        return ok
+        return ok, out
 
     @staticmethod
     def _context(skill_dir: Path, argv: list[str]) -> tuple[str, str, str] | None:
@@ -200,7 +200,13 @@ class IdeAgentModal:
             sys.stdout.flush()
         if result is None or result == active:
             return 0                          # cancelled, or picked what's already running
-        return 0 if IdeAgentModal._switch(skill_dir, session_id, result) else 1
+        ok, detail = IdeAgentModal._switch(skill_dir, session_id, result)
+        if ok:
+            return 0
+        return IdeNewModal._bail(
+            "Could not change the agent for this session.",
+            detail or "switch-driver failed without output.",
+        )
 
 
 if __name__ == "__main__":

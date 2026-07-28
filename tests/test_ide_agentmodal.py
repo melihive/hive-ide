@@ -36,16 +36,37 @@ def test_active_is_none_for_missing_session(tmp_path):
 def test_switch_uses_immutable_id(monkeypatch, tmp_path):
     workspace, record = _write(tmp_path)
     IdeNewModal._workspace_key = str(workspace)
+    IdeNewModal._tmux_socket = "live-socket"
     calls = []
     monkeypatch.setattr(
         IdeNewModal,
         "_cli",
         staticmethod(lambda _state, args: (calls.append(args) or (True, ""))),
     )
-    assert IdeAgentModal._switch(tmp_path, record["id"], "term")
+    assert IdeAgentModal._switch(tmp_path, record["id"], "term") == (True, "")
     assert calls == [
-        ["switch-driver", f"--session-id={record['id']}", "--driver=term"]
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=term",
+            "--tmux-socket=live-socket",
+        ]
     ]
+    IdeNewModal._tmux_socket = ""
+
+
+def test_switch_returns_failure_detail(monkeypatch, tmp_path):
+    workspace, record = _write(tmp_path)
+    IdeNewModal._workspace_key = str(workspace)
+    monkeypatch.setattr(
+        IdeNewModal,
+        "_cli",
+        staticmethod(lambda _state, _args: (False, "driver unavailable")),
+    )
+    assert IdeAgentModal._switch(tmp_path, record["id"], "claude") == (
+        False,
+        "driver unavailable",
+    )
 
 
 def test_agent_modal_reuses_new_modal_driver_list():
@@ -74,7 +95,7 @@ def test_fourth_driver_can_be_selected_by_digit(monkeypatch, tmp_path):
         "_switch",
         staticmethod(
             lambda _state, session_id, driver: (
-                selected.update(session_id=session_id, driver=driver) or True
+                selected.update(session_id=session_id, driver=driver) or (True, "")
             )
         ),
     )

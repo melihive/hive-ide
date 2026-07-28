@@ -410,6 +410,11 @@ def test_click_index_uses_the_row_count_that_was_rendered():
     # header row is always the `+` button, whatever the density
     assert IdeSidebar._click_index(_report(0, 1), 2) == IdeSidebar.PLUS_HIT
     assert IdeSidebar._click_index(_report(0, 1), 1) == IdeSidebar.PLUS_HIT
+    # active footer row is a real clickable control, not part of the session list
+    assert (
+        IdeSidebar._click_index(_report(0, 12), 2, archive_row=11)
+        == IdeSidebar.ARCHIVE_HIT
+    )
 
 
 def test_wheel_delta_decodes_scroll_and_ignores_clicks():
@@ -430,6 +435,18 @@ def test_drain_accumulates_wheel_and_still_returns_keys():
     assert click is None
     assert wheel == -1         # down(-1) + down(-1) + up(+1), natural direction
     assert keys == b"x"
+    assert tail == b""
+
+
+def test_drain_maps_archive_footer_click():
+    click, wheel, keys, tail = IdeSidebar._drain(
+        b"\x1b[<0;3;12M",
+        2,
+        archive_row=11,
+    )
+    assert click == IdeSidebar.ARCHIVE_HIT
+    assert wheel == 0
+    assert keys == b""
     assert tail == b""
 
 
