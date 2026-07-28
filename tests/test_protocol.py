@@ -144,6 +144,36 @@ def test_missing_config_uses_safe_defaults(tmp_path, capsys):
     assert record["source"]["kind"] == "stable"
 
 
+def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+
+    def fake_open(self, *, no_attach=False):
+        return {"opened": len(self.store.list("sessions")), "no_attach": no_attach}
+
+    monkeypatch.setattr("hive_ide.cli.Frame.open", fake_open)
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "open",
+            "--no-attach",
+        ]
+    ) == 0
+    opened = json.loads(capsys.readouterr().out)
+    store = StateStore(state, workspace)
+    sessions = store.list("sessions")
+    assert opened == {"opened": 1, "no_attach": True}
+    assert len(sessions) == 1
+    assert sessions[0]["name"] == "workspace"
+    assert sessions[0]["working_dir"] == str(workspace)
+    assert sessions[0]["driver"]["id"] == "term"
+
+
 def test_editor_resolution_is_custom_then_micro_then_less(monkeypatch):
     monkeypatch.setenv("HIVE_IDE_EDITOR", "nvim --clean")
     assert _editor_argv({}) == ["nvim", "--clean"]

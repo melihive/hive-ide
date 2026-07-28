@@ -12,19 +12,20 @@ Unix (Linux/macOS), `tmux`, and Python 3.10+.
 
 ```sh
 python3 -m pip install hive-ide
-hive-ide create --name=MAIN --driver=term
 hive-ide open
 ```
 
 Bundled drivers are `claude`, `codex`, `antigravity`, and `term`. State is user-local and
 directory-scoped. Agent drivers require their corresponding local command; `term` opens a
-regular shell.
+regular shell. On first open, `hive-ide` creates a default session for the current directory.
+It uses `term` by default so the IDE opens without any agent installed. Set a configured
+default driver or pass `--driver=codex|claude|antigravity` when you want an agent session.
 
 An existing Git worktree is just a session working directory. The IDE attaches to it but
 never creates, merges, or removes it:
 
 ```sh
-hive-ide create --name=FEATURE --driver=codex --working-dir=../project-feature
+hive-ide open --driver=codex --working-dir=../project-feature
 hive-ide working-dir-set --session-id=<ID> --working-dir=../project-feature
 ```
 

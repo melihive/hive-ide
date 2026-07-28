@@ -62,25 +62,62 @@ def _context(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any]]:
 
 def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
+    return _create_session(
+        store,
+        config,
+        name=args.name,
+        driver_id=args.driver,
+        working_dir=args.working_dir,
+        plan=args.plan,
+        source=args.source,
+    )
+
+
+def _default_session_name(working_dir: str) -> str:
+    path = Path(working_dir).expanduser().resolve()
+    return path.name or "workspace"
+
+
+def _default_driver_id(config: dict[str, Any]) -> str:
+    configured = config.get("default_driver")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return "term"
+
+
+def _create_session(
+    store: StateStore,
+    config: dict[str, Any],
+    *,
+    name: str | None,
+    driver_id: str | None,
+    working_dir: str | None,
+    plan: str | None,
+    source: str | None,
+) -> dict[str, Any]:
     registry = configured_registry(config)
-    driver = registry.get(args.driver)
+    selected_driver = driver_id or _default_driver_id(config)
+    driver = registry.get(selected_driver)
     availability = driver.detect()
-    if not availability.available and args.driver != "term":
-        raise UsageError(f"Driver {args.driver!r} is unavailable: {availability.detail}.")
-    working_dir = workspace_key(args.working_dir or store.workspace_key)
+    if not availability.available and selected_driver != "term":
+        raise UsageError(
+            f"Driver {selected_driver!r} is unavailable: {availability.detail}."
+        )
+    working_dir = workspace_key(working_dir or store.workspace_key)
+    session_name = " ".join((name or _default_session_name(working_dir)).split())
     resolved = driver.resolve(
-        name=args.name, working_dir=working_dir, conversation_reference=None
+        name=session_name, working_dir=working_dir, conversation_reference=None
     )
     return store.create_session(
-        name=args.name,
+        name=session_name,
         working_dir=working_dir,
         source=resolve_source(
-            args.source or config.get("default_source") or "stable",
+            source or config.get("default_source") or "stable",
             config,
             default_interpreter=sys.executable,
         ),
         driver=resolved,
-        plan={"path": args.plan, "active_task": None},
+        plan={"path": plan, "active_task": None},
     )
 
 
@@ -445,6 +482,16 @@ def cmd_hook_setup(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     registry = configured_registry(config)
+    if not store.list("sessions"):
+        _create_session(
+            store,
+            config,
+            name=args.name,
+            driver_id=args.driver,
+            working_dir=args.working_dir,
+            plan=args.plan,
+            source=args.source,
+        )
     snapshot = normalized_snapshot(
         state_home=store.home,
         workspace_key=store.workspace_key,
@@ -509,8 +556,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     create = sub.add_parser("create")
-    create.add_argument("--name", required=True)
-    create.add_argument("--driver", default="claude")
+    create.add_argument("--name")
+    create.add_argument("--driver")
     create.add_argument("--working-dir")
     create.add_argument("--plan")
     create.add_argument("--source")
@@ -638,6 +685,11 @@ def build_parser() -> argparse.ArgumentParser:
     open_command = sub.add_parser("open")
     open_command.add_argument("--no-attach", action="store_true")
     open_command.add_argument("--tmux-socket")
+    open_command.add_argument("--name")
+    open_command.add_argument("--driver")
+    open_command.add_argument("--working-dir")
+    open_command.add_argument("--plan")
+    open_command.add_argument("--source")
     open_command.set_defaults(handler=cmd_open)
 
     skill = sub.add_parser("skill-install")
