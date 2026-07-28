@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.2] - 2026-07-28
+
+### Fixed
+
+- Normal user-site, global, pipx, venv, and other standard Python installs now
+  work without a managed `hive-ide` environment because internal helpers launch
+  through the selected Python environment instead of isolated mode.
+- Internal `python -m hive_ide...` command construction is centralized behind a
+  single `PythonCommand` helper.
+
 ## [1.0.1] - 2026-07-28
 
 ### Fixed
