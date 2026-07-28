@@ -565,6 +565,14 @@ class Frame:
             return {**DEFAULT_KEYS["bindings"], **bindings}
         return dict(DEFAULT_KEYS["bindings"])
 
+    def _terminal_title(self) -> str:
+        workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
+        return f"HIVE IDE {workspace}"
+
+    def _normalize_terminal_title(self) -> None:
+        self.tmux(["set-option", "-t", self.target, "set-titles", "on"])
+        self.tmux(["set-option", "-t", self.target, "set-titles-string", self._terminal_title()])
+
     def _normalize_frame_environment(self) -> None:
         for name in self.INTERACTIVE_ENV_UNSET:
             self.tmux(["set-environment", "-g", "-u", name])
@@ -580,6 +588,7 @@ class Frame:
     def bind_keys(self) -> None:
         self._normalize_frame_environment()
         self._normalize_status_rows()
+        self._normalize_terminal_title()
         keys = self._key_bindings()
         prefix = (self.settings.get("keys") or {}).get("prefix")
         base_prefix = self.tmux(

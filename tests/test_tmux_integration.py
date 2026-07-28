@@ -132,6 +132,16 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert "client-resized" in hooks
         assert "after-select-pane" in hooks
         assert "session-window-changed" in hooks
+        assert (
+            frame.tmux(["show-option", "-v", "-t", frame.target, "set-titles"]).stdout.strip()
+            == "on"
+        )
+        assert (
+            frame.tmux(
+                ["show-option", "-v", "-t", frame.target, "set-titles-string"]
+            ).stdout.strip()
+            == "HIVE IDE workspace"
+        )
         keys = frame.tmux(["list-keys", "-T", "prefix"]).stdout
         for key in (" n ", " p ", " l ", " c ", " e ", " a ", " i ", " g ", " r ", " k "):
             assert key in keys
