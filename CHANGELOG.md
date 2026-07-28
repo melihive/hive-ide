@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.6] - 2026-07-29
+
 ### Added
 
 - Existing Claude Code conversations for the current directory can now be adopted
