@@ -515,9 +515,33 @@ class Frame:
 
     def rebuild(self, record: dict[str, Any]) -> None:
         existing = self.windows().get(record["id"])
+        previous_index = None
         if existing:
+            previous_index = self.tmux(
+                ["display-message", "-p", "-t", existing, "#{window_index}"]
+            ).stdout.strip() or None
             self.tmux(["kill-window", "-t", existing])
         self.build(record)
+        replacement = self.windows().get(record["id"])
+        if previous_index and replacement:
+            current_index = self.tmux(
+                ["display-message", "-p", "-t", replacement, "#{window_index}"]
+            ).stdout.strip()
+            if current_index != previous_index:
+                moved = self.tmux(
+                    [
+                        "move-window",
+                        "-s",
+                        replacement,
+                        "-t",
+                        f"{self.target}:{previous_index}",
+                    ]
+                )
+                if moved.returncode != 0:
+                    raise HiveIdeError(
+                        moved.stderr.strip()
+                        or f"Could not preserve window index {previous_index}."
+                    )
 
     def close(self, session_id: str) -> bool:
         window_id = self.windows().get(session_id)
