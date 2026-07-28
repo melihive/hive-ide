@@ -160,6 +160,18 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
                 ("2", "plan", "0"),
             ]
             assert f"{sys.executable} -I -m hive_ide.sidebar" in rows[0][3]
+            assert all("unset NO_COLOR;" in row[3] for row in rows)
+
+        frame.tmux(["set-environment", "-g", "NO_COLOR", "1"])
+        frame.tmux(["set-option", "-g", "status-format[1]", "diagnostic"])
+        frame.tmux(["set-option", "-g", "status-format[2]", "diagnostic"])
+        frame.bind_keys()
+        assert frame.tmux(["show-environment", "-g", "NO_COLOR"]).returncode != 0
+        status_rows = frame.tmux(
+            ["show-options", "-g", "status-format"]
+        ).stdout.splitlines()
+        assert len(status_rows) == 1
+        assert status_rows[0].startswith("status-format[0] ")
 
         alpha_window = windows[alpha["id"]]
         beta_window = windows[beta["id"]]

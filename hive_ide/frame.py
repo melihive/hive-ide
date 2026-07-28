@@ -38,6 +38,7 @@ class Frame:
         "emacs",
         "emacsclient",
     }
+    INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
 
     def __init__(self, store: StateStore, *, socket: str | None = None):
         self.store = store
@@ -213,12 +214,20 @@ class Frame:
             ],
             interpreter=interpreter,
         )
-        return f"while :; do {command}; sleep 1; done"
+        return self._interactive_command(f"while :; do {command}; sleep 1; done")
 
-    @staticmethod
-    def _agent_command(record: dict[str, Any]) -> str:
+    @classmethod
+    def _interactive_command(cls, command: str) -> str:
+        """Keep launcher-only display controls out of the interactive frame."""
+        names = " ".join(cls.INTERACTIVE_ENV_UNSET)
+        return f"unset {names}; {command}"
+
+    @classmethod
+    def _agent_command(cls, record: dict[str, Any]) -> str:
         argv = (record.get("driver") or {}).get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
-        return f"{shlex.join(argv)}; exec \"${{SHELL:-/bin/sh}}\""
+        return cls._interactive_command(
+            f"{shlex.join(argv)}; exec \"${{SHELL:-/bin/sh}}\""
+        )
 
     def _plan_command(
         self, record: dict[str, Any], *, line: int | None = None
@@ -236,11 +245,13 @@ class Frame:
                     and Path(editor[0]).name in self.PLUS_LINE_EDITORS
                 ):
                     editor.append(f"+{line}")
-                return (
+                return self._interactive_command(
                     f"{shlex.join([*editor, str(path)])}; "
                     'exec "${SHELL:-/bin/sh}"'
                 )
-        return 'printf "\\n  No plan linked.\\n"; exec "${SHELL:-/bin/sh}"'
+        return self._interactive_command(
+            'printf "\\n  No plan linked.\\n"; exec "${SHELL:-/bin/sh}"'
+        )
 
     @staticmethod
     def plan_path(record: dict[str, Any]) -> Path:
@@ -530,7 +541,21 @@ class Frame:
             return {**DEFAULT_KEYS["bindings"], **bindings}
         return dict(DEFAULT_KEYS["bindings"])
 
+    def _normalize_frame_environment(self) -> None:
+        for name in self.INTERACTIVE_ENV_UNSET:
+            self.tmux(["set-environment", "-g", "-u", name])
+
+    def _normalize_status_rows(self) -> None:
+        """Keep the dedicated IDE frame to its single window-status row."""
+        options = self.tmux(["show-options", "-g", "status-format"])
+        for line in options.stdout.splitlines():
+            name = line.partition(" ")[0]
+            if re.fullmatch(r"status-format\[(?!0\])\d+\]", name):
+                self.tmux(["set-option", "-g", "-u", name])
+
     def bind_keys(self) -> None:
+        self._normalize_frame_environment()
+        self._normalize_status_rows()
         keys = self._key_bindings()
         prefix = (self.settings.get("keys") or {}).get("prefix")
         base_prefix = self.tmux(
