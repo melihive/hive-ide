@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The new-session modal now supports a visual new/adopt toggle for Claude and
+  Codex sessions. Adopt mode opens a searchable picker and creates the IDE
+  session from the highlighted conversation.
+- Codex CLI conversations for the current directory can now be adopted into
+  `hive-ide` sessions.
+
 ## [1.0.6] - 2026-07-29
 
 ### Added

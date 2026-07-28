@@ -288,6 +288,113 @@ def test_create_adopt_imports_most_recent_claude_session(tmp_path, capsys, monke
     assert record["driver"]["launch_argv"] == ["claude", "--resume", "new-session"]
 
 
+def test_create_adopt_can_target_named_claude_session(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    project = home / ".claude" / "projects" / ("-" + "-".join(workspace.resolve().parts[1:]))
+    project.mkdir(parents=True)
+    for reference, timestamp in [
+        ("old-session", "2026-07-28T10:00:00.000Z"),
+        ("new-session", "2026-07-28T11:00:00.000Z"),
+    ]:
+        (project / f"{reference}.jsonl").write_text(
+            json.dumps({"sessionId": reference, "timestamp": timestamp}) + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "create",
+            "--name",
+            "ADOPTED",
+            "--driver",
+            "claude",
+            "--adopt",
+            "--reference",
+            "old-session",
+        ]
+    ) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["name"] == "ADOPTED"
+    assert record["driver"]["resume"]["reference"] == "old-session"
+
+
+def test_adopt_discovers_codex_sessions_for_workspace(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    other = tmp_path / "other"
+    workspace.mkdir()
+    other.mkdir()
+    state = tmp_path / "state"
+    root = home / ".codex" / "sessions" / "2026" / "07" / "28"
+    root.mkdir(parents=True)
+    for reference, cwd, timestamp in [
+        ("old-codex", workspace, "2026-07-28T10:00:00.000Z"),
+        ("new-codex", workspace, "2026-07-28T11:00:00.000Z"),
+        ("other-codex", other, "2026-07-28T12:00:00.000Z"),
+    ]:
+        (root / f"rollout-{reference}.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "cwd": str(cwd),
+                        "session_id": reference,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "adopt",
+            "--driver",
+            "codex",
+            "--dry-run",
+        ]
+    ) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert [item["reference"] for item in preview["created"]] == [
+        "new-codex",
+        "old-codex",
+    ]
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "create",
+            "--name",
+            "CODEX ADOPT",
+            "--driver",
+            "codex",
+            "--adopt",
+            "--reference",
+            "old-codex",
+        ]
+    ) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["name"] == "CODEX ADOPT"
+    assert record["driver"]["launch_argv"] == ["codex", "resume", "old-codex"]
+
+
 def test_editor_resolution_is_custom_then_micro_then_less(monkeypatch):
     monkeypatch.setenv("HIVE_IDE_EDITOR", "nvim --clean")
     assert _editor_argv({}) == ["nvim", "--clean"]

@@ -42,18 +42,22 @@ Both commands use `HIVE_IDE_SESSION_ID` inside the frame, or accept
 `--session-id=<ID>`. They target the session pane when its frame is running and
 otherwise open in the current terminal.
 
-Adopt existing Claude Code conversations for the current directory into `hive-ide`
-without looking up Claude session IDs:
+Inside the tmux frame, press the new-session shortcut, enter an IDE label, choose
+Claude or Codex, flip the bottom mode from `new` to `adopt existing`, then type to
+filter and select the conversation to adopt. The same adoption backend is available
+from the CLI for automation:
 
 ```sh
 hive-ide adopt --driver=claude
+hive-ide adopt --driver=codex
 hive-ide open
 ```
 
-To create one IDE session from the most recent Claude conversation:
+To create one IDE session from a known or most recent conversation:
 
 ```sh
-hive-ide create --driver=claude --adopt
+hive-ide create --name="FEATURE" --driver=claude --adopt --reference=<ID>
+hive-ide create --name="FEATURE" --driver=codex --adopt --reference=<ID>
 ```
 
 Local settings live in `~/.config/hive-ide/config.json` (or `HIVE_IDE_CONFIG`).

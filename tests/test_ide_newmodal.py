@@ -27,6 +27,18 @@ def test_build_args_maps_all_bundled_drivers():
         ]
 
 
+def test_build_args_can_adopt_a_specific_conversation():
+    assert IdeNewModal._build_args(
+        "SESSION", "codex", adopt_reference="conversation-1"
+    ) == [
+        "create",
+        "--name=SESSION",
+        "--driver=codex",
+        "--adopt",
+        "--reference=conversation-1",
+    ]
+
+
 def test_validate_rejects_empty_invalid_and_duplicate(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -67,6 +79,40 @@ def test_do_create_uses_public_cli_and_ensure(monkeypatch, tmp_path):
     ]
 
 
+def test_do_create_can_adopt_selected_conversation(monkeypatch, tmp_path):
+    calls = []
+    outputs = iter(
+        [
+            (True, '{"id": "session-id"}'),
+            (True, '{"built": true, "session_id": "session-id"}'),
+        ]
+    )
+    monkeypatch.setattr(
+        IdeNewModal,
+        "_cli",
+        staticmethod(lambda _state, args: (calls.append(args) or next(outputs))),
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: type(
+            "Result",
+            (),
+            {"stdout": "@7\tsession-id\n", "returncode": 0},
+        )(),
+    )
+    ok, message = IdeNewModal._do_create(
+        tmp_path, "SESSION", "claude", adopt_reference="conversation-1"
+    )
+    assert ok and message == ""
+    assert calls[0] == [
+        "create",
+        "--name=SESSION",
+        "--driver=claude",
+        "--adopt",
+        "--reference=conversation-1",
+    ]
+
+
 def test_do_create_surfaces_failure_without_ensure(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
@@ -101,4 +147,24 @@ def test_modal_exposes_the_four_bundled_drivers():
         "codex",
         "antigravity",
         "term",
+    ]
+
+
+def test_modal_adoption_support_is_explicit():
+    assert IdeNewModal._supports_adopt("claude")
+    assert IdeNewModal._supports_adopt("codex")
+    assert not IdeNewModal._supports_adopt("antigravity")
+    assert not IdeNewModal._supports_adopt("term")
+
+
+def test_modal_filters_adoptable_conversations():
+    state = {
+        "filter": "new",
+        "adopt_items": [
+            {"label": "CLAUDE old", "reference": "aaa"},
+            {"label": "CODEX new", "reference": "bbb"},
+        ],
+    }
+    assert IdeNewModal._filtered_conversations(state) == [
+        {"label": "CODEX new", "reference": "bbb"}
     ]

@@ -72,11 +72,16 @@ def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
             working_dir=args.working_dir,
             plan=args.plan,
             source=args.source,
+            name=args.name,
+            reference=args.reference,
             limit=1,
             dry_run=False,
         )
         if not adopted["created"]:
-            raise UsageError("No new Claude sessions were found to adopt for this workspace.")
+            raise UsageError(
+                f"No new {args.driver or 'claude'} sessions were found to adopt "
+                "for this workspace."
+            )
         return adopted["created"][0]
     return _create_session(
         store,
@@ -154,16 +159,18 @@ def _create_adopted_session(
     *,
     plan: str | None,
     source: str | None,
+    name: str | None,
 ) -> dict[str, Any]:
     registry = configured_registry(config)
     driver = registry.get(conversation.driver_id)
+    session_name = " ".join((name or conversation.label).split())
     resolved = driver.resolve(
-        name=conversation.label,
+        name=session_name,
         working_dir=conversation.working_dir,
         conversation_reference=conversation.reference,
     )
     record = store.create_session(
-        name=_unique_session_name(store, conversation.label),
+        name=_unique_session_name(store, session_name),
         working_dir=conversation.working_dir,
         source=resolve_source(
             source or config.get("default_source") or "stable",
@@ -191,8 +198,10 @@ def _adopt_conversations(
     working_dir: str | None,
     plan: str | None,
     source: str | None,
-    limit: int | None,
-    dry_run: bool,
+    name: str | None = None,
+    reference: str | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     selected_working_dir = workspace_key(working_dir or store.workspace_key)
     adopter = ConversationAdopter(store, config)
@@ -204,6 +213,12 @@ def _adopt_conversations(
         )
         if conversation.reference not in existing
     ]
+    if reference is not None:
+        available = [
+            conversation
+            for conversation in available
+            if conversation.reference == reference
+        ]
     if limit is not None:
         available = available[:limit]
     created = []
@@ -213,7 +228,8 @@ def _adopt_conversations(
                 {
                     "driver": conversation.driver_id,
                     "reference": conversation.reference,
-                    "name": conversation.label,
+                    "name": " ".join((name or conversation.label).split()),
+                    "label": conversation.label,
                     "working_dir": conversation.working_dir,
                     "updated_at": conversation.updated_at,
                 }
@@ -226,6 +242,7 @@ def _adopt_conversations(
                     conversation,
                     plan=plan,
                     source=source,
+                    name=name,
                 )
             )
     return {
@@ -246,6 +263,8 @@ def cmd_adopt(args: argparse.Namespace) -> dict[str, Any]:
         working_dir=args.working_dir,
         plan=args.plan,
         source=args.source,
+        name=None,
+        reference=args.reference,
         limit=args.limit,
         dry_run=args.dry_run,
     )
@@ -692,6 +711,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--plan")
     create.add_argument("--source")
     create.add_argument("--adopt", action="store_true")
+    create.add_argument("--reference")
     create.set_defaults(handler=cmd_create)
 
     adopt = sub.add_parser("adopt")
@@ -699,6 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
     adopt.add_argument("--working-dir")
     adopt.add_argument("--plan")
     adopt.add_argument("--source")
+    adopt.add_argument("--reference")
     adopt.add_argument("--limit", type=int)
     adopt.add_argument("--dry-run", action="store_true")
     adopt.set_defaults(handler=cmd_adopt)
