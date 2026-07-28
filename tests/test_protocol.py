@@ -26,6 +26,7 @@ from hive_ide.environments import EnvironmentManager, managed_interpreter
 from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
 from hive_ide.hooks import HookInstaller
+from hive_ide.info import _card, _keys
 from hive_ide.seen import IdeSeen
 from hive_ide.sidebar import IdeSidebar
 from hive_ide.source import resolve_source
@@ -363,6 +364,45 @@ def test_compaction_hooks_set_and_clear_activity(tmp_path, monkeypatch):
 
     assert IdeHook.main([*common, "--activity", "clear"]) == 0
     assert store.read("activity", record["id"]) is None
+
+
+def test_info_modal_card_uses_framed_sidebar_style(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = workspace / "plans" / "feature.md"
+    plan.parent.mkdir()
+    plan.write_text(
+        "# Feature Plan\n\n> - **Kind:** feat\n\n- [x] one\n- [ ] two\n",
+        encoding="utf-8",
+    )
+    record = {
+        "id": "abc123",
+        "name": "HIVE IDE",
+        "working_dir": str(workspace),
+        "last_active": "2026-07-28T00:00:00+00:00",
+        "driver": {"id": "codex"},
+        "plan": {"path": "plans/feature.md"},
+        "source": {"kind": "dev", "version": "1.0.0"},
+    }
+    snapshot = {"sidebar": {"icons": {"drivers": {"codex": "◎"}}}}
+
+    rendered = "\n".join(_card(record, snapshot))
+
+    assert rendered.startswith("╭")
+    assert "Hive IDE  HIVE IDE" in rendered
+    assert "◎ agent    codex" in rendered
+    assert "📁 folder   workspace" in rendered
+    assert "📝 plan     Feature Plan" in rendered
+    assert "status   feat · 50%" in rendered
+    assert "path     plans/feature.md" in rendered
+
+
+def test_info_modal_keys_match_old_prefix_map_style():
+    rendered = "\n".join(_keys({"keys": {"bindings": {"card": "I"}}}))
+
+    assert rendered.startswith("╭")
+    assert "Hive IDE shortcuts   (under your tmux prefix)" in rendered
+    assert "<prefix> I   session card" in rendered
 
 
 def test_current_plan_and_conversation_mutations_are_id_targeted(
