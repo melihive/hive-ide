@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.5] - 2026-07-29
+
+### Fixed
+
+- `hive-ide open` now bootstraps an empty workspace by creating one default
+  terminal session named from the current folder, so a first-time user no longer
+  needs to run `create` or choose a display name before opening the IDE.
+- Bare `hive-ide create` now uses the configured default driver or `term`
+  instead of silently defaulting to Claude.
+
 ## [1.0.4] - 2026-07-28
 
 ### Fixed
