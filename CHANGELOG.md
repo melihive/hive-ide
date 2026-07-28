@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.0] - 2026-07-28
+
 ### Added
 
 - Standalone, directory-scoped session storage keyed by immutable session IDs.
