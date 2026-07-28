@@ -242,3 +242,62 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert not store.path("archive", alpha["id"]).exists()
     finally:
         frame.tmux(["kill-server"])
+
+
+def test_open_isolates_and_reports_a_missing_session_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = tmp_path / "removed-worktree"
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["term"]
+    healthy = store.create_session(
+        name="HEALTHY",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="HEALTHY",
+            working_dir=str(workspace),
+            conversation_reference=None,
+        ),
+    )
+    stale = store.create_session(
+        name="STALE",
+        working_dir=missing,
+        source=_source(),
+        driver=driver.resolve(
+            name="STALE",
+            working_dir=str(missing),
+            conversation_reference=None,
+        ),
+    )
+    frame = Frame(
+        store,
+        socket=f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+    )
+
+    try:
+        opened = frame.open(no_attach=True)
+        assert opened["built"] == [healthy["id"]]
+        assert opened["windows"] == 1
+        assert opened["failed"] == [
+            {
+                "session_id": stale["id"],
+                "name": "STALE",
+                "error": f"Session working directory does not exist: {missing}",
+            }
+        ]
+        assert set(frame.windows()) == {healthy["id"]}
+        error = store.read("errors", stale["id"])
+        assert error is not None
+        assert error["component"] == "frame:open"
+        assert error["retryable"] is True
+
+        missing.mkdir()
+        reopened = frame.open(no_attach=True)
+        assert reopened["built"] == [stale["id"]]
+        assert reopened["failed"] == []
+        assert reopened["windows"] == 2
+        assert store.read("errors", stale["id"]) is None
+    finally:
+        frame.tmux(["kill-server"])

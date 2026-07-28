@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Opening a workspace now isolates sessions with missing directories or invalid
+  package sources, records a session-scoped error, and continues building every
+  healthy window instead of aborting the entire IDE.
+
 ## [1.0.0] - 2026-07-28
 
 ### Added

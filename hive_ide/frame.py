@@ -11,12 +11,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import PROTOCOL_VERSION, __version__
+from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
 from .errors import HiveIdeError, UsageError
 from .layout import IdeLayout
 from .source import inspect_interpreter
-from .store import StateStore
+from .store import StateStore, utc_now
 
 
 class Frame:
@@ -797,14 +797,61 @@ class Frame:
                     )
         return findings
 
+    def _record_open_error(
+        self, record: dict[str, Any], error: HiveIdeError
+    ) -> dict[str, str]:
+        detail = str(error)
+        self.store.write(
+            "errors",
+            record["id"],
+            {
+                "schema_version": SCHEMA_VERSION,
+                "workspace_key": self.store.workspace_key,
+                "session_id": record["id"],
+                "component": "frame:open",
+                "summary": f"Could not open session {record['name']}",
+                "detail": detail[:8192],
+                "retryable": True,
+                "recovery": (
+                    "Fix the reported session directory or package source, then run "
+                    "hive-ide open again."
+                ),
+                "observed_at": utc_now(),
+            },
+        )
+        return {"session_id": record["id"], "name": record["name"], "error": detail}
+
+    def _clear_open_error(self, record: dict[str, Any]) -> None:
+        current = self.store.read("errors", record["id"])
+        if current and current.get("component") == "frame:open":
+            self.store.delete("errors", record["id"])
+
     def open(self, *, no_attach: bool = False) -> dict[str, Any]:
         self.require_tmux()
         sessions = self.store.list("sessions")
         if not sessions:
             raise UsageError("This workspace has no sessions. Run hive-ide create first.")
-        built = [record["id"] for record in sessions if self.ensure(record)]
+        built: list[str] = []
+        failed: list[dict[str, str]] = []
+        for record in sessions:
+            try:
+                if self.ensure(record):
+                    built.append(record["id"])
+            except HiveIdeError as exc:
+                failed.append(self._record_open_error(record, exc))
+                continue
+            self._clear_open_error(record)
+        windows = self.windows()
+        if not windows:
+            raise UsageError(
+                f"No session windows could be opened; {len(failed)} session(s) failed. "
+                "Run hive-ide verify and inspect the recorded session errors."
+            )
         self.bind_keys()
-        first_window = self.windows().get(sessions[0]["id"])
+        first_window = next(
+            (windows.get(record["id"]) for record in sessions if windows.get(record["id"])),
+            None,
+        )
         if first_window:
             self.tmux(["select-window", "-t", first_window])
         if not no_attach:
@@ -813,5 +860,6 @@ class Frame:
             "tmux_socket": self.socket,
             "tmux_session": self.target,
             "built": built,
-            "windows": len(sessions),
+            "failed": failed,
+            "windows": len(windows),
         }
