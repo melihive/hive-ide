@@ -21,11 +21,11 @@ from hive_ide.errors import UsageError  # noqa: E402
 from hive_ide.git_status import inspect_linked_checkout  # noqa: E402
 
 
-def test_version_handshake_rejects_accidental_stable_skew(monkeypatch):
+def test_version_handshake_allows_stable_package_upgrades(monkeypatch):
     monkeypatch.setenv("HIVE_IDE_PROTOCOL_VERSION", "1")
     monkeypatch.setenv("HIVE_IDE_VERSION", "different")
     monkeypatch.setenv("HIVE_IDE_SOURCE", "stable")
-    assert "does not match" in IdeSidebar._version_error()
+    assert IdeSidebar._version_error() is None
     monkeypatch.setenv("HIVE_IDE_SOURCE", "dev")
     assert IdeSidebar._version_error() is None
 

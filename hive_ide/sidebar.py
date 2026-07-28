@@ -841,10 +841,6 @@ class IdeSidebar:
         protocol = os.environ.get("HIVE_IDE_PROTOCOL_VERSION")
         if protocol and protocol != str(PROTOCOL_VERSION):
             return f"protocol {protocol} is incompatible with {PROTOCOL_VERSION}"
-        expected = os.environ.get("HIVE_IDE_VERSION")
-        source = os.environ.get("HIVE_IDE_SOURCE") or "stable"
-        if expected and expected != __version__ and source == "stable":
-            return f"stable pane version {__version__} does not match frame {expected}"
         return None
 
     @staticmethod
