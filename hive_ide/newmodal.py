@@ -36,7 +36,7 @@ except ImportError:
 
 
 class IdeNewModal:
-    """One popup: name → driver/mode → optional conversation picker → create."""
+    """One popup: name → driver+mode → optional conversation picker → create."""
 
     # (kind, label, hint) — kind maps to `ide new` flags: claude=default,
     # codex=--agent=codex, terminal=--terminal.
@@ -236,6 +236,13 @@ class IdeNewModal:
         return typ in {"claude", "codex"}
 
     @staticmethod
+    def _mode_items(typ: str) -> list[tuple[str, str, str]]:
+        items = [("new", "New session", "start a fresh agent or terminal")]
+        if IdeNewModal._supports_adopt(typ):
+            items.append(("adopt", "Adopt existing", "pick a local conversation"))
+        return items
+
+    @staticmethod
     def _filtered_conversations(st: dict) -> list[dict]:
         needle = " ".join(st.get("filter", "").lower().split())
         items = st.get("adopt_items") or []
@@ -301,7 +308,12 @@ class IdeNewModal:
             if not code:
                 r, _, _ = select.select([fd], [], [], IdeNewModal.ESC_PEEK_SECONDS)
                 code = os.read(fd, 1) if r else b""
-            return {b"A": "up", b"B": "down"}.get(code, "other")
+            return {
+                b"A": "up",
+                b"B": "down",
+                b"C": "right",
+                b"D": "left",
+            }.get(code, "other")
         try:
             return data.decode("utf-8", "ignore") or "other"
         except ValueError:
@@ -332,7 +344,7 @@ class IdeNewModal:
             return "working…"
         if stage == "error":
             return "Esc → close · any other key → back to retry"
-        return "↑/↓ or j/k · digits jump · Space/a toggles new/adopt · Enter · Esc → cancel"
+        return "↑/↓ agent · ←/→ new/adopt · digits jump · Enter · Esc → cancel"
 
     @staticmethod
     def _draw(st: dict) -> None:
@@ -352,15 +364,23 @@ class IdeNewModal:
         if stage == "type":
             C._render_list(o, "Driver:", [(lbl, note) for _, lbl, note in C.TYPES], st["ty"])
             typ = C.TYPES[st["ty"]][0]
-            adoptable = C._supports_adopt(typ)
-            mode = st.get("mode", "new")
-            new_mark = "x" if mode == "new" else " "
-            adopt_mark = "x" if mode == "adopt" else " "
-            suffix = "" if adoptable else f" {C.DIM}(adopt unavailable for this driver){C.RST}"
+            items = C._mode_items(typ)
+            if st["mode_sel"] >= len(items):
+                st["mode_sel"] = len(items) - 1
             o.append("\n")
-            o.append(
-                f"  Mode: [{new_mark}] new   [{adopt_mark}] adopt existing{suffix}{C.EL}\n"
-            )
+            o.append(f"  Mode:{C.EL}\n")
+            row = ["  "]
+            for i, (_, label, _) in enumerate(items):
+                mark = "x" if i == st["mode_sel"] else " "
+                segment = f" [{mark}] {label} "
+                if i == st["mode_sel"]:
+                    row.append(f"{C.SEL}{segment}{C.RST}")
+                else:
+                    row.append(segment)
+                if i != len(items) - 1:
+                    row.append("  ")
+            o.append("".join(row) + C.EL + "\n")
+            o.append(f"  {C.DIM}{items[st['mode_sel']][2]}{C.RST}{C.EL}\n")
         elif stage == "adopt":
             typ = C.TYPES[st["ty"]][0]
             filtered = C._filtered_conversations(st)
@@ -437,9 +457,11 @@ class IdeNewModal:
             "stage": "name",
             "ty": 0,
             "mode": "new",
+            "mode_sel": 0,
             "filter": "",
             "adopt_items": [],
             "adopt_sel": 0,
+            "error_back": "type",
             "error_msg": "",
         }
         try:
@@ -449,7 +471,7 @@ class IdeNewModal:
                 if k == "esc":
                     return 0                  # cancel/close from any stage
                 if st["stage"] == "error":
-                    st["stage"] = "type"  # any non-Esc key → back to retry (name kept)
+                    st["stage"] = st.get("error_back", "type")  # any non-Esc key → retry
                     continue
                 if st["stage"] == "adopt":
                     filtered = C._filtered_conversations(st)
@@ -469,7 +491,11 @@ class IdeNewModal:
                         chosen = filtered[st["adopt_sel"]]
                         reference = chosen.get("reference")
                         if not isinstance(reference, str) or not reference:
-                            st["stage"], st["error_msg"] = "error", "selected conversation has no reference"
+                            st["stage"], st["error_back"], st["error_msg"] = (
+                                "error",
+                                "adopt",
+                                "selected conversation has no reference",
+                            )
                             continue
                         st["stage"] = "creating"
                         C._draw(st)
@@ -481,7 +507,7 @@ class IdeNewModal:
                         )
                         if ok:
                             return 0
-                        st["stage"], st["error_msg"] = "error", msg
+                        st["stage"], st["error_back"], st["error_msg"] = "error", "adopt", msg
                         continue
                     if len(k) == 1 and k.isprintable():
                         st["filter"] += k
@@ -500,36 +526,39 @@ class IdeNewModal:
                 n = len(C.TYPES)
                 if k in ("up", "k"):
                     st["ty"] = (st["ty"] - 1) % n
-                    if not C._supports_adopt(C.TYPES[st["ty"]][0]):
-                        st["mode"] = "new"
+                    if st["mode_sel"] >= len(C._mode_items(C.TYPES[st["ty"]][0])):
+                        st["mode_sel"] = 0
                     continue
                 if k in ("down", "j"):
                     st["ty"] = (st["ty"] + 1) % n
-                    if not C._supports_adopt(C.TYPES[st["ty"]][0]):
-                        st["mode"] = "new"
+                    if st["mode_sel"] >= len(C._mode_items(C.TYPES[st["ty"]][0])):
+                        st["mode_sel"] = 0
                     continue
-                if k in (" ", "a", "A"):
-                    if C._supports_adopt(C.TYPES[st["ty"]][0]):
-                        st["mode"] = "new" if st["mode"] == "adopt" else "adopt"
-                    else:
-                        st["mode"] = "new"
+                mode_items = C._mode_items(C.TYPES[st["ty"]][0])
+                if k in ("left", "h") and mode_items:
+                    st["mode_sel"] = (st["mode_sel"] - 1) % len(mode_items)
+                    continue
+                if k in ("right", "l") and mode_items:
+                    st["mode_sel"] = (st["mode_sel"] + 1) % len(mode_items)
                     continue
                 if k.isdigit() and 1 <= int(k) <= n:
                     st["ty"] = int(k) - 1
-                    if not C._supports_adopt(C.TYPES[st["ty"]][0]):
-                        st["mode"] = "new"
+                    if st["mode_sel"] >= len(C._mode_items(C.TYPES[st["ty"]][0])):
+                        st["mode_sel"] = 0
                 elif k != "enter":
                     continue
+                st["mode"] = C._mode_items(C.TYPES[st["ty"]][0])[st["mode_sel"]][0]
                 if st["mode"] == "adopt":
                     st["stage"] = "creating"
                     C._draw(st)
                     ok, items, msg = C._adoptable(skill_dir, C.TYPES[st["ty"]][0])
                     if not ok:
-                        st["stage"], st["error_msg"] = "error", msg
+                        st["stage"], st["error_back"], st["error_msg"] = "error", "type", msg
                         continue
                     if not items:
-                        st["stage"], st["error_msg"] = (
+                        st["stage"], st["error_back"], st["error_msg"] = (
                             "error",
+                            "type",
                             "No unadopted conversations were found for this workspace.",
                         )
                         continue
@@ -538,14 +567,12 @@ class IdeNewModal:
                     st["filter"] = ""
                     st["adopt_sel"] = 0
                     continue
-                # Flow complete → create INSIDE the modal (output captured), so a failure
-                # is shown here and stays put; only success or Esc closes the popup.
                 st["stage"] = "creating"
                 C._draw(st)
                 ok, msg = C._do_create(skill_dir, st["name"], C.TYPES[st["ty"]][0])
                 if ok:
-                    return 0                   # success → close (finally restores the tty)
-                st["stage"], st["error_msg"] = "error", msg
+                    return 0
+                st["stage"], st["error_back"], st["error_msg"] = "error", "type", msg
         finally:
             sys.stdout.write("\x1b[?25h")     # restore the cursor
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
