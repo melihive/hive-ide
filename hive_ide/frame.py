@@ -674,7 +674,7 @@ class Frame:
                     "--focus",
                 ],
             )
-            self.tmux(["bind-key", key, "run-shell", "-b", focus])
+            self.tmux(["bind-key", key, "run-shell", "-b", f"{focus} >/dev/null 2>&1"])
         for action, direction in (("next", "next"), ("previous", "prev")):
             key = keys.get(action)
             if not key:
