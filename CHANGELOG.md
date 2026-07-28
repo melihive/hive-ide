@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.7] - 2026-07-29
+
 ### Added
 
 - The new-session modal now supports a visual new/adopt toggle for Claude and
