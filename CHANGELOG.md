@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.3] - 2026-07-28
+
+### Fixed
+
+- Session source repair can now update stale session records without requiring
+  the session working directory to still exist.
+- Source repair supports a quiet no-rebuild mode for metadata-only maintenance
+  without disrupting live panes.
+- The `<prefix> g` plan-jump binding no longer paints CLI JSON output into the
+  plan pane while jumping to the first unfinished task.
+
 ## [1.0.2] - 2026-07-28
 
 ### Fixed
