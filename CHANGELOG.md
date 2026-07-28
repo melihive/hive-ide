@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.1] - 2026-07-28
+
 ### Fixed
 
 - Opening a workspace now isolates sessions with missing directories or invalid
@@ -14,6 +16,9 @@ All notable changes to `hive-ide` will be documented in this file.
   zoom state, and package-source maintenance no longer changes session recency.
 - Reopening an existing frame preserves its selected session instead of jumping
   to a record touched by maintenance.
+- Clicking the sidebar `show archive` footer now opens the archived-session view.
+- The change-agent modal now targets the active tmux socket and shows switch
+  failures instead of silently closing.
 
 ## [1.0.0] - 2026-07-28
 
