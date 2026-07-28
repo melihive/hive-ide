@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.8] - 2026-07-29
+
 ### Fixed
 
 - The new-session modal now keeps the New/Adopt choice on the agent selection
