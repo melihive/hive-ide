@@ -831,6 +831,11 @@ class Frame:
         sessions = self.store.list("sessions")
         if not sessions:
             raise UsageError("This workspace has no sessions. Run hive-ide create first.")
+        current_window = None
+        if self.exists():
+            current_window = self.tmux(
+                ["display-message", "-p", "-t", self.target, "#{window_id}"]
+            ).stdout.strip() or None
         built: list[str] = []
         failed: list[dict[str, str]] = []
         for record in sessions:
@@ -848,12 +853,20 @@ class Frame:
                 "Run hive-ide verify and inspect the recorded session errors."
             )
         self.bind_keys()
-        first_window = next(
-            (windows.get(record["id"]) for record in sessions if windows.get(record["id"])),
-            None,
+        selected_window = (
+            current_window
+            if current_window in windows.values()
+            else next(
+                (
+                    windows.get(record["id"])
+                    for record in sessions
+                    if windows.get(record["id"])
+                ),
+                None,
+            )
         )
-        if first_window:
-            self.tmux(["select-window", "-t", first_window])
+        if selected_window and selected_window != current_window:
+            self.tmux(["select-window", "-t", selected_window])
         if not no_attach:
             os.execvp("tmux", ["tmux", "-L", self.socket, "attach", "-t", self.target])
         return {

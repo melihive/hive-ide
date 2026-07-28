@@ -12,6 +12,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - Relayout no longer crashes when every detached window starts at mobile size;
   the attached window's geometry is propagated across the frame, clearing stale
   zoom state, and package-source maintenance no longer changes session recency.
+- Reopening an existing frame preserves its selected session instead of jumping
+  to a record touched by maintenance.
 
 ## [1.0.0] - 2026-07-28
 

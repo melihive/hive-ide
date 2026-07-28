@@ -163,6 +163,13 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
 
         alpha_window = windows[alpha["id"]]
         beta_window = windows[beta["id"]]
+        frame.tmux(["select-window", "-t", beta_window])
+        frame.open(no_attach=True)
+        active = frame.tmux(
+            ["display-message", "-p", "-t", frame.target, "#{window_id}"]
+        ).stdout.strip()
+        assert active == beta_window
+        frame.tmux(["select-window", "-t", alpha_window])
         frame.tmux(["resize-window", "-t", alpha_window, "-x", "180", "-y", "40"])
         assert main(
             [
