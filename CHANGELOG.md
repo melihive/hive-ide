@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.4] - 2026-07-28
+
+### Fixed
+
+- Stable sidebar panes now tolerate package patch upgrades instead of exiting
+  repeatedly when the installed `hive-ide` version changes under a live frame.
+
 ## [1.0.3] - 2026-07-28
 
 ### Fixed
