@@ -106,7 +106,8 @@ class HookInstaller:
                         raise UsageError(
                             f"Hook event {event!r} contains a non-object handler."
                         )
-                    installed = self.COMMAND_MARKER in (handler.get("command") or "")
+                    existing_command = handler.get("command") or ""
+                    installed = self.COMMAND_MARKER in existing_command
                     if installed and handler.get("command") != command:
                         changed = True
                         continue

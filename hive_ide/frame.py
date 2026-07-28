@@ -629,7 +629,12 @@ class Frame:
                     new_modal,
                 ]
             )
-        for action, kind in (("agent", "agent"), ("error", "error")):
+        for action, kind in (
+            ("agent", "agent"),
+            ("card", "card"),
+            ("help", "keys"),
+            ("error", "error"),
+        ):
             key = keys.get(action)
             if not key:
                 continue
@@ -649,29 +654,6 @@ class Frame:
                 ],
             )
             self.tmux(["bind-key", key, "run-shell", "-b", popup])
-        for action, kind, width, height in (
-            ("card", "card", "64%", "60%"),
-            ("help", "keys", "62%", "52%"),
-        ):
-            key = keys.get(action)
-            if not key:
-                continue
-            info = self._module(
-                "info",
-                [
-                    "--kind",
-                    kind,
-                    "--state-home",
-                    str(self.store.home),
-                    "--workspace-key",
-                    self.store.workspace_key,
-                    "--session-id",
-                    "#{@hive_ide_session_id}",
-                ],
-            )
-            self.tmux(
-                ["bind-key", key, "display-popup", "-E", "-w", width, "-h", height, info]
-            )
         if key := keys.get("jump_plan"):
             focus = self._module(
                 "cli",

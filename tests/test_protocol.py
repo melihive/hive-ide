@@ -219,6 +219,7 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
     monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
     monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
     assert IdeHook.main(
         [
             "--state-home",
@@ -242,6 +243,64 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     ]
 
 
+def test_hook_relay_uses_tmux_server_when_available(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="RELAY",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-test")
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setattr("hive_ide.hook.subprocess.run", fake_run)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "waiting",
+            "--driver",
+            "term",
+            "{}",
+        ]
+    ) == 0
+    assert store.read("status", record["id"]) is None
+    argv, kwargs = calls[0]
+    assert argv[:5] == ["tmux", "-L", "hive-ide-test", "run-shell", "-b"]
+    assert kwargs["capture_output"] is True
+    command = argv[5]
+    assert "HIVE_IDE_WORKSPACE_KEY=" in command
+    assert "HIVE_IDE_SESSION_ID=" in command
+    assert "--state waiting --driver term --relayed '{}'" in command
+
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET")
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "waiting",
+            "--driver",
+            "term",
+            "--relayed",
+            "{}",
+        ]
+    ) == 0
+    assert store.read("status", record["id"])["state"] == "waiting"
+
+
 def test_hook_identity_survives_display_name_change(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -258,6 +317,7 @@ def test_hook_identity_survives_display_name_change(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
     monkeypatch.setenv("HIVE_IDE_SESSION", "BEFORE")
     monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
 
     assert IdeHook.main(
         [
@@ -287,6 +347,7 @@ def test_compaction_hooks_set_and_clear_activity(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
     monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
 
     common = [
         "--state-home",

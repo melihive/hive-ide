@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import argparse
 import os
+import shlex
+import subprocess
 import sys
 
 from .config import configured_registry, load_config
@@ -46,6 +48,9 @@ class IdeHook:
     # agent's environment, so these arrive for free — no payload field needed.
     ENV_WORKSPACE = "HIVE_IDE_WORKSPACE_KEY"
     ENV_SESSION_ID = "HIVE_IDE_SESSION_ID"
+    ENV_STATE_HOME = "HIVE_IDE_STATE_HOME"
+    ENV_TMUX_SOCKET = "HIVE_IDE_TMUX_SOCKET"
+    ENV_CONFIG = "HIVE_IDE_CONFIG"
 
     @staticmethod
     def _payload(args: list[str]) -> dict:
@@ -80,12 +85,20 @@ class IdeHook:
             action.add_argument("--state", choices=IdeHook.STATES)
             action.add_argument("--activity", choices=IdeHook.ACTIVITIES)
             parser.add_argument("--driver", required=True)
+            parser.add_argument("--relayed", action="store_true")
             parser.add_argument("payload", nargs="?")
             parsed = parser.parse_args(args)
-            workspace = os.environ.get("HIVE_IDE_WORKSPACE_KEY")
-            session_id = os.environ.get("HIVE_IDE_SESSION_ID")
+            workspace = os.environ.get(IdeHook.ENV_WORKSPACE)
+            session_id = os.environ.get(IdeHook.ENV_SESSION_ID)
             if not workspace or not session_id:
                 return 0
+            payload = {}
+            if not parsed.activity:
+                payload_args = [parsed.payload] if parsed.payload else []
+                payload = IdeHook._payload(payload_args)
+            if not parsed.relayed and os.environ.get(IdeHook.ENV_TMUX_SOCKET):
+                if IdeHook._relay(parsed, workspace, session_id, payload):
+                    return 0
             store = StateStore(parsed.state_home, workspace)
             with store.mutation_lock():
                 record = store.find_session(session_id)
@@ -107,11 +120,9 @@ class IdeHook:
                                 "label": "Compacting context",
                                 "observed_at": utc_now(),
                             },
-                        )
+                    )
                     return 0
 
-            payload_args = [parsed.payload] if parsed.payload else []
-            payload = IdeHook._payload(payload_args)
             registry = configured_registry(load_config(config_path()), plugins=True)
             driver = registry.get(parsed.driver)
             event = driver.translate_status(payload, parsed.state)
@@ -143,6 +154,56 @@ class IdeHook:
         except BaseException:
             pass
         return 0
+
+    @staticmethod
+    def _relay(
+        parsed: argparse.Namespace,
+        workspace: str,
+        session_id: str,
+        payload: dict,
+    ) -> bool:
+        """Ask the IDE tmux server to perform the write outside the agent sandbox."""
+        socket = os.environ.get(IdeHook.ENV_TMUX_SOCKET)
+        if not socket:
+            return False
+        action = (
+            ["--activity", parsed.activity]
+            if parsed.activity
+            else ["--state", parsed.state]
+        )
+        env = [
+            f"{IdeHook.ENV_WORKSPACE}={workspace}",
+            f"{IdeHook.ENV_SESSION_ID}={session_id}",
+            f"{IdeHook.ENV_STATE_HOME}={parsed.state_home}",
+        ]
+        if config := os.environ.get(IdeHook.ENV_CONFIG):
+            env.append(f"{IdeHook.ENV_CONFIG}={config}")
+        command = shlex.join(
+            [
+                "env",
+                *env,
+                sys.executable,
+                "-I",
+                "-m",
+                "hive_ide.hook",
+                "--state-home",
+                parsed.state_home,
+                *action,
+                "--driver",
+                parsed.driver,
+                "--relayed",
+                json.dumps(payload, separators=(",", ":")),
+            ]
+        )
+        try:
+            result = subprocess.run(
+                ["tmux", "-L", socket, "run-shell", "-b", command],
+                capture_output=True,
+                text=True,
+            )
+        except BaseException:
+            return False
+        return result.returncode == 0
 
 
 if __name__ == "__main__":

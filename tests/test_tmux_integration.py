@@ -135,6 +135,13 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         keys = frame.tmux(["list-keys", "-T", "prefix"]).stdout
         for key in (" n ", " p ", " l ", " c ", " e ", " a ", " i ", " g ", " r ", " k "):
             assert key in keys
+        key_lines = {line.split()[3]: line for line in keys.splitlines() if " -T prefix " in line}
+        for key in ("a", "i", "k", "x"):
+            assert "run-shell -b" in key_lines[key]
+        assert "hive_ide.popup --kind agent" in keys
+        assert "hive_ide.popup --kind card" in keys
+        assert "hive_ide.popup --kind keys" in keys
+        assert "hive_ide.popup --kind error" in keys
         inherited_prefix = frame.tmux(["show-option", "-gv", "prefix"]).stdout.strip()
         frame.settings["keys"] = {
             "prefix": "C-z",
