@@ -874,6 +874,52 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
     assert rebuilt == [first["id"], first["id"]]
 
 
+def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = tmp_path / "missing"
+    state = tmp_path / "state"
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"sources": {"stable": {"interpreter": sys.executable}}}),
+        encoding="utf-8",
+    )
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="STALE",
+        working_dir=missing,
+        source={"kind": "dev", "interpreter": sys.executable, "version": "old"},
+        driver=_term(),
+    )
+    monkeypatch.setattr(
+        "hive_ide.cli.Frame.rebuild",
+        lambda _frame, _record: pytest.fail("stale sessions must not rebuild"),
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--config",
+                str(config),
+                "--workspace-key",
+                str(workspace),
+                "source-set",
+                "--session-id",
+                record["id"],
+                "--source",
+                "stable",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    updated = store.find_session(record["id"])
+    assert updated["source"]["kind"] == "stable"
+    assert updated["source"]["interpreter"] == sys.executable
+
+
 def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):
     home = tmp_path / "home"
     stable = tmp_path / "stable" / "bin" / "python"
