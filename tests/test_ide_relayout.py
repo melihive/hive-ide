@@ -116,6 +116,41 @@ def test_adopt_respects_the_agent_minimum_exactly_at_the_boundary():
     assert _adopt(SW, edge + 1, width=w) is None    # one past → agent under its minimum
 
 
+def test_adopt_with_only_mobile_windows_does_not_crash(tmp_path, monkeypatch):
+    state = tmp_path / "layout.json"
+
+    def fake_tmux(_socket, args):
+        if args[:2] == ["list-windows", "-a"]:
+            return "@0 @1"
+        if args[-1] == "#{window_width}\t#{window_height}":
+            return "80\t24"
+        if args[-1] == "#{window_width}":
+            return "80"
+        if args[-1] == "#{window_zoomed_flag}":
+            return "1"
+        if args[-1] == "#{window_id}":
+            return "@0"
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fake_tmux)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "adopt",
+            str(state),
+        ]
+    ) == 0
+    assert json.loads(state.read_text(encoding="utf-8"))["plan"] == PW
+
+
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
 
 def test_breaker_ledger_prunes_to_the_window():

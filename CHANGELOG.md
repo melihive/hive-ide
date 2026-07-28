@@ -9,6 +9,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Opening a workspace now isolates sessions with missing directories or invalid
   package sources, records a session-scoped error, and continues building every
   healthy window instead of aborting the entire IDE.
+- Relayout no longer crashes when every detached window starts at mobile size;
+  the attached window's geometry is propagated across the frame, clearing stale
+  zoom state, and package-source maintenance no longer changes session recency.
 
 ## [1.0.0] - 2026-07-28
 

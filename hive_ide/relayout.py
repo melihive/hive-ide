@@ -268,11 +268,37 @@ class IdeRelayout:
                                                  "#{pane_width}"])
             if live.isdigit() and live_plan.isdigit():
                 prev_side, prev_plan = int(live), int(live_plan)
+        active_geometry = IdeRelayout._tmux(
+            sock,
+            ["display-message", "-p", "#{window_width}\t#{window_height}"],
+        ).split("\t")
+        canonical = (
+            (int(active_geometry[0]), int(active_geometry[1]))
+            if len(active_geometry) == 2
+            and active_geometry[0].isdigit()
+            and active_geometry[1].isdigit()
+            else None
+        )
+        remembered_plan = pw
         for win in IdeRelayout._tmux(sock, ["list-windows", "-a", "-F", "#{window_id}"]).split():
             raw = IdeRelayout._tmux(sock, ["display-message", "-p", "-t", win, "#{window_width}"])
             if not raw.isdigit():
                 continue
             width = int(raw)
+            if canonical and width != canonical[0]:
+                IdeRelayout._tmux(
+                    sock,
+                    [
+                        "resize-window",
+                        "-t",
+                        win,
+                        "-x",
+                        str(canonical[0]),
+                        "-y",
+                        str(canonical[1]),
+                    ],
+                )
+                width = canonical[0]
             if width < sw + amin + pmin:
                 # MOBILE: three columns cannot fit, so stop pretending. The FOCUSED column
                 # owns the whole window (the `pane-focus-in` hook picks which one) — a
@@ -287,6 +313,7 @@ class IdeRelayout:
                                              amin, width)
                 if taken:
                     side, plan = taken            # carry the manual drag to every window
+            remembered_plan = plan
             IdeRelayout._set_zoom(sock, win, False)
             # pane 0 = sidebar, pane 2 = plan; the agent (pane 1) absorbs the remainder.
             IdeRelayout._tmux(sock, ["resize-pane", "-t", f"{win}.0", "-x", str(side)])
@@ -298,7 +325,8 @@ class IdeRelayout:
             cur = IdeRelayout._tmux(sock, ["display-message", "-p", "#{window_id}"])
             if cur:
                 IdeRelayout._write_state(state_path, {"win": cur, "side": sw,
-                                                      "plan": pw if mode == "snap" else plan})
+                                                      "plan": pw if mode == "snap"
+                                                      else remembered_plan})
         return 0
 
 

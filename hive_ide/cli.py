@@ -403,7 +403,6 @@ def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:
     record["source"] = resolve_source(
         args.source, config, default_interpreter=sys.executable
     )
-    record["last_active"] = utc_now()
     store.write("sessions", record["id"], record)
     Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
     return record

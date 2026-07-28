@@ -183,6 +183,16 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         ).stdout.splitlines()
         assert widths[0] == str(Frame.SIDEBAR_W)
         assert widths[2] == str(IdeLayout.plan_width(180))
+        beta_geometry = frame.tmux(
+            [
+                "display-message",
+                "-p",
+                "-t",
+                beta_window,
+                "#{window_width}x#{window_height}:#{window_zoomed_flag}",
+            ]
+        ).stdout.strip()
+        assert beta_geometry == "180x40:0"
         alpha["name"] = "ALPHA RENAMED"
         store.write("sessions", alpha["id"], alpha)
         assert frame.rename(alpha["id"], alpha["name"])

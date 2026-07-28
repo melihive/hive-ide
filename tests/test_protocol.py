@@ -717,6 +717,7 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
     )
     second_path = store.path("sessions", second["id"])
     untouched = second_path.read_bytes()
+    first_last_active = first["last_active"]
     rebuilt = []
     monkeypatch.setattr(
         "hive_ide.source.inspect_interpreter",
@@ -748,11 +749,13 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
         "interpreter": "/managed/dev/python",
         "version": "2",
     }
+    assert store.find_session(first["id"])["last_active"] == first_last_active
     assert second_path.read_bytes() == untouched
 
     assert main([*common, "--source", "stable"]) == 0
     capsys.readouterr()
     assert store.find_session(first["id"])["source"]["kind"] == "stable"
+    assert store.find_session(first["id"])["last_active"] == first_last_active
     assert second_path.read_bytes() == untouched
     assert rebuilt == [first["id"], first["id"]]
 
