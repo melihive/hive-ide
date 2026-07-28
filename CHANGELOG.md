@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Existing Claude Code conversations for the current directory can now be adopted
+  into `hive-ide` sessions with `hive-ide adopt --driver=claude`; `create
+  --driver=claude --adopt` imports the most recent one.
+
 ## [1.0.5] - 2026-07-29
 
 ### Fixed

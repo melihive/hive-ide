@@ -174,6 +174,120 @@ def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
     assert sessions[0]["driver"]["id"] == "term"
 
 
+def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    project = home / ".claude" / "projects" / ("-" + "-".join(workspace.resolve().parts[1:]))
+    project.mkdir(parents=True)
+    first = project / "11111111-1111-4111-8111-111111111111.jsonl"
+    second = project / "22222222-2222-4222-8222-222222222222.jsonl"
+    first.write_text(
+        json.dumps(
+            {
+                "sessionId": "11111111-1111-4111-8111-111111111111",
+                "timestamp": "2026-07-28T10:00:00.000Z",
+                "type": "assistant",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        json.dumps(
+            {
+                "sessionId": "22222222-2222-4222-8222-222222222222",
+                "timestamp": "2026-07-28T11:00:00.000Z",
+                "type": "assistant",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "adopt",
+            "--driver",
+            "claude",
+        ]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert len(result["created"]) == 2
+    store = StateStore(state, workspace)
+    sessions = store.list("sessions")
+    assert sorted(item["driver"]["resume"]["reference"] for item in sessions) == [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    ]
+    newest = next(
+        item
+        for item in sessions
+        if item["driver"]["resume"]["reference"]
+        == "22222222-2222-4222-8222-222222222222"
+    )
+    assert newest["driver"]["launch_argv"] == [
+        "claude",
+        "--resume",
+        "22222222-2222-4222-8222-222222222222",
+    ]
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "adopt",
+            "--driver",
+            "claude",
+        ]
+    ) == 0
+    rerun = json.loads(capsys.readouterr().out)
+    assert rerun["created"] == []
+    assert rerun["skipped_existing"] == 2
+
+
+def test_create_adopt_imports_most_recent_claude_session(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    project = home / ".claude" / "projects" / ("-" + "-".join(workspace.resolve().parts[1:]))
+    project.mkdir(parents=True)
+    for reference, timestamp in [
+        ("old-session", "2026-07-28T10:00:00.000Z"),
+        ("new-session", "2026-07-28T11:00:00.000Z"),
+    ]:
+        (project / f"{reference}.jsonl").write_text(
+            json.dumps({"sessionId": reference, "timestamp": timestamp}) + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "create",
+            "--driver",
+            "claude",
+            "--adopt",
+        ]
+    ) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["driver"]["resume"]["reference"] == "new-session"
+    assert record["driver"]["launch_argv"] == ["claude", "--resume", "new-session"]
+
+
 def test_editor_resolution_is_custom_then_micro_then_less(monkeypatch):
     monkeypatch.setenv("HIVE_IDE_EDITOR", "nvim --clean")
     assert _editor_argv({}) == ["nvim", "--clean"]

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
+from .adoption import AdoptableConversation, ConversationAdopter
 from .config import configured_registry, load_config, normalized_snapshot
 from .errors import HiveIdeError, UsageError
 from .environments import EnvironmentManager
@@ -26,6 +27,7 @@ from .store import StateStore, utc_now
 WORKSPACE_MUTATIONS = frozenset(
     {
         "archive",
+        "adopt",
         "attach-conversation",
         "clear-error",
         "create",
@@ -62,6 +64,20 @@ def _context(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any]]:
 
 def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
+    if args.adopt:
+        adopted = _adopt_conversations(
+            store,
+            config,
+            driver_id=args.driver or "claude",
+            working_dir=args.working_dir,
+            plan=args.plan,
+            source=args.source,
+            limit=1,
+            dry_run=False,
+        )
+        if not adopted["created"]:
+            raise UsageError("No new Claude sessions were found to adopt for this workspace.")
+        return adopted["created"][0]
     return _create_session(
         store,
         config,
@@ -118,6 +134,120 @@ def _create_session(
         ),
         driver=resolved,
         plan={"path": plan, "active_task": None},
+    )
+
+
+def _unique_session_name(store: StateStore, label: str) -> str:
+    clean = " ".join(label.split()) or "SESSION"
+    if store.find_by_name(clean) is None:
+        return clean
+    suffix = 2
+    while store.find_by_name(f"{clean} {suffix}") is not None:
+        suffix += 1
+    return f"{clean} {suffix}"
+
+
+def _create_adopted_session(
+    store: StateStore,
+    config: dict[str, Any],
+    conversation: AdoptableConversation,
+    *,
+    plan: str | None,
+    source: str | None,
+) -> dict[str, Any]:
+    registry = configured_registry(config)
+    driver = registry.get(conversation.driver_id)
+    resolved = driver.resolve(
+        name=conversation.label,
+        working_dir=conversation.working_dir,
+        conversation_reference=conversation.reference,
+    )
+    record = store.create_session(
+        name=_unique_session_name(store, conversation.label),
+        working_dir=conversation.working_dir,
+        source=resolve_source(
+            source or config.get("default_source") or "stable",
+            config,
+            default_interpreter=sys.executable,
+        ),
+        driver=resolved,
+        plan={"path": plan, "active_task": None},
+        host={
+            "adopted": {
+                "driver": conversation.driver_id,
+                "source": conversation.source_path,
+                "updated_at": conversation.updated_at,
+            }
+        },
+    )
+    return record
+
+
+def _adopt_conversations(
+    store: StateStore,
+    config: dict[str, Any],
+    *,
+    driver_id: str,
+    working_dir: str | None,
+    plan: str | None,
+    source: str | None,
+    limit: int | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    selected_working_dir = workspace_key(working_dir or store.workspace_key)
+    adopter = ConversationAdopter(store, config)
+    existing = adopter.existing_references(driver_id=driver_id)
+    available = [
+        conversation
+        for conversation in adopter.available(
+            driver_id=driver_id, working_dir=selected_working_dir
+        )
+        if conversation.reference not in existing
+    ]
+    if limit is not None:
+        available = available[:limit]
+    created = []
+    for conversation in available:
+        if dry_run:
+            created.append(
+                {
+                    "driver": conversation.driver_id,
+                    "reference": conversation.reference,
+                    "name": conversation.label,
+                    "working_dir": conversation.working_dir,
+                    "updated_at": conversation.updated_at,
+                }
+            )
+        else:
+            created.append(
+                _create_adopted_session(
+                    store,
+                    config,
+                    conversation,
+                    plan=plan,
+                    source=source,
+                )
+            )
+    return {
+        "driver": driver_id,
+        "working_dir": str(Path(selected_working_dir).expanduser().resolve()),
+        "created": created,
+        "skipped_existing": len(existing),
+        "dry_run": dry_run,
+    }
+
+
+def cmd_adopt(args: argparse.Namespace) -> dict[str, Any]:
+    store, config = _context(args)
+    return _adopt_conversations(
+        store,
+        config,
+        driver_id=args.driver,
+        working_dir=args.working_dir,
+        plan=args.plan,
+        source=args.source,
+        limit=args.limit,
+        dry_run=args.dry_run,
     )
 
 
@@ -561,7 +691,17 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--working-dir")
     create.add_argument("--plan")
     create.add_argument("--source")
+    create.add_argument("--adopt", action="store_true")
     create.set_defaults(handler=cmd_create)
+
+    adopt = sub.add_parser("adopt")
+    adopt.add_argument("--driver", default="claude")
+    adopt.add_argument("--working-dir")
+    adopt.add_argument("--plan")
+    adopt.add_argument("--source")
+    adopt.add_argument("--limit", type=int)
+    adopt.add_argument("--dry-run", action="store_true")
+    adopt.set_defaults(handler=cmd_adopt)
 
     listing = sub.add_parser("list", aliases=["ls"])
     listing.add_argument("--archived", action="store_true")

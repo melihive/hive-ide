@@ -42,6 +42,20 @@ Both commands use `HIVE_IDE_SESSION_ID` inside the frame, or accept
 `--session-id=<ID>`. They target the session pane when its frame is running and
 otherwise open in the current terminal.
 
+Adopt existing Claude Code conversations for the current directory into `hive-ide`
+without looking up Claude session IDs:
+
+```sh
+hive-ide adopt --driver=claude
+hive-ide open
+```
+
+To create one IDE session from the most recent Claude conversation:
+
+```sh
+hive-ide create --driver=claude --adopt
+```
+
 Local settings live in `~/.config/hive-ide/config.json` (or `HIVE_IDE_CONFIG`).
 The plan editor accepts any command string or argv list. Resolution is configured
 editor, `HIVE_IDE_EDITOR`, `micro` when installed, then `less`:
