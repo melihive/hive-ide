@@ -914,7 +914,7 @@ class Frame:
             ]
         )
         mobile = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
-        focus_relayout = f"if-shell -F '{mobile}' {{ true }} {{ run-shell -b {shlex.quote(relayout_client)} }}"
+        focus_relayout = f"run-shell -b {shlex.quote(relayout_client)}"
         self.tmux(
             [
                 "set-hook",
