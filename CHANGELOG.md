@@ -4,6 +4,28 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.18] - 2026-07-29
+
+### Fixed
+
+- `rebuild` now creates the replacement window before killing the old one, so an
+  interrupted or failed rebuild cannot leave a live session record without a
+  tmux window.
+- Sidebar clicks and Enter activation focus the target session's agent pane
+  instead of leaving focus in the sidebar.
+- Current rows keep rendering their waiting/working status glyphs, including
+  the configured `▶` working marker.
+- Hook setup and verification now honor the configured stable interpreter
+  instead of checking the retired managed stable environment path.
+- The checkout slot now prefers live Git checkout inspection over historical
+  merged-worktree metadata, so sessions re-homed to main no longer all show a
+  green merged check.
+- Live subagent fallback parsing no longer counts ordinary Claude transcript
+  bullets as Codex rows, and subagent counts reserve a clearer gap from the
+  relative timestamp.
+- `--quiet` is accepted after a subcommand as well as before it, preventing
+  wrapper/TUI argument ordering from dumping CLI JSON or argparse errors.
+
 ## [1.0.17] - 2026-07-29
 
 ### Fixed
