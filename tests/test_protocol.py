@@ -1076,6 +1076,67 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
     ]
 
 
+def test_current_chat_opens_claude_agents_when_resume_fails(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {})
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv == ["claude", "--resume", "conversation-1"]:
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
+    result = frame.current_chat(record)
+
+    assert result == {
+        "session_id": record["id"],
+        "driver": "claude",
+        "opened": "claude-agents",
+    }
+    assert calls == [
+        (["claude", "--resume", "conversation-1"], {"cwd": str(workspace)}),
+        (["claude", "agents"], {"cwd": str(workspace)}),
+    ]
+
+
+def test_claude_agent_pane_falls_back_to_agents_on_resume_failure(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+
+    command = Frame._agent_command(record)
+
+    assert "claude --resume conversation-1 || claude agents" in command
+    assert command.endswith('; exec "${SHELL:-/bin/sh}"')
+
+
 def test_current_chat_selects_existing_agent_pane_without_respawning(
     tmp_path, monkeypatch
 ):

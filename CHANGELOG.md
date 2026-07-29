@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Claude resume commands now fall back to `claude agents` when a resumed
+  conversation is parked as a Claude Code background agent, so the pane offers
+  Claude's attach UI instead of dropping to a dead shell.
+- Sidebar keyboard focus now follows the selected session ID across automatic
+  list reorders instead of staying on the old row index.
+
 ## [1.0.18] - 2026-07-29
 
 ### Fixed

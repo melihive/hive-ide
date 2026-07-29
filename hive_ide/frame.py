@@ -273,9 +273,13 @@ class Frame:
 
     @classmethod
     def _agent_command(cls, record: dict[str, Any]) -> str:
-        argv = (record.get("driver") or {}).get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
+        driver = record.get("driver") or {}
+        argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
+        command = shlex.join(argv)
+        if driver.get("id") == "claude" and (driver.get("resume") or {}).get("reference"):
+            command = f"{command} || claude agents"
         return cls._interactive_command(
-            f"{shlex.join(argv)}; exec \"${{SHELL:-/bin/sh}}\""
+            f"{command}; exec \"${{SHELL:-/bin/sh}}\""
         )
 
     def _plan_command(
@@ -461,6 +465,14 @@ class Frame:
             }
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
+            if driver.get("id") == "claude":
+                fallback = subprocess.run(["claude", "agents"], cwd=record["working_dir"])
+                if fallback.returncode == 0:
+                    return {
+                        "session_id": record["id"],
+                        "driver": driver.get("id"),
+                        "opened": "claude-agents",
+                    }
             raise HiveIdeError(f"The agent exited with status {result.returncode}.")
         return {
             "session_id": record["id"],

@@ -280,6 +280,42 @@ def test_subagent_provider_parses_claude_background_session_message():
     )
 
 
+def test_sidebar_cursor_follows_session_id_across_reorder():
+    cursor, selected = IdeSidebar._reconcile_cursor(
+        ["a", "b", "c"],
+        1,
+        focused=True,
+        free=False,
+        archive_mode=False,
+        current_session_id="a",
+        cursor_session_id="b",
+    )
+    assert (cursor, selected) == (1, "b")
+
+    cursor, selected = IdeSidebar._reconcile_cursor(
+        ["c", "a", "b"],
+        cursor,
+        focused=True,
+        free=False,
+        archive_mode=False,
+        current_session_id="a",
+        cursor_session_id=selected,
+    )
+    assert (cursor, selected) == (2, "b")
+
+
+def test_sidebar_unfocused_cursor_tracks_current_session():
+    assert IdeSidebar._reconcile_cursor(
+        ["c", "a", "b"],
+        2,
+        focused=False,
+        free=False,
+        archive_mode=False,
+        current_session_id="a",
+        cursor_session_id="b",
+    ) == (1, "a")
+
+
 def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

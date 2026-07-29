@@ -457,6 +457,31 @@ class IdeSidebar:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     @staticmethod
+    def _reconcile_cursor(
+        session_ids: list[str],
+        cursor: int,
+        *,
+        focused: bool,
+        free: bool,
+        archive_mode: bool,
+        current_session_id: str,
+        cursor_session_id: str,
+    ) -> tuple[int, str]:
+        if not session_ids:
+            return 0, ""
+        if cursor_session_id in session_ids and (focused or archive_mode or free):
+            cursor = session_ids.index(cursor_session_id)
+        elif not focused or (not free and (cursor < 0 or cursor >= len(session_ids))):
+            cursor = (
+                session_ids.index(current_session_id)
+                if current_session_id in session_ids
+                else 0
+            )
+        else:
+            cursor = max(0, min(cursor, len(session_ids) - 1))
+        return cursor, session_ids[cursor]
+
+    @staticmethod
     def _click_index(
         m: re.Match[bytes],
         entry_rows: int = ENTRY_ROWS,
@@ -963,7 +988,7 @@ class IdeSidebar:
         if interactive:
             tty.setcbreak(fd)     # unbuffered, no echo; Ctrl-C still raises KeyboardInterrupt
             sys.stdout.write(IdeSidebar.FOCUS_ON + IdeSidebar.MOUSE_ON)
-        cursor, query, buf, on_plus = -1, "", b"", False
+        cursor, cursor_session_id, query, buf, on_plus = -1, "", "", b"", False
         # Downward focus chain below the list: the filter line, then a hidden "show
         # archive" affordance. `archive_mode` swaps the whole list for the repo's archive.
         on_filter = on_archive = archive_mode = False
@@ -996,14 +1021,15 @@ class IdeSidebar:
                 # In archive mode / on a below-list spot, the cursor is the user's; don't
                 # snap it back to this_window (which isn't in the archive list anyway).
                 free = on_filter or on_archive or archive_mode
-                if not focused or (not free and (cursor < 0 or cursor >= len(names))):
-                    cursor = (
-                        session_ids.index(this_session_id)
-                        if this_session_id in session_ids
-                        else 0
-                    )
-                if archive_mode:
-                    cursor = max(0, min(cursor, len(names) - 1)) if names else 0
+                cursor, cursor_session_id = IdeSidebar._reconcile_cursor(
+                    session_ids,
+                    cursor,
+                    focused=focused,
+                    free=free,
+                    archive_mode=archive_mode,
+                    current_session_id=this_session_id,
+                    cursor_session_id=cursor_session_id,
+                )
                 width = IdeSidebar._width()
                 # Density for THIS draw — and the divisor the click math must reuse, so a
                 # short pane can't desync rendering from hit-testing.
@@ -1048,6 +1074,7 @@ class IdeSidebar:
                         focused = True
                         if names:
                             cursor = max(0, min(cursor + wheel, len(names) - 1))
+                            cursor_session_id = session_ids[cursor]
                         continue
                 elif buf and mouse_tail:
                     # An unfinished report is NOT keys — drop it. Flushing it would end the
@@ -1078,6 +1105,7 @@ class IdeSidebar:
                             skill_dir, session_ids[click]
                         ):
                             archive_mode, query, cursor = False, "", 0   # resumed → back to active
+                            cursor_session_id = ""
                     elif click == IdeSidebar.PLUS_HIT:
                         # Same action as Enter/Space on the focused `+` and as <prefix>+:
                         # the guided modal. This branch used to open the OLD inline name
@@ -1088,8 +1116,10 @@ class IdeSidebar:
                         IdeSidebar._launch_new_modal(skill_dir, IdeSidebar._repo_of(skill_dir))
                     elif click == IdeSidebar.ARCHIVE_HIT:
                         archive_mode, on_archive, on_filter, query, cursor = True, False, False, "", 0
+                        cursor_session_id = ""
                     elif 0 <= click < len(names):
                         cursor, on_plus, on_filter, on_archive, query = click, False, False, False, ""
+                        cursor_session_id = session_ids[cursor]
                         IdeSidebar._switch(session_ids[cursor], skill_dir)
                     continue
                 key = IdeSidebar._key(data)
@@ -1173,6 +1203,10 @@ class IdeSidebar:
                         pass   # the filter line: typing filters; Enter does nothing here
                     elif session_ids:
                         IdeSidebar._switch(session_ids[cursor], skill_dir)
+                if 0 <= cursor < len(session_ids):
+                    cursor_session_id = session_ids[cursor]
+                else:
+                    cursor_session_id = ""
         except KeyboardInterrupt:
             return 0
         finally:
