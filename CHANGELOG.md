@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar subagent counts now use only explicit `subagents.running` status
+  metadata from hooks or commands. The sidebar no longer scrapes visible agent
+  pane text, avoiding false positives from unrelated Claude background-session
+  messages and other transcript text.
+- Claude sessions now launch with the normal recorded `claude --resume <id>`
+  command. Failed resume no longer falls through to `claude agents`; outside the
+  frame, the fallback is a plain `claude` session.
+
 ## [1.0.20] - 2026-07-29
 
 ### Fixed

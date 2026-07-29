@@ -1252,9 +1252,7 @@ def test_current_chat_selects_plain_agent_pane_without_conversation_reference(
     ]
 
 
-def test_current_chat_opens_claude_agents_when_resume_fails(
-    tmp_path, monkeypatch
-):
+def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -1284,17 +1282,15 @@ def test_current_chat_opens_claude_agents_when_resume_fails(
     assert result == {
         "session_id": record["id"],
         "driver": "claude",
-        "opened": "claude-agents",
+        "opened": "claude",
     }
     assert calls == [
         (["claude", "--resume", "conversation-1"], {"cwd": str(workspace)}),
-        (["claude", "agents"], {"cwd": str(workspace)}),
+        (["claude"], {"cwd": str(workspace)}),
     ]
 
 
-def test_current_chat_opens_plain_claude_when_resume_and_agents_fail(
-    tmp_path, monkeypatch
-):
+def test_current_chat_never_uses_claude_agents_when_resume_fails(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -1314,10 +1310,7 @@ def test_current_chat_opens_plain_claude_when_resume_and_agents_fail(
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        if argv in (
-            ["claude", "--resume", "stale-conversation"],
-            ["claude", "agents"],
-        ):
+        if argv == ["claude", "--resume", "stale-conversation"]:
             return SimpleNamespace(returncode=1)
         return SimpleNamespace(returncode=0)
 
@@ -1327,12 +1320,11 @@ def test_current_chat_opens_plain_claude_when_resume_and_agents_fail(
     assert result["opened"] == "claude"
     assert calls == [
         (["claude", "--resume", "stale-conversation"], {"cwd": str(workspace)}),
-        (["claude", "agents"], {"cwd": str(workspace)}),
         (["claude"], {"cwd": str(workspace)}),
     ]
 
 
-def test_claude_agent_pane_falls_back_to_agents_on_resume_failure(tmp_path):
+def test_claude_agent_pane_uses_normal_resume_command(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -1349,7 +1341,8 @@ def test_claude_agent_pane_falls_back_to_agents_on_resume_failure(tmp_path):
 
     command = Frame._agent_command(record)
 
-    assert "claude --resume conversation-1 || claude agents || claude" in command
+    assert "claude --resume conversation-1; exec" in command
+    assert "claude agents" not in command
     assert command.endswith('; exec "${SHELL:-/bin/sh}"')
 
 

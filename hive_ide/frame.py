@@ -276,8 +276,6 @@ class Frame:
         driver = record.get("driver") or {}
         argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
         command = shlex.join(argv)
-        if driver.get("id") == "claude" and (driver.get("resume") or {}).get("reference"):
-            command = f"{command} || claude agents || claude"
         return cls._interactive_command(
             f"{command}; exec \"${{SHELL:-/bin/sh}}\""
         )
@@ -461,17 +459,12 @@ class Frame:
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
             if driver.get("id") == "claude":
-                for fallback_argv, opened in (
-                    (["claude", "agents"], "claude-agents"),
-                    (["claude"], "claude"),
-                ):
-                    fallback = subprocess.run(fallback_argv, cwd=record["working_dir"])
-                    if fallback.returncode != 0:
-                        continue
+                fallback = subprocess.run(["claude"], cwd=record["working_dir"])
+                if fallback.returncode == 0:
                     return {
                         "session_id": record["id"],
                         "driver": driver.get("id"),
-                        "opened": opened,
+                        "opened": "claude",
                     }
             raise HiveIdeError(f"The agent exited with status {result.returncode}.")
         return {
