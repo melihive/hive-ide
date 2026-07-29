@@ -278,11 +278,7 @@ def test_cli_current_chat_is_quiet_on_success(tmp_path, monkeypatch, capsys):
         name="CHAT",
         working_dir=workspace,
         source=_source(),
-        driver=bundled_drivers()["codex"].resolve(
-            name="CHAT",
-            working_dir=str(workspace),
-            conversation_reference="conversation-1",
-        ),
+        driver=_term(),
     )
 
     monkeypatch.setattr(
