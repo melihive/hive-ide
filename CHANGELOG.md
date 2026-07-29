@@ -9,8 +9,15 @@ All notable changes to `hive-ide` will be documented in this file.
 - Claude resume commands now fall back to `claude agents` when a resumed
   conversation is parked as a Claude Code background agent, so the pane offers
   Claude's attach UI instead of dropping to a dead shell.
+- Claude resume commands now fall back to a plain `claude` launch when both the
+  saved resume ID and `claude agents` are unavailable, so stale conversation IDs
+  do not strand the session at a failed shell.
 - Sidebar keyboard focus now follows the selected session ID across automatic
   list reorders instead of staying on the old row index.
+- Sidebar panes now derive the current/highlighted session from tmux's active
+  IDE window, so the focused/current row stays synchronized across sessions.
+- Selected current rows keep rendering their status glyph, making `▶` and
+  waiting/error markers visible on green or teal backgrounds.
 
 ## [1.0.18] - 2026-07-29
 

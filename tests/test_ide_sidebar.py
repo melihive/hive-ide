@@ -316,6 +316,25 @@ def test_sidebar_unfocused_cursor_tracks_current_session():
     ) == (1, "a")
 
 
+def test_sidebar_reads_active_session_id_from_tmux(monkeypatch):
+    def fake_run(argv, **_kwargs):
+        assert argv == ["tmux", "display-message", "-p", "#{@hive_ide_session_id}"]
+        return subprocess.CompletedProcess(argv, 0, "active-session\n", "")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert IdeSidebar._active_session_id("fallback") == "active-session"
+
+
+def test_sidebar_active_session_id_falls_back_on_tmux_error(monkeypatch):
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "no session")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert IdeSidebar._active_session_id("fallback") == "fallback"
+
+
 def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -354,6 +373,44 @@ def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):
     )
 
     assert _plain(lines[3]).rstrip().endswith("2")
+
+
+def test_selected_current_row_keeps_status_glyph_visible(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="CURRENT",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+    )
+    store.write(
+        "status",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "state": "working",
+            "driver": "term",
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        session["id"],
+        0,
+        24,
+        focused=True,
+        sidebar=_sidebar_config({}, SidebarProviderRegistry()),
+        providers=SidebarProviderRegistry(),
+    )
+
+    assert "▶" in _plain(lines[2])
 
 
 def test_subagent_count_renders_when_metadata_row_collapses(tmp_path):

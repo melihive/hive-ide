@@ -427,6 +427,20 @@ class IdeSidebar:
         )
 
     @staticmethod
+    def _active_session_id(fallback: str) -> str:
+        try:
+            result = subprocess.run(
+                ["tmux", "display-message", "-p", "#{@hive_ide_session_id}"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return fallback
+        active = result.stdout.strip() if result.returncode == 0 else ""
+        return active or fallback
+
+    @staticmethod
     def _focus_agent(session_id: str) -> None:
         """Right arrow — hand focus back to THIS window's agent/chat pane.
 
@@ -800,7 +814,16 @@ class IdeSidebar:
                 # Full 2-line box: icon + name + time. The real bg colour means the
                 # erase-to-EOL paints BOTH rows out to the pane edge (see _row).
                 sel = IdeSidebar.SEL_CUR if current else IdeSidebar.SEL_ALT
-                lines.append(row(append_inline_subagent(f"{driver_mark} {text}"), True, sel))
+                dot_text = grid.pad(glyph, grid.status_cells)
+                lines.append(
+                    row(
+                        append_inline_subagent(
+                            f"{driver_mark} {text}{pad} {dot_text}"
+                        ),
+                        True,
+                        sel,
+                    )
+                )
                 if show_sub:
                     lines.append(
                         row(
@@ -1018,6 +1041,7 @@ class IdeSidebar:
                     sessions = IdeSidebar._filter(StateIO.list_sessions(skill_dir, repo), query)
                 names = [s.get("name") or "?" for s in sessions]
                 session_ids = [s.get("id") or "" for s in sessions]
+                active_session_id = IdeSidebar._active_session_id(this_session_id)
                 # In archive mode / on a below-list spot, the cursor is the user's; don't
                 # snap it back to this_window (which isn't in the archive list anyway).
                 free = on_filter or on_archive or archive_mode
@@ -1027,7 +1051,7 @@ class IdeSidebar:
                     focused=focused,
                     free=free,
                     archive_mode=archive_mode,
-                    current_session_id=this_session_id,
+                    current_session_id=active_session_id,
                     cursor_session_id=cursor_session_id,
                 )
                 width = IdeSidebar._width()
@@ -1035,7 +1059,7 @@ class IdeSidebar:
                 # short pane can't desync rendering from hit-testing.
                 entry_rows = IdeSidebar._entry_rows(len(names), IdeSidebar._height(),
                                                     archive_mode)
-                lines = IdeSidebar.render_lines(skill_dir, sessions, repo, this_session_id,
+                lines = IdeSidebar.render_lines(skill_dir, sessions, repo, active_session_id,
                                                 cursor, width, query, focused, on_plus,
                                                 on_filter, on_archive, archive_mode,
                                                 entry_rows, sidebar_settings,
@@ -1162,7 +1186,7 @@ class IdeSidebar:
                         cursor += 1
                 elif key == "right":
                     # Leave the browse cursor alone — Right is "back to chat", not a pick.
-                    IdeSidebar._focus_agent(this_session_id)
+                    IdeSidebar._focus_agent(active_session_id)
                 elif key == "backspace":
                     query, cursor = query[:-1], 0
                 elif key in ("clear", "escape"):
