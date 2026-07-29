@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.13] - 2026-07-29
+
+### Fixed
+
+- Creating or adopting a session from the new-session modal now switches to the
+  newly created IDE window before focusing the agent pane.
+- Restoring an archived session now repairs/ensures the tmux window, reapplies
+  key bindings, and selects the restored session.
+- The right-click session options menu now labels the existing info popup as
+  `session info`.
+
 ## [1.0.12] - 2026-07-29
 
 ### Fixed
