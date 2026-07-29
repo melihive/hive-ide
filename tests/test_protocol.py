@@ -790,6 +790,42 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
     ]
 
 
+def test_current_chat_selects_existing_agent_pane_without_respawning(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda args, **_kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = frame.current_chat(record)
+
+    assert result == {
+        "session_id": record["id"],
+        "driver": "codex",
+        "opened": "existing-agent-pane",
+    }
+    assert calls == [["select-pane", "-t", "%2"]]
+
+
 def test_purge_requires_confirmation_and_removes_all_session_state(
     tmp_path, capsys
 ):

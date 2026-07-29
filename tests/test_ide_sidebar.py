@@ -304,10 +304,11 @@ def test_sidebar_grid_uses_the_shared_height_density_ladder():
     assert SidebarGrid.for_view(20, 12, 4).entry_rows == 1
 
 
-def test_selected_current_row_uses_the_quiet_original_palette():
-    assert "48;5;238" in IdeSidebar.SEL_CUR
-    assert "38;5;214" in IdeSidebar.SEL_CUR
-    assert "48;5;46" not in IdeSidebar.SEL_CUR
+def test_selected_rows_use_the_legacy_green_and_teal_palette():
+    assert "48;5;46" in IdeSidebar.SEL_CUR
+    assert "38;5;16" in IdeSidebar.SEL_CUR
+    assert "48;5;51" in IdeSidebar.SEL_ALT
+    assert "38;5;16" in IdeSidebar.SEL_ALT
 
 
 def test_mutations_use_the_selected_python_module(tmp_path, monkeypatch):

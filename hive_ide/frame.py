@@ -367,26 +367,11 @@ class Frame:
             )
         pane_id = self.role_panes(record["id"]).get("agent")
         if pane_id and os.environ.get("TMUX_PANE") != pane_id:
-            result = self.tmux(
-                [
-                    "respawn-pane",
-                    "-k",
-                    "-t",
-                    pane_id,
-                    "-c",
-                    record["working_dir"],
-                    "sh",
-                    "-c",
-                    self._agent_command(record),
-                ]
-            )
-            if result.returncode != 0:
-                raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
             self.tmux(["select-pane", "-t", pane_id])
             return {
                 "session_id": record["id"],
                 "driver": driver.get("id"),
-                "opened": "agent-pane",
+                "opened": "existing-agent-pane",
             }
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:

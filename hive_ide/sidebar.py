@@ -59,11 +59,10 @@ class IdeSidebar:
     # Selection uses a REAL background colour, not reverse-video (SGR 7): erase-to-EOL
     # fills with the background colour, and reverse is only an attribute — so a
     # reverse-video bar stops at the text instead of reaching the pane edge.
-    # Browse selection stays in the original quiet palette: charcoal + orange for the
-    # current session, charcoal + light text elsewhere. It is visible without turning a
-    # two-line row into a fluorescent block.
-    SEL_CUR = "\x1b[48;5;238m\x1b[1;38;5;214m"
-    SEL_ALT = "\x1b[48;5;239m\x1b[38;5;252m"
+    # Browse selection keeps the legacy IDE's high-contrast palette: green for the
+    # current window, teal for any other selected row.
+    SEL_CUR = "\x1b[48;5;46m\x1b[38;5;16m"
+    SEL_ALT = "\x1b[48;5;51m\x1b[38;5;16m"
     # The window you are actually IN, when it is NOT the browse selection: a subtle dark
     # fill so "you are here" is visible even while you type in the agent pane — deliberately
     # far quieter than the cyan selection bar. Tune the 238 (→ darker/lighter) to taste.
