@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.20] - 2026-07-29
+
 ### Fixed
 
 - Sidebar click and Enter activation now end sidebar browse focus after the
