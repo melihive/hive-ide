@@ -482,6 +482,17 @@ class IdeSidebar:
     @staticmethod
     def _initial_focus() -> bool:
         """tmux only reports focus on CHANGE, so seed the state for this pane."""
+        return IdeSidebar._pane_active()
+
+    @staticmethod
+    def _pane_active() -> bool:
+        """Authoritative tmux focus state for this sidebar pane.
+
+        Terminal focus events are lossy around window switches: the newly visible
+        window's sidebar can keep an old local browse cursor even though tmux has
+        already focused the chat pane. Polling the pane state before each draw keeps
+        the visual selection tied to the real active pane, not stale process memory.
+        """
         pane = os.environ.get("TMUX_PANE")
         if not pane:
             return False
@@ -1097,6 +1108,8 @@ class IdeSidebar:
                 # (two stats) and checked before drawing, so no stale frame is painted.
                 if IdeSidebar._reload_watch() != reload_baseline:
                     return 0
+                if focused and not IdeSidebar._pane_active():
+                    focused = False
                 # Every window runs its OWN sidebar, so cursor/query are per-process. Left
                 # alone they drift apart and arriving at a window shows a cursor parked
                 # where you last left it — reading as an out-of-sync bug. So a sidebar that

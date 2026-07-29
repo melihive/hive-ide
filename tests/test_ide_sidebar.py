@@ -323,6 +323,27 @@ def test_sidebar_reads_active_session_id_from_tmux(monkeypatch):
     assert IdeSidebar._active_session_id("fallback") == "active-session"
 
 
+def test_sidebar_pane_active_reads_tmux_pane_state(monkeypatch):
+    monkeypatch.setenv("TMUX_PANE", "%12")
+    seen = {}
+
+    def fake_run(argv, **_kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "0\n", "")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert IdeSidebar._pane_active() is False
+    assert seen["argv"] == [
+        "tmux",
+        "display-message",
+        "-p",
+        "-t",
+        "%12",
+        "#{pane_active}",
+    ]
+
+
 def test_sidebar_active_session_id_falls_back_on_tmux_error(monkeypatch):
     def fake_run(argv, **_kwargs):
         return subprocess.CompletedProcess(argv, 1, "", "no session")
