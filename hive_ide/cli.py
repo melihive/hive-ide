@@ -232,6 +232,7 @@ def _adopt_conversations(
                     "label": conversation.label,
                     "working_dir": conversation.working_dir,
                     "updated_at": conversation.updated_at,
+                    "preview": conversation.preview,
                 }
             )
         else:

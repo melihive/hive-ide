@@ -254,7 +254,7 @@ class IdeNewModal:
             if needle
             in " ".join(
                 str(item.get(key) or "")
-                for key in ("name", "label", "reference", "updated_at")
+                for key in ("name", "label", "reference", "updated_at", "preview")
             ).lower()
         ]
 
@@ -399,7 +399,9 @@ class IdeNewModal:
                     reference = str(item.get("reference") or "")
                     updated = str(item.get("updated_at") or "")
                     when = updated.replace("T", " ")[:16] if updated else ""
-                    rows.append((label, f"{when} {reference[:8]}".strip()))
+                    preview = str(item.get("preview") or "").strip()
+                    note = f"{when} · {preview}" if preview else f"{when} · {reference[:8]}"
+                    rows.append((label, note.strip(" ·")))
                 C._render_list(o, "", rows, st["adopt_sel"] - start)
                 if len(filtered) > len(visible):
                     o.append(

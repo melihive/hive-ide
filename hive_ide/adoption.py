@@ -20,6 +20,48 @@ class AdoptableConversation:
     working_dir: str
     updated_at: str | None
     source_path: str
+    preview: str | None = None
+
+
+def _compact_preview(text: str, *, limit: int = 96) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def _content_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [
+            text
+            for item in value
+            if isinstance(item, dict)
+            for text in (item.get("text"), item.get("content"))
+            if isinstance(text, str)
+        ]
+        return " ".join(parts) if parts else None
+    if isinstance(value, dict):
+        for key in ("text", "content", "message"):
+            text = _content_text(value.get(key))
+            if text:
+                return text
+    return None
+
+
+def _event_preview(payload: dict[str, Any]) -> str | None:
+    for key in ("message", "payload"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            text = _content_text(nested.get("content"))
+            if text:
+                return _compact_preview(text)
+    for key in ("content", "text", "message"):
+        text = _content_text(payload.get(key))
+        if text:
+            return _compact_preview(text)
+    return None
 
 
 class ClaudeSessionAdopter:
@@ -50,6 +92,7 @@ class ClaudeSessionAdopter:
     ) -> AdoptableConversation | None:
         reference = path.stem
         updated_at: str | None = None
+        preview: str | None = None
         try:
             with path.open(encoding="utf-8") as handle:
                 for line in handle:
@@ -63,6 +106,7 @@ class ClaudeSessionAdopter:
                         reference = payload["sessionId"]
                     if isinstance(payload.get("timestamp"), str):
                         updated_at = payload["timestamp"]
+                    preview = _event_preview(payload) or preview
         except OSError:
             return None
         return AdoptableConversation(
@@ -72,6 +116,7 @@ class ClaudeSessionAdopter:
             working_dir=str(Path(working_dir).expanduser().resolve()),
             updated_at=updated_at,
             source_path=str(path),
+            preview=preview,
         )
 
 
@@ -100,6 +145,7 @@ class CodexSessionAdopter:
         reference: str | None = None
         updated_at: str | None = None
         cwd: str | None = None
+        preview: str | None = None
         try:
             with path.open(encoding="utf-8") as handle:
                 for line in handle:
@@ -112,8 +158,10 @@ class CodexSessionAdopter:
                     if isinstance(event.get("timestamp"), str):
                         updated_at = event["timestamp"]
                     payload = event.get("payload")
+                    preview = _event_preview(event) or preview
                     if not isinstance(payload, dict):
                         continue
+                    preview = _event_preview(payload) or preview
                     if event.get("type") != "session_meta":
                         continue
                     candidate = payload.get("session_id") or payload.get("id")
@@ -121,7 +169,6 @@ class CodexSessionAdopter:
                         reference = candidate
                     if isinstance(payload.get("cwd"), str):
                         cwd = str(Path(payload["cwd"]).expanduser().resolve())
-                    break
         except OSError:
             return None
         if cwd != working_dir or not reference:
@@ -140,6 +187,7 @@ class CodexSessionAdopter:
             working_dir=working_dir,
             updated_at=updated_at,
             source_path=str(path),
+            preview=preview,
         )
 
 

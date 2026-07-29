@@ -225,6 +225,14 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
                 "sessionId": "22222222-2222-4222-8222-222222222222",
                 "timestamp": "2026-07-28T11:00:00.000Z",
                 "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Latest Hive Events allowlist work",
+                        }
+                    ]
+                },
             }
         )
         + "\n",
@@ -262,6 +270,7 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
         "--resume",
         "22222222-2222-4222-8222-222222222222",
     ]
+    assert newest["host"]["adopted"]["updated_at"] == "2026-07-28T11:00:00.000Z"
 
     assert main(
         [
@@ -376,6 +385,22 @@ def test_adopt_discovers_codex_sessions_for_workspace(tmp_path, capsys, monkeypa
                     },
                 }
             )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"Working on {reference} preview",
+                            }
+                        ],
+                    },
+                }
+            )
             + "\n",
             encoding="utf-8",
         )
@@ -398,6 +423,7 @@ def test_adopt_discovers_codex_sessions_for_workspace(tmp_path, capsys, monkeypa
         "new-codex",
         "old-codex",
     ]
+    assert preview["created"][0]["preview"] == "Working on new-codex preview"
 
     assert main(
         [

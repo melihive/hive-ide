@@ -159,12 +159,12 @@ def test_modal_adoption_support_is_explicit():
 
 def test_modal_filters_adoptable_conversations():
     state = {
-        "filter": "new",
+        "filter": "billing",
         "adopt_items": [
-            {"label": "CLAUDE old", "reference": "aaa"},
-            {"label": "CODEX new", "reference": "bbb"},
+            {"label": "CLAUDE old", "reference": "aaa", "preview": "old archive cleanup"},
+            {"label": "CODEX new", "reference": "bbb", "preview": "billing api fix"},
         ],
     }
     assert IdeNewModal._filtered_conversations(state) == [
-        {"label": "CODEX new", "reference": "bbb"}
+        {"label": "CODEX new", "reference": "bbb", "preview": "billing api fix"}
     ]
