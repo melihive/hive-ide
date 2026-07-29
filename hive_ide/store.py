@@ -47,12 +47,13 @@ class StateStore:
         return self.workspace_dir / "config.json"
 
     @contextmanager
-    def mutation_lock(self):
+    def mutation_lock(self, *, blocking: bool = True):
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         path = self.workspace_dir / ".mutation.lock"
         try:
             with path.open("a+", encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                fcntl.flock(handle.fileno(), flags)
                 try:
                     yield
                 finally:
@@ -149,6 +150,47 @@ class StateStore:
         records.sort(key=lambda item: (item.get("name") or "").casefold())
         records.sort(key=lambda item: item.get("last_active") or "", reverse=True)
         return records
+
+    def refresh_stable_sources(self, *, collections: tuple[str, ...] = ("sessions",)) -> dict[str, Any]:
+        """Best-effort stable source metadata repair.
+
+        Stable package patch upgrades should not leave session records with stale
+        version pins. This updates JSON metadata only; it never rebuilds tmux panes
+        or touches driver state. Dev and explicit sources stay strict elsewhere.
+        """
+        from .source import inspect_interpreter
+
+        refreshed: list[str] = []
+        skipped: dict[str, str] = {}
+        handshakes: dict[str, dict[str, Any] | None] = {}
+        try:
+            with self.mutation_lock(blocking=False):
+                for collection in collections:
+                    for record in self.list(collection):
+                        source = record.get("source") or {}
+                        if source.get("kind") != "stable":
+                            continue
+                        interpreter = source.get("interpreter")
+                        if not isinstance(interpreter, str) or not interpreter:
+                            continue
+                        if interpreter not in handshakes:
+                            try:
+                                handshakes[interpreter] = inspect_interpreter(interpreter)
+                            except Exception as exc:  # fail-open: listing/opening must survive
+                                handshakes[interpreter] = None
+                                skipped[interpreter] = str(exc)
+                        handshake = handshakes.get(interpreter)
+                        if not handshake:
+                            continue
+                        version = handshake.get("package_version")
+                        if not isinstance(version, str) or version == source.get("version"):
+                            continue
+                        record["source"] = {**source, "version": version}
+                        self.write(collection, record["id"], record)
+                        refreshed.append(record["id"])
+        except StateError as exc:
+            return {"refreshed": [], "skipped": {"state": str(exc)}}
+        return {"refreshed": refreshed, "skipped": skipped}
 
     def find_session(self, session_id: str, *, archived: bool = False) -> dict[str, Any] | None:
         return self.read("archive" if archived else "sessions", session_id)

@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Foreground workspace commands now opportunistically self-heal stale stable
+  source version pins across active and archived sessions without rebuilding
+  panes, so ordinary PyPI patch upgrades no longer require a manual
+  `source-set` sweep.
+
 ## [1.0.11] - 2026-07-29
 
 ### Fixed

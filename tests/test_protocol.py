@@ -1002,6 +1002,102 @@ def test_stable_source_patch_upgrade_refreshes_session_record(tmp_path, monkeypa
     assert store.find_session(record["id"])["source"]["version"] == "1.0.10"
 
 
+def test_workspace_refresh_updates_stable_sources_without_touching_dev(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    stable_active = store.create_session(
+        name="STABLE",
+        working_dir=str(workspace),
+        source={
+            "kind": "stable",
+            "interpreter": sys.executable,
+            "version": "1.0.10",
+        },
+        driver=bundled_drivers()["term"].resolve(
+            name="STABLE", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    stable_archived = store.create_session(
+        name="ARCHIVE",
+        working_dir=str(workspace),
+        source={
+            "kind": "stable",
+            "interpreter": sys.executable,
+            "version": "1.0.10",
+        },
+        driver=bundled_drivers()["term"].resolve(
+            name="ARCHIVE", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    store.archive_session(stable_archived["id"])
+    dev = store.create_session(
+        name="DEV",
+        working_dir=str(workspace),
+        source={"kind": "dev", "interpreter": sys.executable, "version": "dev-old"},
+        driver=bundled_drivers()["term"].resolve(
+            name="DEV", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    monkeypatch.setattr(
+        "hive_ide.source.inspect_interpreter",
+        lambda _interpreter: {
+            "interpreter": sys.executable,
+            "package_version": "1.0.11",
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+        },
+    )
+
+    result = store.refresh_stable_sources(collections=("sessions", "archive"))
+
+    assert sorted(result["refreshed"]) == sorted(
+        [stable_active["id"], stable_archived["id"]]
+    )
+    assert store.find_session(stable_active["id"])["source"]["version"] == "1.0.11"
+    assert (
+        store.find_session(stable_archived["id"], archived=True)["source"]["version"]
+        == "1.0.11"
+    )
+    assert store.find_session(dev["id"])["source"]["version"] == "dev-old"
+
+
+def test_list_self_heals_stable_source_metadata(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="STABLE",
+        working_dir=str(workspace),
+        source={
+            "kind": "stable",
+            "interpreter": sys.executable,
+            "version": "1.0.10",
+        },
+        driver=bundled_drivers()["term"].resolve(
+            name="STABLE", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    monkeypatch.setattr(
+        "hive_ide.source.inspect_interpreter",
+        lambda _interpreter: {
+            "interpreter": sys.executable,
+            "package_version": "1.0.11",
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+        },
+    )
+
+    assert main(["--state-home", str(state), "--workspace-key", str(workspace), "ls"]) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result[0]["source"]["version"] == "1.0.11"
+    assert store.find_session(record["id"])["source"]["version"] == "1.0.11"
+
+
 def test_dev_source_version_skew_stays_loud(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

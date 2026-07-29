@@ -62,6 +62,10 @@ def _context(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any]]:
     return store, config
 
 
+def _refresh_workspace_sources(store: StateStore) -> None:
+    store.refresh_stable_sources(collections=("sessions", "archive"))
+
+
 def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     if args.adopt:
@@ -274,11 +278,13 @@ def cmd_adopt(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_list(args: argparse.Namespace) -> list[dict[str, Any]]:
     store, _ = _context(args)
+    _refresh_workspace_sources(store)
     return store.list("archive" if args.archived else "sessions")
 
 
 def cmd_show(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
+    _refresh_workspace_sources(store)
     record = store.find_session(args.session_id, archived=args.archived)
     if record is None:
         raise UsageError(f"No session with id {args.session_id}.")
@@ -294,6 +300,7 @@ def cmd_archive(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
+    _refresh_workspace_sources(store)
     record = store.resume_session(args.session_id)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
     frame.ensure(record)
@@ -323,6 +330,7 @@ def cmd_current(args: argparse.Namespace) -> dict[str, Any]:
     if not session_id:
         raise UsageError("No current session id is available.")
     store, _ = _context(args)
+    _refresh_workspace_sources(store)
     record = store.find_session(session_id)
     if record is None:
         raise UsageError(f"No session with id {session_id}.")
@@ -334,6 +342,7 @@ def _current_record(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any
     if not session_id:
         raise UsageError("No current session id is available.")
     store, _ = _context(args)
+    _refresh_workspace_sources(store)
     return store, _session(store, session_id, None)
 
 
@@ -635,6 +644,7 @@ def cmd_hook_setup(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
+    _refresh_workspace_sources(store)
     registry = configured_registry(config)
     if not store.list("sessions"):
         _create_session(
@@ -660,6 +670,7 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
+    _refresh_workspace_sources(store)
     registry = configured_registry(config)
     sessions = store.list("sessions")
     source_errors = []
