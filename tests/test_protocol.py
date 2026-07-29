@@ -1046,10 +1046,8 @@ def test_frame_select_session_selects_window_then_agent_pane(tmp_path, monkeypat
     )
 
     assert frame.select_session(record["id"])
-    assert calls == [
-        ["select-window", "-t", "@7"],
-        ["select-pane", "-t", "@7.1"],
-    ]
+    assert calls[0] == ["select-window", "-t", "@7"]
+    assert calls[-1] == ["select-pane", "-t", "@7.1"]
 
 
 def test_stable_source_patch_upgrade_refreshes_session_record(tmp_path, monkeypatch):

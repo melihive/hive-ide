@@ -204,6 +204,13 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert active == beta_window
         frame.tmux(["select-window", "-t", alpha_window])
         frame.tmux(["resize-window", "-t", alpha_window, "-x", "180", "-y", "40"])
+        frame.tmux(["swap-pane", "-s", f"{alpha_window}.0", "-t", f"{alpha_window}.1"])
+        swapped = _pane_rows(frame, alpha_window)
+        assert [(index, role) for index, role, _, _ in swapped] == [
+            ("0", "agent"),
+            ("1", "sidebar"),
+            ("2", "plan"),
+        ]
         assert main(
             [
                 *base,
@@ -212,6 +219,12 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
                 "--mode=snap",
             ]
         ) == 0
+        repaired = _pane_rows(frame, alpha_window)
+        assert [(index, role) for index, role, _, _ in repaired] == [
+            ("0", "sidebar"),
+            ("1", "agent"),
+            ("2", "plan"),
+        ]
         widths = frame.tmux(
             [
                 "list-panes",

@@ -147,6 +147,9 @@ class Frame:
         window_id = self.windows().get(session_id)
         if not window_id:
             return {}
+        return self._role_panes_in_window(window_id)
+
+    def _role_panes_in_window(self, window_id: str) -> dict[str, str]:
         result = self.tmux(
             [
                 "list-panes",
@@ -164,6 +167,38 @@ class Frame:
             for role, _, pane_id in [line.partition("\t")]
             if role and pane_id
         }
+
+    def _pane_indices(self, window_id: str) -> dict[int, str]:
+        result = self.tmux(
+            [
+                "list-panes",
+                "-t",
+                window_id,
+                "-F",
+                "#{pane_index}\t#{pane_id}",
+            ]
+        )
+        if result.returncode != 0:
+            return {}
+        rows: dict[int, str] = {}
+        for line in result.stdout.splitlines():
+            index, _, pane_id = line.partition("\t")
+            if index.isdigit() and pane_id:
+                rows[int(index)] = pane_id
+        return rows
+
+    def _order_role_panes(self, window_id: str) -> dict[str, str]:
+        roles = self._role_panes_in_window(window_id)
+        if set(self.PANE_ROLES) - set(roles):
+            return roles
+        for index, role in enumerate(self.PANE_ROLES):
+            roles = self._role_panes_in_window(window_id)
+            indices = self._pane_indices(window_id)
+            role_pane = roles.get(role)
+            index_pane = indices.get(index)
+            if role_pane and index_pane and role_pane != index_pane:
+                self.tmux(["swap-pane", "-s", role_pane, "-t", index_pane])
+        return self._role_panes_in_window(window_id)
 
     def _module(
         self, module: str, args: list[str], *, interpreter: str | None = None
@@ -415,21 +450,24 @@ class Frame:
             self.tmux(["set-option", "-p", "-t", f"{target}.{index}", "@hive_ide_pane", role])
 
     def _apply_columns(self, target: str) -> None:
+        roles = self._order_role_panes(target)
+        sidebar_pane = roles.get("sidebar", f"{target}.0")
+        plan_pane = roles.get("plan", f"{target}.2")
         width = self.tmux(
             ["display-message", "-p", "-t", target, "#{window_width}"]
         ).stdout.strip()
         columns = IdeLayout.columns(int(width)) if width.isdigit() else None
         if columns is None:
-            self.tmux(["select-pane", "-t", f"{target}.0"])
+            self.tmux(["select-pane", "-t", sidebar_pane])
             zoomed = self.tmux(
                 ["display-message", "-p", "-t", target, "#{window_zoomed_flag}"]
             ).stdout.strip()
             if zoomed != "1":
-                self.tmux(["resize-pane", "-Z", "-t", f"{target}.0"])
+                self.tmux(["resize-pane", "-Z", "-t", sidebar_pane])
             return
         sidebar, _, plan = columns
-        self.tmux(["resize-pane", "-t", f"{target}.0", "-x", str(sidebar)])
-        self.tmux(["resize-pane", "-t", f"{target}.2", "-x", str(plan)])
+        self.tmux(["resize-pane", "-t", sidebar_pane, "-x", str(sidebar)])
+        self.tmux(["resize-pane", "-t", plan_pane, "-x", str(plan)])
 
     def build(self, record: dict[str, Any]) -> None:
         working_dir = record["working_dir"]
@@ -513,7 +551,10 @@ class Frame:
         if not target:
             return False
         self.tmux(["select-window", "-t", target])
-        self.tmux(["select-pane", "-t", f"{target}.{pane}"])
+        roles = self._order_role_panes(target)
+        role = self.PANE_ROLES[pane] if 0 <= pane < len(self.PANE_ROLES) else None
+        pane_target = roles.get(role or "", f"{target}.{pane}")
+        self.tmux(["select-pane", "-t", pane_target])
         return True
 
     def rebuild(self, record: dict[str, Any]) -> None:

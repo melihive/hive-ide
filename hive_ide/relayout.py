@@ -60,6 +60,47 @@ class IdeRelayout:
             IdeRelayout._tmux(socket, ["resize-pane", "-t", f"{win}.1", "-Z"])
 
     @staticmethod
+    def _role_panes(socket: str, win: str) -> dict[str, str]:
+        rows = IdeRelayout._tmux(
+            socket,
+            ["list-panes", "-t", win, "-F", "#{@hive_ide_pane}\t#{pane_id}"],
+        )
+        return {
+            role: pane_id
+            for line in rows.splitlines()
+            for role, _, pane_id in [line.partition("\t")]
+            if role and pane_id
+        }
+
+    @staticmethod
+    def _pane_indices(socket: str, win: str) -> dict[int, str]:
+        rows = IdeRelayout._tmux(
+            socket,
+            ["list-panes", "-t", win, "-F", "#{pane_index}\t#{pane_id}"],
+        )
+        out: dict[int, str] = {}
+        for line in rows.splitlines():
+            index, _, pane_id = line.partition("\t")
+            if index.isdigit() and pane_id:
+                out[int(index)] = pane_id
+        return out
+
+    @staticmethod
+    def _order_role_panes(socket: str, win: str) -> dict[str, str]:
+        desired = ("sidebar", "agent", "plan")
+        roles = IdeRelayout._role_panes(socket, win)
+        if set(desired) - set(roles):
+            return roles
+        for index, role in enumerate(desired):
+            roles = IdeRelayout._role_panes(socket, win)
+            indices = IdeRelayout._pane_indices(socket, win)
+            role_pane = roles.get(role)
+            index_pane = indices.get(index)
+            if role_pane and index_pane and role_pane != index_pane:
+                IdeRelayout._tmux(socket, ["swap-pane", "-s", role_pane, "-t", index_pane])
+        return IdeRelayout._role_panes(socket, win)
+
+    @staticmethod
     def _plan_width(width: int, side: int, pw: int, pmin: int, amin: int, apref: int) -> int:
         """How wide the plan column gets — the AGENT has priority for the slack.
 
@@ -262,10 +303,17 @@ class IdeRelayout:
         prev_side, prev_plan = state.get("side"), state.get("plan")
         if mode == "adopt" and prev_win:
             # Re-read the LEFT window live: the state may predate a drag made since.
-            live = IdeRelayout._tmux(sock, ["display-message", "-p", "-t", f"{prev_win}.0",
-                                            "#{pane_width}"])
-            live_plan = IdeRelayout._tmux(sock, ["display-message", "-p", "-t", f"{prev_win}.2",
-                                                 "#{pane_width}"])
+            prev_roles = IdeRelayout._order_role_panes(sock, prev_win)
+            live = IdeRelayout._tmux(
+                sock,
+                ["display-message", "-p", "-t", prev_roles.get("sidebar", f"{prev_win}.0"),
+                 "#{pane_width}"],
+            )
+            live_plan = IdeRelayout._tmux(
+                sock,
+                ["display-message", "-p", "-t", prev_roles.get("plan", f"{prev_win}.2"),
+                 "#{pane_width}"],
+            )
             if live.isdigit() and live_plan.isdigit():
                 prev_side, prev_plan = int(live), int(live_plan)
         active_geometry = IdeRelayout._tmux(
@@ -300,6 +348,7 @@ class IdeRelayout:
                 )
                 width = canonical[0]
             if width < sw + amin + pmin:
+                IdeRelayout._order_role_panes(sock, win)
                 # MOBILE: three columns cannot fit, so stop pretending. The FOCUSED column
                 # owns the whole window (the `pane-focus-in` hook picks which one) — a
                 # 4-column sidebar rail beside a squeezed plan is unusable on a phone.
@@ -315,9 +364,16 @@ class IdeRelayout:
                     side, plan = taken            # carry the manual drag to every window
             remembered_plan = plan
             IdeRelayout._set_zoom(sock, win, False)
-            # pane 0 = sidebar, pane 2 = plan; the agent (pane 1) absorbs the remainder.
-            IdeRelayout._tmux(sock, ["resize-pane", "-t", f"{win}.0", "-x", str(side)])
-            IdeRelayout._tmux(sock, ["resize-pane", "-t", f"{win}.2", "-x", str(plan)])
+            roles = IdeRelayout._order_role_panes(sock, win)
+            # The role tag is authoritative; pane indices can drift after manual swaps.
+            IdeRelayout._tmux(
+                sock,
+                ["resize-pane", "-t", roles.get("sidebar", f"{win}.0"), "-x", str(side)],
+            )
+            IdeRelayout._tmux(
+                sock,
+                ["resize-pane", "-t", roles.get("plan", f"{win}.2"), "-x", str(plan)],
+            )
         # Remember which window is active NOW: on the next switch it is the one being LEFT,
         # so its columns are where a manual drag would live. A `snap` (real terminal resize)
         # also refreshes this, which is what makes a resize "reset to defaults" stick.

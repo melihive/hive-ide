@@ -17,6 +17,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - The default working status marker is now `▶`, making active work read like a
   play/running indicator instead of another dot.
 - The archive footer control now uses the larger one-cell `▼` marker.
+- Relayout now repairs sidebar/agent/plan pane order by role tags before resizing,
+  so manual or tmux-induced pane swaps do not leave the sidebar in the agent column.
 
 ## [1.0.14] - 2026-07-29
 
