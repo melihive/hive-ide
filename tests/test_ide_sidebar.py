@@ -98,7 +98,11 @@ def test_merged_checkout_marker_is_suppressed_while_subagents_run(tmp_path):
         "subagents": {"running": 2},
     }
 
+    registry = SidebarProviderRegistry()
+    sidebar = _sidebar_config({}, registry)
+
     assert provider.value(tmp_path, session) == "busy"
+    assert sidebar["icons"]["providers"]["checkout"]["busy"] == "⏳"
     session["subagents"]["running"] = 0
     assert provider.value(tmp_path, session) == "missing"
 

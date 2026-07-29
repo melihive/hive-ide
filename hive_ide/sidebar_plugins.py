@@ -134,7 +134,7 @@ def _subagent_count(session: dict[str, Any], status: dict[str, Any] | None = Non
 class SubagentsProvider:
     id = "subagents"
     region: SidebarRegion = "slot"
-    default_icons = {"running": "◼", "default": "◼"}
+    default_icons: dict[str, str] = {}
     cache_seconds = 2
     ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
     AGENT_ROW_RE = re.compile(r"^\s*[○●◦]\s+(?:codex|claude)\b", re.IGNORECASE)
@@ -278,7 +278,7 @@ class CheckoutProvider:
     default_icons = {
         "live": "🔀",
         "shipped": "🚢",
-        "busy": "…",
+        "busy": "⏳",
         "missing": "✅",
         "unknown": "🔀",
     }

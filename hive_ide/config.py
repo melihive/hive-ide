@@ -64,8 +64,8 @@ DEFAULT_SIDEBAR = {
         "status": {"working": "●", "waiting": "●", "error": "!"},
         "controls": {"create": "+", "archive": "▾"},
         "providers": {
-            "checkout": {"busy": "…"},
-            "subagents": {"running": "◼"},
+            "checkout": {"busy": "⏳"},
+            "subagents": {},
         },
     },
 }

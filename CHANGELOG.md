@@ -10,7 +10,10 @@ All notable changes to `hive-ide` will be documented in this file.
 
 - Sidebar subagent counts now persist live-pane fallback observations into
   session status and reserve a stable right-edge column, keeping counts visible
-  for inactive rows and dense one-row layouts.
+  for inactive rows and dense one-row layouts. Subagents render as a plain count,
+  with no symbolic fallback icon.
+- The default checkout busy marker now uses an hourglass emoji instead of an
+  ellipsis, avoiding a visual clash with truncated text.
 
 ## [1.0.14] - 2026-07-29
 
