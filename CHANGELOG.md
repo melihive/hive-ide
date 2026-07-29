@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.12] - 2026-07-29
+
 ### Fixed
 
 - Foreground workspace commands now opportunistically self-heal stale stable
