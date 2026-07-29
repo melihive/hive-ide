@@ -345,7 +345,7 @@ def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
     assert sessions[0]["driver"]["id"] == "term"
 
 
-def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypatch):
+def test_adopt_requires_explicit_reference_or_limit(tmp_path, capsys, monkeypatch):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -397,6 +397,65 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
             "--driver",
             "claude",
         ]
+    ) == 2
+    err = capsys.readouterr().err
+    assert "requires --reference=<conversation-id> or --limit=<count>" in err
+    assert StateStore(state, workspace).list("sessions") == []
+
+
+def test_adopt_imports_claude_sessions_with_explicit_limit(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    project = home / ".claude" / "projects" / ("-" + "-".join(workspace.resolve().parts[1:]))
+    project.mkdir(parents=True)
+    first = project / "11111111-1111-4111-8111-111111111111.jsonl"
+    second = project / "22222222-2222-4222-8222-222222222222.jsonl"
+    first.write_text(
+        json.dumps(
+            {
+                "sessionId": "11111111-1111-4111-8111-111111111111",
+                "timestamp": "2026-07-28T10:00:00.000Z",
+                "type": "assistant",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        json.dumps(
+            {
+                "sessionId": "22222222-2222-4222-8222-222222222222",
+                "customTitle": "Hive Events Allowlist",
+                "timestamp": "2026-07-28T11:00:00.000Z",
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Latest Hive Events allowlist work",
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "adopt",
+            "--driver",
+            "claude",
+            "--limit=2",
+        ]
     ) == 0
     result = json.loads(capsys.readouterr().out)
     assert len(result["created"]) == 2
@@ -429,6 +488,7 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
             "adopt",
             "--driver",
             "claude",
+            "--dry-run",
         ]
     ) == 0
     rerun = json.loads(capsys.readouterr().out)
@@ -776,6 +836,44 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     ]
 
 
+def test_hook_does_not_overwrite_existing_conversation_reference(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["claude"]
+    record = store.create_session(
+        name="HOOK",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="HOOK", working_dir=str(workspace), conversation_reference="manual-1"
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "waiting",
+            "--driver",
+            "claude",
+            '{"session_id":"background-1"}',
+        ]
+    ) == 0
+
+    status = store.read("status", record["id"])
+    assert status["conversation_reference"] == "background-1"
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["resume"]["reference"] == "manual-1"
+    assert updated["driver"]["launch_argv"] == ["claude", "--resume", "manual-1"]
+
+
 def test_hook_relay_uses_tmux_server_when_available(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1073,6 +1171,72 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
             ["codex", "resume", "-C", str(workspace), "conversation-1"],
             {"cwd": str(workspace)},
         )
+    ]
+
+
+def test_current_chat_allows_plain_agent_without_conversation_reference(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference=None,
+        ),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {})
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
+    result = frame.current_chat(record)
+
+    assert result["opened"] == "terminal"
+    assert calls == [(["claude"], {"cwd": str(workspace)})]
+
+
+def test_current_chat_selects_plain_agent_pane_without_conversation_reference(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference=None,
+        ),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda args, **_kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="claude\n", stderr=""),
+    )
+
+    result = frame.current_chat(record)
+
+    assert result["opened"] == "existing-agent-pane"
+    assert calls == [
+        ["display-message", "-p", "-t", "%2", "#{pane_current_command}"],
+        ["select-pane", "-t", "%2"],
     ]
 
 

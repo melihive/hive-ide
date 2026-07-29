@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
+import re
 
 from .layout import IdeLayout
 
@@ -19,9 +20,11 @@ class SidebarGrid:
     slot_cells: tuple[int, ...] = (2, 2)
 
     GAP_CELLS = 1
+    ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
     @staticmethod
     def cell_width(text: str) -> int:
+        text = SidebarGrid.ANSI_RE.sub("", text)
         width = 0
         for char in text:
             if unicodedata.combining(char) or unicodedata.category(char) in {

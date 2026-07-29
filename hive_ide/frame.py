@@ -418,11 +418,6 @@ class Frame:
         argv = list(driver.get("launch_argv") or [])
         if not argv:
             raise UsageError("The session has no agent command to resume.")
-        reference = (driver.get("resume") or {}).get("reference")
-        if driver.get("id") != "term" and not reference:
-            raise UsageError(
-                "No conversation reference has been observed for this session yet."
-            )
         pane_id = self.role_panes(record["id"]).get("agent")
         if pane_id and os.environ.get("TMUX_PANE") != pane_id:
             current = self.tmux(

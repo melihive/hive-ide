@@ -14,12 +14,23 @@ All notable changes to `hive-ide` will be documented in this file.
 - Claude resume commands now fall back to a plain `claude` launch when both the
   saved resume ID and `claude agents` are unavailable, so stale conversation IDs
   do not strand the session at a failed shell.
+- `current-chat` now focuses or launches a plain agent command even before a
+  conversation ID has been observed, which keeps freshly reset Claude sessions
+  usable.
+- Agent hooks no longer replace an existing session resume reference with a
+  different hook-reported ID, preventing Claude background-agent IDs from
+  poisoning the IDE session's resumable chat.
+- Standalone `adopt` now requires an explicit `--reference` or `--limit` for
+  non-dry-run imports, so a discovery command cannot accidentally create a
+  sidebar full of adopted conversations.
 - Sidebar keyboard focus now follows the selected session ID across automatic
   list reorders instead of staying on the old row index.
 - Sidebar panes now derive the current/highlighted session from tmux's active
   IDE window, so the focused/current row stays synchronized across sessions.
 - Selected current rows keep rendering their status glyph, making `▶` and
   waiting/error markers visible on green or teal backgrounds.
+- Sidebar terminal-cell measurement now ignores ANSI color escapes, keeping
+  styled relative timestamps separated from right-edge subagent counts.
 
 ## [1.0.18] - 2026-07-29
 

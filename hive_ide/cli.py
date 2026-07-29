@@ -215,6 +215,11 @@ def _adopt_conversations(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     selected_working_dir = workspace_key(working_dir or store.workspace_key)
+    if not dry_run and reference is None and limit is None:
+        raise UsageError(
+            "Adopting sessions requires --reference=<conversation-id> or "
+            "--limit=<count>. Use --dry-run to list adoptable conversations first."
+        )
     adopter = ConversationAdopter(store, config)
     existing = adopter.existing_references(driver_id=driver_id)
     available = [

@@ -586,6 +586,22 @@ def test_sidebar_grid_reserves_right_status_before_age_and_slots():
     assert SidebarGrid.cell_width(row) == 12
 
 
+def test_sidebar_grid_keeps_right_status_separate_with_styled_age():
+    grid = SidebarGrid(width=10, entry_rows=2)
+    row = grid.metadata_row(
+        state="",
+        slots=["📝", "❎"],
+        age="28s",
+        age_style="\x1b[38;5;244m",
+        reset="\x1b[0m",
+        right_status="1",
+    )
+
+    plain = _plain(row)
+    assert plain.rstrip().endswith("28s   1")
+    assert SidebarGrid.cell_width(row) == 10
+
+
 def test_sidebar_grid_supports_three_slots_and_mixed_icon_widths():
     grid = SidebarGrid(
         width=20,

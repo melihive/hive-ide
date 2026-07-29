@@ -149,7 +149,13 @@ class IdeHook:
                     return 0
                 store.write("status", session_id, status)
                 record["last_active"] = status["observed_at"]
-                if reference and (record.get("driver") or {}).get("id") == parsed.driver:
+                current_driver = record.get("driver") or {}
+                current_reference = (current_driver.get("resume") or {}).get("reference")
+                if (
+                    reference
+                    and current_driver.get("id") == parsed.driver
+                    and (not current_reference or current_reference == reference)
+                ):
                     record["driver"] = driver.resolve(
                         name=record["name"],
                         working_dir=record["working_dir"],
