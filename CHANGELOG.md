@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.11] - 2026-07-29
+
 ### Fixed
 
 - Claude and Codex adoption candidates now show the conversation title or first
