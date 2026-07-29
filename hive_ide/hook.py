@@ -139,6 +139,10 @@ class IdeHook:
                 "conversation_reference": reference,
                 "observed_at": utc_now(),
             }
+            subagents_running = IdeHook._subagents_running(payload)
+            if subagents_running is not None:
+                status["subagents"] = {"running": subagents_running}
+                status["subagents_running"] = subagents_running
             with store.mutation_lock():
                 record = store.find_session(session_id)
                 if record is None:
@@ -155,6 +159,28 @@ class IdeHook:
         except BaseException:
             pass
         return 0
+
+    @staticmethod
+    def _subagents_running(payload: dict) -> int | None:
+        """Best-effort generic extraction for host/agent hook payloads.
+
+        The package stays host-neutral: it does not know how a given agent names its
+        internal workers. Hooks that can observe them may send either
+        `subagents_running` or `subagents.running`, and the sidebar consumes the
+        normalized status field.
+        """
+        candidates: list[object] = [payload.get("subagents_running")]
+        subagents = payload.get("subagents")
+        if isinstance(subagents, dict):
+            candidates.append(subagents.get("running"))
+        for value in candidates:
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return max(0, value)
+            if isinstance(value, str) and value.isdigit():
+                return max(0, int(value))
+        return None
 
     @staticmethod
     def _relay(

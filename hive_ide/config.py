@@ -40,6 +40,7 @@ DEFAULT_KEYS = {
         "plan": "e",
         "agent": "a",
         "card": "i",
+        "options": "o",
         "jump_plan": "g",
         "reset": "r",
         "help": "k",
@@ -62,6 +63,10 @@ DEFAULT_SIDEBAR = {
         },
         "status": {"working": "●", "waiting": "●", "error": "!"},
         "controls": {"create": "+", "archive": "▾"},
+        "providers": {
+            "checkout": {"busy": "…"},
+            "subagents": {"running": "◼"},
+        },
     },
 }
 

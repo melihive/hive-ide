@@ -12,7 +12,7 @@ from .python_cmd import PythonCommand
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hive_ide.popup")
     parser.add_argument(
-        "--kind", choices=("agent", "error", "card", "keys"), required=True
+        "--kind", choices=("agent", "options", "error", "card", "keys"), required=True
     )
     parser.add_argument("--state-home", required=True)
     parser.add_argument("--workspace-key", required=True)
@@ -21,12 +21,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     modules = {
         "agent": "agentmodal",
+        "options": "optionsmodal",
         "error": "errormodal",
         "card": "info",
         "keys": "info",
     }
     sizes = {
         "agent": ("56%", "48%"),
+        "options": ("62%", "58%"),
         "error": ("56%", "48%"),
         "card": ("64%", "60%"),
         "keys": ("62%", "52%"),
@@ -48,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
             args.session_id,
             *(
                 ["--tmux-socket", args.tmux_socket]
-                if args.tmux_socket and args.kind == "agent"
+                if args.tmux_socket and args.kind in {"agent", "options"}
                 else []
             ),
         ],

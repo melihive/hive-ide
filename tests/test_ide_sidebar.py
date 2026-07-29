@@ -89,6 +89,63 @@ def test_missing_linked_checkout_has_visible_marker(tmp_path):
     ) == "missing"
 
 
+def test_merged_checkout_marker_is_suppressed_while_subagents_run(tmp_path):
+    provider = SidebarProviderRegistry().get("checkout")
+    session = {
+        "id": "session-id",
+        "workspace_key": str(tmp_path / "workspace"),
+        "worktree_merged": True,
+        "subagents": {"running": 2},
+    }
+
+    assert provider.value(tmp_path, session) == "busy"
+    session["subagents"]["running"] = 0
+    assert provider.value(tmp_path, session) == "missing"
+
+
+def test_subagent_count_renders_under_the_status_dot(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="BUSY",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+        plan={"path": "plans/x.md", "active_task": None},
+    )
+    store.write(
+        "status",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "state": "working",
+            "driver": "term",
+            "subagents": {"running": 3},
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+    registry = SidebarProviderRegistry()
+    sidebar = _sidebar_config({}, registry)
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        "none",
+        0,
+        24,
+        focused=False,
+        sidebar=sidebar,
+        providers=registry,
+    )
+
+    assert _plain(lines[2]).rstrip().endswith("●")
+    assert _plain(lines[3]).rstrip().endswith("3")
+
+
 def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -258,7 +315,7 @@ def test_pane_registry_rehydrates_snapshot_without_plugin_discovery(monkeypatch)
     )
     sidebar = _sidebar_config({}, SidebarProviderRegistry())
     registry = SidebarProviderRegistry.from_snapshot(sidebar["providers"])
-    assert registry.ids() == ["activity", "checkout", "plan"]
+    assert registry.ids() == ["activity", "checkout", "plan", "subagents"]
 
 
 def test_sidebar_rejects_icons_wider_than_a_grid_track():
@@ -411,6 +468,9 @@ def test_click_index_uses_the_row_count_that_was_rendered():
     # header row is always the `+` button, whatever the density
     assert IdeSidebar._click_index(_report(0, 1), 2) == IdeSidebar.PLUS_HIT
     assert IdeSidebar._click_index(_report(0, 1), 1) == IdeSidebar.PLUS_HIT
+    right_click = IdeSidebar._click_index(_report(2, 6), 3)
+    assert right_click == IdeSidebar.OPTIONS_HIT_BASE - 1
+    assert IdeSidebar._options_index(right_click) == 1
     # active footer row is a real clickable control, not part of the session list
     assert (
         IdeSidebar._click_index(_report(0, 12), 2, archive_row=11)

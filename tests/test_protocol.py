@@ -791,6 +791,19 @@ def test_current_plan_and_conversation_mutations_are_id_targeted(
         "conversation-1",
     ]
 
+    assert main(
+        [
+            "status-event",
+            f"--session-id={record['id']}",
+            "--state=working",
+            "--driver=codex",
+            "--subagents-running=4",
+        ]
+    ) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["subagents"] == {"running": 4}
+    assert status["subagents_running"] == 4
+
 
 def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"

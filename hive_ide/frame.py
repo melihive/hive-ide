@@ -620,6 +620,7 @@ class Frame:
             )
         for action, kind in (
             ("agent", "agent"),
+            ("options", "options"),
             ("card", "card"),
             ("help", "keys"),
             ("error", "error"),

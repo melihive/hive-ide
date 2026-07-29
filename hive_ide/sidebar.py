@@ -111,6 +111,7 @@ class IdeSidebar:
     # with a real session index, so `_click_index` keeps one return type.
     PLUS_HIT = -1
     ARCHIVE_HIT = -2
+    OPTIONS_HIT_BASE = -10000
     HEADER = "\x1b[1;38;5;250m"   # bold light grey
     ACTIVE = "\x1b[1;38;5;51m"    # bold bright cyan — the current window
     INACTIVE = "\x1b[38;5;252m"
@@ -185,6 +186,9 @@ class IdeSidebar:
         icons = ((sidebar.get("icons") or {}).get("providers") or {}).get(
             provider_id, {}
         )
+        if isinstance(value, str) and value.startswith("count:"):
+            count = value.partition(":")[2]
+            return count[:2] if count.isdigit() else ""
         return icons.get(value, icons.get("default", "")) if value else ""
 
     @staticmethod
@@ -468,14 +472,22 @@ class IdeSidebar:
         `entry_rows` MUST be the value the current draw used (`_entry_rows`), or clicks
         map to the wrong session on a pane too short for the full 3-row layout.
 
-        None unless it's a left-click. Row 0 is the header, which now carries the `+`
+        None unless it's a left-click or right-click. Row 0 is the header, which carries the `+`
         button — a click anywhere on that row opens the new-session prompt (the whole
         row is the target, not just the glyph cell: a 1-cell hitbox is unusable).
+        A right-click on a session row returns an encoded options hit for that index.
         """
         button, kind = int(m.group(1)), m.group(4)
-        if button != 0 or kind != b"M":   # left button, press only (ignore wheel/drag/release)
+        if button not in {0, 2} or kind != b"M":   # press only (ignore wheel/drag/release)
             return None
         row = int(m.group(3)) - 1                              # 1-based row → 0-based
+        if button == 2:
+            index = IdeLayout.session_at_row(row, entry_rows)
+            return (
+                IdeSidebar.OPTIONS_HIT_BASE - index
+                if index is not None
+                else None
+            )
         if row == 0:
             return IdeSidebar.PLUS_HIT
         if archive_row is not None and row == archive_row:
@@ -552,6 +564,43 @@ class IdeSidebar:
             ["tmux", "display-popup", "-E", "-w", "52%", "-h", "42%",
              command],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    @staticmethod
+    def _options_index(value: int) -> int | None:
+        if value <= IdeSidebar.OPTIONS_HIT_BASE:
+            return IdeSidebar.OPTIONS_HIT_BASE - value
+        return None
+
+    @staticmethod
+    def _launch_options_modal(skill_dir: Path, repo: str, session_id: str) -> None:
+        command = PythonCommand.module_command(
+            "optionsmodal",
+            [
+                "--state-home",
+                str(skill_dir),
+                "--workspace-key",
+                repo,
+                "--session-id",
+                session_id,
+                "--tmux-socket",
+                os.environ.get("HIVE_IDE_TMUX_SOCKET", "hive-ide"),
+            ],
+            python=sys.executable,
+        )
+        subprocess.run(
+            [
+                "tmux",
+                "display-popup",
+                "-E",
+                "-w",
+                "62%",
+                "-h",
+                "58%",
+                command,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     @staticmethod
     def _resume(skill_dir: Path, session_id: str) -> bool:
@@ -631,7 +680,7 @@ class IdeSidebar:
             track_width(provider_icons.get(provider_id, {}), 1)
             for provider_id in slot_providers
         )
-        status_width = track_width(status_icons, 1)
+        status_width = max(track_width(status_icons, 1), 2)
         grid = SidebarGrid(
             width=max(1, width),
             entry_rows=entry_rows,
@@ -702,6 +751,9 @@ class IdeSidebar:
                 )
                 for provider_id in slot_providers
             ]
+            subagent_mark = IdeSidebar._provider_mark(
+                skill_dir, s, "subagents", settings, provider_registry
+            )
             # At one-row density the metadata row is gone. Preserve transient state by
             # borrowing the leading driver track until the activity clears.
             leading_mark = state if entry_rows == 1 and state else icon
@@ -723,6 +775,7 @@ class IdeSidebar:
                                 state=state,
                                 slots=slot_marks,
                                 age=rel,
+                                right_status=subagent_mark if glyph else "",
                             ),
                             True,
                             sel,
@@ -745,6 +798,7 @@ class IdeSidebar:
                                 age=rel,
                                 age_style=IdeSidebar.DIM,
                                 reset=keep,
+                                right_status=subagent_mark if glyph else "",
                             ),
                             True,
                             IdeSidebar.CUR_BG,
@@ -763,6 +817,7 @@ class IdeSidebar:
                                 age=rel,
                                 age_style=IdeSidebar.DIM,
                                 reset=IdeSidebar.RESET,
+                                right_status=subagent_mark if glyph else "",
                             )
                         )
                     )
@@ -987,6 +1042,15 @@ class IdeSidebar:
                     # `continue` below. Without setting it here, the next loop top hits
                     # `if not focused:` and wipes the header focus a click just set.
                     focused = True
+                    options_index = IdeSidebar._options_index(click)
+                    if options_index is not None:
+                        if not archive_mode and 0 <= options_index < len(session_ids):
+                            IdeSidebar._launch_options_modal(
+                                skill_dir,
+                                IdeSidebar._repo_of(skill_dir),
+                                session_ids[options_index],
+                            )
+                        continue
                     if archive_mode:
                         if 0 <= click < len(session_ids) and IdeSidebar._resume(
                             skill_dir, session_ids[click]

@@ -126,6 +126,7 @@ def _keys(snapshot: dict) -> list[str]:
         "chat": "focus chat",
         "plan": "focus plan",
         "agent": "change agent",
+        "options": "session options",
         "card": "session card",
         "jump_plan": "first unfinished plan task",
         "reset": "reset columns",

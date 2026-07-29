@@ -4,6 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Sidebar status can now show a running subagent count under the right-side
+  status dot when hooks report `subagents.running` or `subagents_running`.
+- The session options modal opens from the configured shortcut or right-clicking
+  a sidebar session, with actions for chat, plan, agent switch, rename, rebuild,
+  and session card.
+
+### Fixed
+
+- Merged-worktree checkout icons no longer show the green merged check while the
+  session still reports running subagents.
+
 ## [1.0.9] - 2026-07-29
 
 ### Added

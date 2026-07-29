@@ -95,10 +95,15 @@ class SidebarGrid:
         age: str,
         age_style: str = "",
         reset: str = "",
+        right_status: str = "",
     ) -> str:
         """Render the most informative metadata tracks that fit this width."""
         indent = self.pad(state, self.leading_cells) + " "
         available = max(0, self.width - self.cell_width(indent))
+        show_right = bool(right_status) and available >= self.status_cells + 3
+        right_width = self.status_cells if show_right else 0
+        right_gap = self.GAP_CELLS if show_right else 0
+        content_available = max(0, available - right_width - right_gap)
 
         def styled_age(limit: int) -> str:
             fitted = self.fit(age, limit)
@@ -110,9 +115,16 @@ class SidebarGrid:
         # on whether a particular session happens to have a value.
         while tracks:
             tracks_width = sum(cells for _, cells in tracks) + len(tracks)
-            if tracks_width + 2 <= available:
+            if tracks_width + 2 <= content_available:
                 break
             tracks.pop(0)
         prefix = "".join(f"{self.pad(icon, cells)} " for icon, cells in tracks)
-        age_width = max(0, available - self.cell_width(prefix))
-        return f"{indent}{prefix}{styled_age(age_width)}"
+        age_width = max(0, content_available - self.cell_width(prefix))
+        content = f"{prefix}{styled_age(age_width)}"
+        if not show_right:
+            return f"{indent}{content}"
+        spacer = " " * max(
+            self.GAP_CELLS,
+            content_available - self.cell_width(content) + right_gap,
+        )
+        return f"{indent}{content}{spacer}{self.pad(right_status, self.status_cells)}"

@@ -98,12 +98,65 @@ class PlanProvider:
         return "done" if status in {"merged", "done"} or "/_archive/" in path else "active"
 
 
+def _subagent_count(session: dict[str, Any], status: dict[str, Any] | None = None) -> int:
+    candidates: list[Any] = []
+    if status:
+        candidates.extend(
+            [
+                status.get("subagents_running"),
+                ((status.get("subagents") or {}) if isinstance(status.get("subagents"), dict) else {}).get("running"),
+            ]
+        )
+    subagents = session.get("subagents")
+    if isinstance(subagents, dict):
+        candidates.append(subagents.get("running"))
+    hive = ((session.get("host") or {}).get("hive") or {})
+    hive_subagents = hive.get("subagents")
+    if isinstance(hive_subagents, dict):
+        candidates.append(hive_subagents.get("running"))
+    legacy = hive.get("legacy_record") or {}
+    legacy_subagents = legacy.get("subagents")
+    if isinstance(legacy_subagents, dict):
+        candidates.append(legacy_subagents.get("running"))
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, str) and value.isdigit():
+            return max(0, int(value))
+    return 0
+
+
+class SubagentsProvider:
+    id = "subagents"
+    region: SidebarRegion = "slot"
+    default_icons = {"running": "◼", "default": "◼"}
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "region": self.region,
+            "kind": "builtin",
+            "default_icons": dict(self.default_icons),
+        }
+
+    def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
+        count = _subagent_count(
+            session, StateIO.read_session_status(state_home, session)
+        )
+        if count <= 0:
+            return None
+        return f"count:{min(count, 99)}"
+
+
 class CheckoutProvider:
     id = "checkout"
     region: SidebarRegion = "slot"
     default_icons = {
         "live": "🔀",
         "shipped": "🚢",
+        "busy": "…",
         "missing": "✅",
         "unknown": "🔀",
     }
@@ -123,11 +176,16 @@ class CheckoutProvider:
     def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
         hive = ((session.get("host") or {}).get("hive") or {})
         legacy = hive.get("legacy_record") or {}
+        running_subagents = _subagent_count(
+            session, StateIO.read_session_status(state_home, session)
+        )
         if (
             session.get("worktree_merged")
             or hive.get("worktree_merged")
             or legacy.get("worktree_merged")
         ):
+            if running_subagents:
+                return "busy"
             return "missing"
         ahead = (
             session.get("worktree_ahead")
@@ -205,7 +263,12 @@ class SidebarProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, SidebarProvider] = {
             provider.id: provider
-            for provider in (ActivityProvider(), PlanProvider(), CheckoutProvider())
+            for provider in (
+                ActivityProvider(),
+                PlanProvider(),
+                SubagentsProvider(),
+                CheckoutProvider(),
+            )
         }
 
     def load_entry_points(self) -> None:

@@ -482,6 +482,9 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
         "conversation_reference": args.conversation_reference,
         "observed_at": utc_now(),
     }
+    if args.subagents_running is not None:
+        document["subagents"] = {"running": max(0, args.subagents_running)}
+        document["subagents_running"] = max(0, args.subagents_running)
     store.write("status", args.session_id, document)
     return document
 
@@ -881,6 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--state", choices=("working", "waiting", "idle"), required=True)
     status.add_argument("--driver", required=True)
     status.add_argument("--conversation-reference")
+    status.add_argument("--subagents-running", type=int)
     status.set_defaults(handler=cmd_status_event)
 
     error = command("record-error")
