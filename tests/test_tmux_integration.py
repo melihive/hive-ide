@@ -130,12 +130,15 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert set(windows) == {alpha["id"], beta["id"]}
         hooks = frame.tmux(["show-hooks", "-t", frame.target]).stdout
         assert "client-resized" in hooks
+        assert "client-attached" in hooks
         assert "after-select-pane" in hooks
         assert "session-window-changed" in hooks
+        assert "run-shell -b" in hooks
         assert (
             frame.tmux(["show-option", "-v", "-t", frame.target, "set-titles"]).stdout.strip()
             == "on"
         )
+        assert frame.tmux(["show-option", "-gv", "window-size"]).stdout.strip() == "latest"
         assert (
             frame.tmux(
                 ["show-option", "-v", "-t", frame.target, "set-titles-string"]
@@ -145,6 +148,7 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         keys = frame.tmux(["list-keys", "-T", "prefix"]).stdout
         for key in (" n ", " p ", " l ", " c ", " e ", " a ", " o ", " i ", " g ", " r ", " k "):
             assert key in keys
+        assert "if-shell -F '#{!:#{window_zoomed_flag}}' 'resize-pane -Z'" in keys
         key_lines = {line.split()[3]: line for line in keys.splitlines() if " -T prefix " in line}
         for key in ("a", "o", "i", "k", "x"):
             assert "run-shell -b" in key_lines[key]

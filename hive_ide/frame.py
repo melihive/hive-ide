@@ -678,10 +678,15 @@ class Frame:
             if re.fullmatch(r"status-format\[(?!0\])\d+\]", name):
                 self.tmux(["set-option", "-g", "-u", name])
 
+    def _normalize_resize_behavior(self) -> None:
+        """Follow the latest attached client so mobile SSH cannot pin desktop geometry."""
+        self.tmux(["set-option", "-g", "window-size", "latest"])
+
     def bind_keys(self) -> None:
         self._normalize_frame_environment()
         self._normalize_status_rows()
         self._normalize_terminal_title()
+        self._normalize_resize_behavior()
         keys = self._key_bindings()
         prefix = (self.settings.get("keys") or {}).get("prefix")
         base_prefix = self.tmux(
@@ -861,16 +866,29 @@ class Frame:
                 f"run-shell -b {shlex.quote(relayout)}",
             ]
         )
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-attached",
+                f"run-shell -b {shlex.quote(relayout)}",
+            ]
+        )
         mobile = f"#{{<:#{{window_width}},{self.SIDEBAR_ZOOM_MAX}}}"
         not_zoomed = "#{!:#{window_zoomed_flag}}"
-        focus_condition = f"#{{&&:{mobile},{not_zoomed}}}"
+        zoom_if_needed = f"if-shell -F '{not_zoomed}' 'resize-pane -Z'"
         self.tmux(
             [
                 "set-hook",
                 "-t",
                 self.target,
                 "after-select-pane",
-                f"if-shell -F '{focus_condition}' 'resize-pane -Z'",
+                (
+                    f"if-shell -F '{mobile}' "
+                    f"{shlex.quote(zoom_if_needed)} "
+                    f"'run-shell -b {shlex.quote(relayout)}'"
+                ),
             ]
         )
         sidebar_key = keys.get("sidebar")
@@ -882,7 +900,7 @@ class Frame:
                     "if-shell",
                     "-F",
                     f"#{{<:#{{window_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    "select-pane -t .0 ; resize-pane -Z",
+                    "select-pane -t .0 ; if-shell -F '#{!:#{window_zoomed_flag}}' 'resize-pane -Z'",
                     "select-pane -t .0",
                 ]
             )
