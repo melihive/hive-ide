@@ -100,8 +100,9 @@ class SidebarGrid:
         """Render the most informative metadata tracks that fit this width."""
         indent = self.pad(state, self.leading_cells) + " "
         available = max(0, self.width - self.cell_width(indent))
-        show_right = bool(right_status) and available >= self.status_cells + 3
-        right_width = self.status_cells if show_right else 0
+        right_width = max(self.status_cells, self.cell_width(right_status))
+        show_right = bool(right_status) and available >= right_width
+        right_width = right_width if show_right else 0
         right_gap = self.GAP_CELLS if show_right else 0
         content_available = max(0, available - right_width - right_gap)
 
@@ -123,8 +124,5 @@ class SidebarGrid:
         content = f"{prefix}{styled_age(age_width)}"
         if not show_right:
             return f"{indent}{content}"
-        spacer = " " * max(
-            self.GAP_CELLS,
-            content_available - self.cell_width(content) + right_gap,
-        )
-        return f"{indent}{content}{spacer}{self.pad(right_status, self.status_cells)}"
+        spacer = " " * max(0, content_available - self.cell_width(content) + right_gap)
+        return f"{indent}{content}{spacer}{self.pad(right_status, right_width)}"

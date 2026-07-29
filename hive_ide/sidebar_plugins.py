@@ -156,11 +156,20 @@ class SubagentsProvider:
         }
 
     def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
-        count = _subagent_count(
-            session, StateIO.read_session_status(state_home, session)
-        )
+        status = StateIO.read_session_status(state_home, session)
+        count = _subagent_count(session, status)
         if count <= 0:
             count = self._live_pane_count(session)
+            if count > 0:
+                StateIO.write_session_status_update(
+                    state_home,
+                    session,
+                    {
+                        "driver": (session.get("driver") or {}).get("id"),
+                        "state": (status or {}).get("state") or "idle",
+                        "subagents": {"running": count},
+                    },
+                )
         if count <= 0:
             return None
         return f"count:{min(count, 99)}"

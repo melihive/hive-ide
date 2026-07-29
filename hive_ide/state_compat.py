@@ -9,7 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .store import StateStore
+from . import SCHEMA_VERSION
+from .store import StateStore, utc_now
 
 
 class StateIO:
@@ -79,6 +80,25 @@ class StateIO:
             "session_id": status.get("conversation_reference"),
             "ts": status.get("observed_at"),
         }
+
+    @staticmethod
+    def write_session_status_update(
+        state_home: Path, record: dict, update: dict
+    ) -> None:
+        key = record.get("workspace_key") or record.get("repo")
+        session_id = record.get("id")
+        if not key or not session_id:
+            return
+        store = StateIO._store(state_home, key)
+        current = store.read("status", session_id) or {
+            "schema_version": SCHEMA_VERSION,
+            "workspace_key": store.workspace_key,
+            "session_id": session_id,
+        }
+        current.update(update)
+        current.setdefault("driver", (record.get("driver") or {}).get("id"))
+        current["observed_at"] = utc_now()
+        store.write("status", session_id, current)
 
     @staticmethod
     def read_session_activity(state_home: Path, record: dict) -> dict | None:

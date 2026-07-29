@@ -81,6 +81,7 @@ class IdeSidebar:
     FOCUS_ON, FOCUS_OFF = "\x1b[?1004h", "\x1b[?1004l"   # ask tmux to report focus in/out
     MOUSE_ON, MOUSE_OFF = "\x1b[?1000h\x1b[?1006h", "\x1b[?1006l\x1b[?1000l"   # SGR mouse
     MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+    ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
     # A read can end mid-report, so the unterminated head of one (ESC through the
     # coordinates, no M/m yet) is carried to the next read instead of discarded.
     MOUSE_PARTIAL_RE = re.compile(rb"\x1b(\[(<\d*(;\d*(;\d*)?)?)?)?\Z")
@@ -236,6 +237,10 @@ class IdeSidebar:
             return "", ""
         _, color = IdeSidebar.STATUS_DOT.get(state, ("", ""))
         return status_icons.get(state, ""), color
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return IdeSidebar.ANSI_RE.sub("", text)
 
     @staticmethod
     def _activity_mark(skill_dir: Path, s: dict) -> str:
@@ -763,11 +768,23 @@ class IdeSidebar:
             # math divides by the SAME number, so the two can never disagree.
             show_sub = entry_rows >= 2
             show_gap = entry_rows >= IdeSidebar.ENTRY_ROWS
+            inline_subagent = subagent_mark if not show_sub else ""
+            inline_subagent_width = grid.cell_width(inline_subagent)
+
+            def append_inline_subagent(content: str) -> str:
+                if not inline_subagent:
+                    return content
+                spacer = " " * max(
+                    1,
+                    width - grid.cell_width(IdeSidebar._strip_ansi(content)) - inline_subagent_width,
+                )
+                return f"{content}{spacer}{inline_subagent}"
+
             if selected:
                 # Full 2-line box: icon + name + time. The real bg colour means the
                 # erase-to-EOL paints BOTH rows out to the pane edge (see _row).
                 sel = IdeSidebar.SEL_CUR if current else IdeSidebar.SEL_ALT
-                lines.append(row(f"{driver_mark} {text}", True, sel))
+                lines.append(row(append_inline_subagent(f"{driver_mark} {text}"), True, sel))
                 if show_sub:
                     lines.append(
                         row(
@@ -788,7 +805,15 @@ class IdeSidebar:
                 keep = IdeSidebar.KEEP_BG
                 dot_text = grid.pad(glyph, grid.status_cells)
                 dot = f"{gcolor}{dot_text}{keep}" if glyph else dot_text
-                lines.append(row(f"{driver_mark} {IdeSidebar.CUR_FG}{text}{keep}{pad} {dot}", True, IdeSidebar.CUR_BG))
+                lines.append(
+                    row(
+                        append_inline_subagent(
+                            f"{driver_mark} {IdeSidebar.CUR_FG}{text}{keep}{pad} {dot}"
+                        ),
+                        True,
+                        IdeSidebar.CUR_BG,
+                    )
+                )
                 if show_sub:
                     lines.append(
                         row(
@@ -807,7 +832,13 @@ class IdeSidebar:
             else:
                 dot_text = grid.pad(glyph, grid.status_cells)
                 dot = f"{gcolor}{dot_text}{IdeSidebar.RESET}" if glyph else dot_text
-                lines.append(row(f"{driver_mark}{IdeSidebar.RESET} {base}{text}{IdeSidebar.RESET}{pad} {dot}"))
+                lines.append(
+                    row(
+                        append_inline_subagent(
+                            f"{driver_mark}{IdeSidebar.RESET} {base}{text}{IdeSidebar.RESET}{pad} {dot}"
+                        )
+                    )
+                )
                 if show_sub:
                     lines.append(
                         row(

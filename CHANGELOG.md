@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar subagent counts now persist live-pane fallback observations into
+  session status and reserve a stable right-edge column, keeping counts visible
+  for inactive rows and dense one-row layouts.
+
 ## [1.0.14] - 2026-07-29
 
 ### Fixed

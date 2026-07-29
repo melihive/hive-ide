@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import sys
 import subprocess
-import re
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hive_ide.sidebar import IdeSidebar  # noqa: E402
 from hive_ide.sidebar_grid import SidebarGrid  # noqa: E402
 from hive_ide.sidebar_plugins import SidebarProviderRegistry, SubagentsProvider  # noqa: E402
+from hive_ide.state_compat import StateIO  # noqa: E402
 from hive_ide.store import StateStore  # noqa: E402
 from hive_ide.config import _sidebar_config  # noqa: E402
 from hive_ide.errors import UsageError  # noqa: E402
@@ -216,6 +216,66 @@ def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):
     assert _plain(lines[3]).rstrip().endswith("2")
 
 
+def test_subagent_count_renders_when_metadata_row_collapses(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="BUSY",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+        plan={"path": "plans/x.md", "active_task": None},
+    )
+    store.write(
+        "status",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "state": "idle",
+            "driver": "term",
+            "subagents": {"running": 1},
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        "none",
+        0,
+        6,
+        focused=False,
+        entry_rows=1,
+        sidebar=_sidebar_config({}, SidebarProviderRegistry()),
+        providers=SidebarProviderRegistry(),
+    )
+
+    assert _plain(lines[2]).rstrip().endswith("1")
+
+
+def test_subagent_provider_persists_live_fallback_count(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="BUSY",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "codex"},
+        plan={"path": None, "active_task": None},
+    )
+    provider = SubagentsProvider()
+    monkeypatch.setattr(provider, "_live_pane_count", lambda record: 2)
+
+    assert provider.value(store.home, session) == "count:2"
+    status = StateIO.read_session_status(store.home, session)
+    assert (status or {}).get("subagents") == {"running": 2}
+
+
 def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -261,7 +321,7 @@ def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
 
 
 def _plain(line: str) -> str:
-    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+    return IdeSidebar._strip_ansi(line)
 
 
 def test_sidebar_header_uses_only_the_workspace_folder_name(tmp_path, monkeypatch):
@@ -317,6 +377,16 @@ def test_sidebar_grid_reflows_metadata_by_terminal_cell_width():
     )
     assert "14h" in narrow_row
     assert SidebarGrid.cell_width(narrow_row) <= 6
+
+
+def test_sidebar_grid_reserves_right_status_before_age_and_slots():
+    grid = SidebarGrid(width=12, entry_rows=2)
+    row = grid.metadata_row(
+        state="", slots=["📝", "✅"], age="13m", right_status="12"
+    )
+
+    assert row.endswith("12")
+    assert SidebarGrid.cell_width(row) == 12
 
 
 def test_sidebar_grid_supports_three_slots_and_mixed_icon_widths():
