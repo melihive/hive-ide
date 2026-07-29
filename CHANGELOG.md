@@ -4,7 +4,7 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
-## [1.0.16] - 2026-07-29
+## [1.0.17] - 2026-07-29
 
 ### Fixed
 
