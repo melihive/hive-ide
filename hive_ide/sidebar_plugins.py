@@ -137,7 +137,8 @@ class SubagentsProvider:
     default_icons: dict[str, str] = {}
     cache_seconds = 2
     ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-    AGENT_ROW_RE = re.compile(r"^\s*[○●◦]\s+(?:codex|claude)\b", re.IGNORECASE)
+    AGENT_ROW_RE = re.compile(r"^\s*[○◦]\s+(?:codex|claude)\b", re.IGNORECASE)
+    STATUS_BAR_AGENTS_RE = re.compile(r"←\s+(\d+)\s+agents?\b", re.IGNORECASE)
     WAITING_RE = re.compile(r"\bWaiting for\s+(\d+)\s+background agents?\b", re.IGNORECASE)
     CLAUDE_BACKGROUND_RE = re.compile(
         r"\bsession\b.*\bis currently running as a background agent\b",
@@ -145,7 +146,7 @@ class SubagentsProvider:
     )
 
     def __init__(self) -> None:
-        self._live_cache: dict[tuple[str, str], tuple[float, int]] = {}
+        self._live_cache: dict[tuple[str, str], tuple[float, int | None]] = {}
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -157,39 +158,46 @@ class SubagentsProvider:
 
     def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
         status = StateIO.read_session_status(state_home, session)
-        count = _subagent_count(session, status)
-        if count <= 0:
-            count = self._live_pane_count(session)
-            if count > 0:
-                StateIO.write_session_status_update(
-                    state_home,
-                    session,
-                    {
-                        "driver": (session.get("driver") or {}).get("id"),
-                        "state": (status or {}).get("state") or "idle",
-                        "subagents": {"running": count},
-                    },
-                )
+        recorded_count = _subagent_count(session, status)
+        live_count = self._live_pane_count_observed(session)
+        count = live_count if live_count is not None else recorded_count
+        if live_count is not None and live_count != recorded_count:
+            StateIO.write_session_status_update(
+                state_home,
+                session,
+                {
+                    "driver": (session.get("driver") or {}).get("id"),
+                    "state": (status or {}).get("state") or "idle",
+                    "subagents": {"running": live_count},
+                },
+            )
         if count <= 0:
             return None
         return f"count:{min(count, 99)}"
 
     def _live_pane_count(self, session: dict[str, Any]) -> int:
+        return self._live_pane_count_observed(session) or 0
+
+    def _live_pane_count_observed(self, session: dict[str, Any]) -> int | None:
         socket = os.environ.get("HIVE_IDE_TMUX_SOCKET") or ""
         session_id = str(session.get("id") or "")
         if not socket or not session_id:
-            return 0
+            return None
         key = (socket, session_id)
         now = time.monotonic()
         cached = self._live_cache.get(key)
         if cached and now - cached[0] < self.cache_seconds:
             return cached[1]
-        count = self._read_live_pane_count(socket, session_id)
+        count = self._read_live_pane_count_observed(socket, session_id)
         self._live_cache[key] = (now, count)
         return count
 
     @classmethod
     def _read_live_pane_count(cls, socket: str, session_id: str) -> int:
+        return cls._read_live_pane_count_observed(socket, session_id) or 0
+
+    @classmethod
+    def _read_live_pane_count_observed(cls, socket: str, session_id: str) -> int | None:
         window_id = cls._tmux_field(
             socket,
             [
@@ -200,7 +208,7 @@ class SubagentsProvider:
             session_id,
         )
         if not window_id:
-            return 0
+            return None
         pane_id = cls._tmux_field(
             socket,
             [
@@ -213,7 +221,7 @@ class SubagentsProvider:
             "agent",
         )
         if not pane_id:
-            return 0
+            return None
         try:
             captured = subprocess.run(
                 [
@@ -233,9 +241,9 @@ class SubagentsProvider:
                 timeout=1,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return 0
+            return None
         if captured.returncode != 0:
-            return 0
+            return None
         return cls._parse_live_pane_count(captured.stdout)
 
     @staticmethod
@@ -261,15 +269,18 @@ class SubagentsProvider:
     def _parse_live_pane_count(cls, text: str) -> int:
         rows = 0
         waiting = 0
+        status_bar = 0
         for raw in text.splitlines():
             line = cls.ANSI_RE.sub("", raw)
+            if match := cls.STATUS_BAR_AGENTS_RE.search(line):
+                status_bar = max(status_bar, int(match.group(1)))
             if cls.AGENT_ROW_RE.search(line):
                 rows += 1
             if cls.CLAUDE_BACKGROUND_RE.search(line):
                 rows += 1
             if match := cls.WAITING_RE.search(line):
                 waiting = max(waiting, int(match.group(1)))
-        return max(rows, waiting)
+        return max(status_bar, rows, waiting)
 
 
 class CheckoutProvider:
@@ -298,9 +309,32 @@ class CheckoutProvider:
     def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
         hive = ((session.get("host") or {}).get("hive") or {})
         legacy = hive.get("legacy_record") or {}
+        working_dir = session.get("working_dir") or session.get("cwd")
+        checkout_state = None
+        if working_dir:
+            now = time.monotonic()
+            cached = self._cache.get(str(working_dir))
+            if cached is None or now - cached[0] >= self.cache_seconds:
+                status = inspect_linked_checkout(working_dir)
+                checkout_state = status.state if status else None
+                self._cache[str(working_dir)] = (now, checkout_state)
+            else:
+                checkout_state = cached[1]
+            if checkout_state is not None:
+                return checkout_state
+            if Path(str(working_dir)).expanduser().is_dir():
+                return None
+
         running_subagents = _subagent_count(
             session, StateIO.read_session_status(state_home, session)
         )
+        live_subagents = (
+            SubagentsProvider()._live_pane_count_observed(session)
+            if os.environ.get("HIVE_IDE_TMUX_SOCKET")
+            else running_subagents
+        )
+        if live_subagents is not None and live_subagents != running_subagents:
+            running_subagents = live_subagents
         if (
             session.get("worktree_merged")
             or hive.get("worktree_merged")
@@ -316,18 +350,9 @@ class CheckoutProvider:
         )
         if ahead is False:
             return "shipped"
-        working_dir = session.get("working_dir") or session.get("cwd")
         if not working_dir:
             return None
-        now = time.monotonic()
-        cached = self._cache.get(str(working_dir))
-        if cached is None or now - cached[0] >= self.cache_seconds:
-            status = inspect_linked_checkout(working_dir)
-            value = status.state if status else None
-            self._cache[str(working_dir)] = (now, value)
-        else:
-            value = cached[1]
-        return value
+        return None
 
 
 class FieldProvider:

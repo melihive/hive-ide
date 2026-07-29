@@ -13,9 +13,20 @@ from typing import Any
 
 from .environments import managed_interpreter
 from .errors import StateError, UsageError
-from .paths import state_home
+from .paths import config_path, state_home
 from .python_cmd import PythonCommand
 from .source import inspect_interpreter
+
+
+def _configured_stable_python() -> Path | None:
+    try:
+        data = json.loads(config_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    sources = data.get("sources") if isinstance(data, dict) else None
+    stable = sources.get("stable") if isinstance(sources, dict) else None
+    interpreter = stable.get("interpreter") if isinstance(stable, dict) else stable
+    return Path(interpreter).expanduser() if isinstance(interpreter, str) and interpreter else None
 
 
 class HookInstaller:
@@ -42,9 +53,8 @@ class HookInstaller:
         selected_state_home: str | Path | None = None,
     ):
         self.home = Path(home or Path.home()).expanduser().resolve()
-        self.stable_python = Path(
-            stable_python or managed_interpreter("stable")
-        ).expanduser().absolute()
+        selected_python = stable_python or _configured_stable_python() or managed_interpreter("stable")
+        self.stable_python = Path(selected_python).expanduser().absolute()
         self.state_home = state_home(selected_state_home)
 
     def command(self, action: tuple[str, str], driver: str) -> str:

@@ -21,7 +21,7 @@ from hive_ide.adapters import (
 from hive_ide.cli import main
 from hive_ide.config import _editor_argv
 from hive_ide.drivers import bundled_drivers
-from hive_ide.errors import SchemaVersionError, UsageError
+from hive_ide.errors import HiveIdeError, SchemaVersionError, UsageError
 from hive_ide.environments import EnvironmentManager, managed_interpreter
 from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
@@ -224,6 +224,12 @@ def test_cli_subcommand_help_describes_options(capsys):
 
 def test_cli_quiet_suppresses_final_json_result(capsys):
     assert main(["--quiet", "version"]) == 0
+
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_quiet_is_accepted_after_subcommand(capsys):
+    assert main(["version", "--quiet"]) == 0
 
     assert capsys.readouterr().out == ""
 
@@ -1103,7 +1109,42 @@ def test_current_chat_selects_existing_agent_pane_without_respawning(
         "driver": "codex",
         "opened": "existing-agent-pane",
     }
-    assert calls == [["select-pane", "-t", "%2"]]
+    assert calls == [
+        ["display-message", "-p", "-t", "%2", "#{pane_current_command}"],
+        ["select-pane", "-t", "%2"],
+    ]
+
+
+def test_current_chat_respawns_dead_agent_shell_pane(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
+
+    def fake_tmux(args, **_kwargs):
+        calls.append(args)
+        stdout = "sh\n" if args[:4] == ["display-message", "-p", "-t", "%2"] else ""
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    result = frame.current_chat(record)
+
+    assert result["opened"] == "agent-pane"
+    assert any(call[:3] == ["respawn-pane", "-k", "-t"] for call in calls)
+    assert calls[-1] == ["select-pane", "-t", "%2"]
 
 
 def test_frame_select_session_selects_window_then_agent_pane(tmp_path, monkeypatch):
@@ -1129,6 +1170,37 @@ def test_frame_select_session_selects_window_then_agent_pane(tmp_path, monkeypat
     assert frame.select_session(record["id"])
     assert calls[0] == ["select-window", "-t", "@7"]
     assert calls[-1] == ["select-pane", "-t", "@7.1"]
+
+
+def test_rebuild_keeps_existing_window_when_replacement_build_fails(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="TARGET",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "windows", lambda: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda args, **_kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
+    )
+    monkeypatch.setattr(
+        frame,
+        "build",
+        lambda _record: (_ for _ in ()).throw(HiveIdeError("replacement failed")),
+    )
+
+    with pytest.raises(HiveIdeError, match="replacement failed"):
+        frame.rebuild(record)
+
+    assert ["kill-window", "-t", "@7"] not in calls
 
 
 def test_stable_source_patch_upgrade_refreshes_session_record(tmp_path, monkeypatch):
@@ -1771,6 +1843,32 @@ def test_hook_setup_rejects_malformed_existing_config(monkeypatch, tmp_path):
     installer = HookInstaller(home=home, stable_python=stable)
     with pytest.raises(UsageError, match="not valid JSON"):
         installer.setup(apply=False)
+
+
+def test_hook_installer_uses_configured_stable_python(monkeypatch, tmp_path):
+    config_home = tmp_path / "config"
+    stable = tmp_path / "global" / "python"
+    stable.parent.mkdir(parents=True)
+    stable.touch()
+    config_path = config_home / "hive-ide" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps({"sources": {"stable": {"interpreter": str(stable)}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(
+        "hive_ide.hooks.inspect_interpreter",
+        lambda interpreter: {
+            "interpreter": str(interpreter),
+            "package_version": "1.2.3",
+        },
+    )
+
+    installer = HookInstaller(home=tmp_path / "home")
+
+    assert installer.stable_python == stable.absolute()
+    assert installer.verify() != ["Selected interpreter is not executable: " + str(managed_interpreter("stable"))]
 
 
 def test_hook_verify_reports_a_missing_stable_interpreter(tmp_path):

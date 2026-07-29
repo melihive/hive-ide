@@ -421,6 +421,38 @@ class Frame:
             )
         pane_id = self.role_panes(record["id"]).get("agent")
         if pane_id and os.environ.get("TMUX_PANE") != pane_id:
+            current = self.tmux(
+                ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
+            ).stdout.strip()
+            if driver.get("id") != "term" and Path(current).name in {
+                "sh",
+                "bash",
+                "fish",
+                "zsh",
+            }:
+                result = self.tmux(
+                    [
+                        "respawn-pane",
+                        "-k",
+                        "-t",
+                        pane_id,
+                        "-c",
+                        record["working_dir"],
+                        "sh",
+                        "-c",
+                        self._agent_command(record),
+                    ]
+                )
+                if result.returncode != 0:
+                    raise HiveIdeError(
+                        result.stderr.strip() or "Could not reopen the agent pane."
+                    )
+                self.tmux(["select-pane", "-t", pane_id])
+                return {
+                    "session_id": record["id"],
+                    "driver": driver.get("id"),
+                    "opened": "agent-pane",
+                }
             self.tmux(["select-pane", "-t", pane_id])
             return {
                 "session_id": record["id"],
@@ -469,7 +501,7 @@ class Frame:
         self.tmux(["resize-pane", "-t", sidebar_pane, "-x", str(sidebar)])
         self.tmux(["resize-pane", "-t", plan_pane, "-x", str(plan)])
 
-    def build(self, record: dict[str, Any]) -> None:
+    def build(self, record: dict[str, Any]) -> str:
         working_dir = record["working_dir"]
         if not Path(working_dir).is_dir():
             raise UsageError(f"Session working directory does not exist: {working_dir}")
@@ -539,6 +571,7 @@ class Frame:
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
+        return target
 
     def ensure(self, record: dict[str, Any]) -> bool:
         if record["id"] in self.windows():
@@ -560,13 +593,20 @@ class Frame:
     def rebuild(self, record: dict[str, Any]) -> None:
         existing = self.windows().get(record["id"])
         previous_index = None
+        selected = False
         if existing:
             previous_index = self.tmux(
                 ["display-message", "-p", "-t", existing, "#{window_index}"]
             ).stdout.strip() or None
+            selected = (
+                self.tmux(
+                    ["display-message", "-p", "-t", existing, "#{window_active}"]
+                ).stdout.strip()
+                == "1"
+            )
+        replacement = self.build(record)
+        if existing:
             self.tmux(["kill-window", "-t", existing])
-        self.build(record)
-        replacement = self.windows().get(record["id"])
         if previous_index and replacement:
             current_index = self.tmux(
                 ["display-message", "-p", "-t", replacement, "#{window_index}"]
@@ -586,6 +626,10 @@ class Frame:
                         moved.stderr.strip()
                         or f"Could not preserve window index {previous_index}."
                     )
+                replacement = self.windows().get(record["id"], replacement)
+        if selected and replacement:
+            self.tmux(["select-window", "-t", replacement])
+            self.tmux(["select-pane", "-t", f"{replacement}.1"])
 
     def close(self, session_id: str) -> bool:
         window_id = self.windows().get(session_id)

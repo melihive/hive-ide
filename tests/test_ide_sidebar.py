@@ -107,6 +107,47 @@ def test_merged_checkout_marker_is_suppressed_while_subagents_run(tmp_path):
     assert provider.value(tmp_path, session) == "missing"
 
 
+def test_ordinary_main_checkout_ignores_historical_merged_marker(tmp_path):
+    provider = SidebarProviderRegistry().get("checkout")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+
+    assert (
+        provider.value(
+            tmp_path,
+            {
+                "working_dir": str(repo),
+                "host": {"hive": {"worktree_merged": True}},
+            },
+        )
+        is None
+    )
+
+
+def test_merged_checkout_ignores_stale_subagent_count_when_live_pane_is_empty(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "test-socket")
+    monkeypatch.setattr(
+        SubagentsProvider, "_live_pane_count_observed", lambda _self, _session: 0
+    )
+    provider = SidebarProviderRegistry().get("checkout")
+    session = {
+        "id": "session-id",
+        "workspace_key": str(tmp_path / "workspace"),
+        "worktree_merged": True,
+        "subagents": {"running": 2},
+    }
+
+    assert provider.value(tmp_path, session) == "missing"
+
+
 def test_subagent_count_renders_under_the_status_dot(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -150,6 +191,46 @@ def test_subagent_count_renders_under_the_status_dot(tmp_path):
     assert _plain(lines[3]).rstrip().endswith("3")
 
 
+def test_current_waiting_session_still_renders_status_dot(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="WAITING",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+    )
+    store.write(
+        "status",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "state": "waiting",
+            "driver": "term",
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+    registry = SidebarProviderRegistry()
+    sidebar = _sidebar_config({}, registry)
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        session["id"],
+        0,
+        24,
+        focused=False,
+        sidebar=sidebar,
+        providers=registry,
+    )
+
+    assert "●" in _plain(lines[2])
+
+
 def test_subagent_provider_parses_codex_child_agent_rows():
     text = """
 ›› auto mode on · ↵ for agents
@@ -160,6 +241,25 @@ def test_subagent_provider_parses_codex_child_agent_rows():
 """
 
     assert SubagentsProvider._parse_live_pane_count(text) == 2
+
+
+def test_subagent_provider_ignores_claude_transcript_bullets():
+    assert (
+        SubagentsProvider._parse_live_pane_count(
+            "● Codex nailed it — clear root cause\n"
+            "  plus a normal assistant paragraph\n"
+        )
+        == 0
+    )
+
+
+def test_subagent_provider_parses_status_bar_agent_count():
+    assert (
+        SubagentsProvider._parse_live_pane_count(
+            "⏵⏵ auto mode on · 1 shell · ← 1 agent · ↓ to manage"
+        )
+        == 1
+    )
 
 
 def test_subagent_provider_parses_background_agent_summary():
@@ -273,7 +373,7 @@ def test_subagent_provider_persists_live_fallback_count(monkeypatch, tmp_path):
         plan={"path": None, "active_task": None},
     )
     provider = SubagentsProvider()
-    monkeypatch.setattr(provider, "_live_pane_count", lambda record: 2)
+    monkeypatch.setattr(provider, "_live_pane_count_observed", lambda record: 2)
 
     assert provider.value(store.home, session) == "count:2"
     status = StateIO.read_session_status(store.home, session)

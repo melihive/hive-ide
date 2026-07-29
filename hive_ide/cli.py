@@ -989,7 +989,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
-        args = parser.parse_args(argv)
+        raw_argv = list(argv) if argv is not None else sys.argv[1:]
+        if "--quiet" in raw_argv[1:]:
+            raw_argv = ["--quiet", *[item for item in raw_argv if item != "--quiet"]]
+        args = parser.parse_args(raw_argv)
         if args.command in WORKSPACE_MUTATIONS:
             store, _ = _context(args)
             with store.mutation_lock():

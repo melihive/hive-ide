@@ -103,7 +103,7 @@ class SidebarGrid:
         right_width = max(self.status_cells, self.cell_width(right_status))
         show_right = bool(right_status) and available >= right_width
         right_width = right_width if show_right else 0
-        right_gap = self.GAP_CELLS if show_right else 0
+        right_gap = max(self.GAP_CELLS, 2) if show_right else 0
         content_available = max(0, available - right_width - right_gap)
 
         def styled_age(limit: int) -> str:

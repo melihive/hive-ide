@@ -213,15 +213,8 @@ class IdeSidebar:
     ) -> tuple[str, str]:
         """(glyph, color) for this session's agent status — ('','') when idle/unknown.
 
-        `current` = this row IS the window you're in. A "waiting" dot is a SUMMONS — it
-        means an agent wants you — so showing it on the session you are already sitting
-        in is noise pointing at where you already are. It is dropped there, and comes
-        back by itself the moment you switch away and it still wants you.
-
-        Note this can't lean on the `selected` highlight instead: selection requires the
-        SIDEBAR pane to hold focus, so the dot reappeared the instant you started typing
-        in the agent pane — which is exactly when you're most obviously already there.
-        "working" (amber) is status, not a summons, so it stays.
+        `current` = this row IS the window you're in. Current rows still render the
+        same status glyph as inactive rows; the highlight only changes the background.
         """
         settings = sidebar or _DEFAULT_SIDEBAR
         status_icons = (settings.get("icons") or {}).get("status") or {}
@@ -233,8 +226,6 @@ class IdeSidebar:
         state = st.get("state")
         if state == "working" and IdeSidebar._age_seconds(st.get("ts")) > IdeSidebar.STALE_WORKING_SECONDS:
             return "", ""   # self-heal: stale "working" (crashed agent) → neutral
-        if current and state == "waiting":
-            return "", ""
         _, color = IdeSidebar.STATUS_DOT.get(state, ("", ""))
         return status_icons.get(state, ""), color
 
@@ -430,7 +421,7 @@ class IdeSidebar:
             stderr=subprocess.DEVNULL,
         )
         subprocess.run(
-            ["tmux", "select-pane", "-t", f"{target}.0"],
+            ["tmux", "select-pane", "-t", f"{target}.1"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
