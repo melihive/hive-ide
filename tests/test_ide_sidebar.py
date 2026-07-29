@@ -146,7 +146,7 @@ def test_subagent_count_renders_under_the_status_dot(tmp_path):
         providers=registry,
     )
 
-    assert _plain(lines[2]).rstrip().endswith("●")
+    assert _plain(lines[2]).rstrip().endswith("▶")
     assert _plain(lines[3]).rstrip().endswith("3")
 
 
@@ -460,6 +460,21 @@ def test_pane_registry_rehydrates_snapshot_without_plugin_discovery(monkeypatch)
     sidebar = _sidebar_config({}, SidebarProviderRegistry())
     registry = SidebarProviderRegistry.from_snapshot(sidebar["providers"])
     assert registry.ids() == ["activity", "checkout", "plan", "subagents"]
+
+
+def test_default_sidebar_icons_are_terminal_cell_safe():
+    sidebar = _sidebar_config({}, SidebarProviderRegistry())
+
+    assert sidebar["icons"]["status"]["working"] == "▶"
+    assert sidebar["icons"]["controls"]["archive"] == "▼"
+    assert sidebar["icons"]["providers"]["checkout"]["busy"] == "⏳"
+    assert "subagents" not in sidebar["icons"]["providers"]
+    for value in (
+        sidebar["icons"]["status"]["working"],
+        sidebar["icons"]["controls"]["archive"],
+        sidebar["icons"]["providers"]["checkout"]["busy"],
+    ):
+        assert SidebarGrid.cell_width(value) in {1, 2}
 
 
 def test_sidebar_rejects_icons_wider_than_a_grid_track():

@@ -14,6 +14,9 @@ All notable changes to `hive-ide` will be documented in this file.
   with no symbolic fallback icon.
 - The default checkout busy marker now uses an hourglass emoji instead of an
   ellipsis, avoiding a visual clash with truncated text.
+- The default working status marker is now `▶`, making active work read like a
+  play/running indicator instead of another dot.
+- The archive footer control now uses the larger one-cell `▼` marker.
 
 ## [1.0.14] - 2026-07-29
 

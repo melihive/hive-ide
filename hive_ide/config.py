@@ -61,8 +61,8 @@ DEFAULT_SIDEBAR = {
             "terminal": "💻",
             "default": "•",
         },
-        "status": {"working": "●", "waiting": "●", "error": "!"},
-        "controls": {"create": "+", "archive": "▾"},
+        "status": {"working": "▶", "waiting": "●", "error": "!"},
+        "controls": {"create": "+", "archive": "▼"},
         "providers": {
             "checkout": {"busy": "⏳"},
             "subagents": {},
