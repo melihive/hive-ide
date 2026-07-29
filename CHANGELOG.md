@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar subagent counts now fall back to the visible live agent pane when
+  hooks do not emit a count, covering Codex child-agent rows and Claude
+  background-agent messages.
+- Subagent counts now render even on the current row when there is no visible
+  waiting/working status dot.
+
 ## [1.0.13] - 2026-07-29
 
 ### Fixed

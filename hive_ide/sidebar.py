@@ -775,7 +775,7 @@ class IdeSidebar:
                                 state=state,
                                 slots=slot_marks,
                                 age=rel,
-                                right_status=subagent_mark if glyph else "",
+                                right_status=subagent_mark,
                             ),
                             True,
                             sel,
@@ -798,7 +798,7 @@ class IdeSidebar:
                                 age=rel,
                                 age_style=IdeSidebar.DIM,
                                 reset=keep,
-                                right_status=subagent_mark if glyph else "",
+                                right_status=subagent_mark,
                             ),
                             True,
                             IdeSidebar.CUR_BG,
@@ -817,7 +817,7 @@ class IdeSidebar:
                                 age=rel,
                                 age_style=IdeSidebar.DIM,
                                 reset=IdeSidebar.RESET,
-                                right_status=subagent_mark if glyph else "",
+                                right_status=subagent_mark,
                             )
                         )
                     )

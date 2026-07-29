@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hive_ide.sidebar import IdeSidebar  # noqa: E402
 from hive_ide.sidebar_grid import SidebarGrid  # noqa: E402
-from hive_ide.sidebar_plugins import SidebarProviderRegistry  # noqa: E402
+from hive_ide.sidebar_plugins import SidebarProviderRegistry, SubagentsProvider  # noqa: E402
 from hive_ide.store import StateStore  # noqa: E402
 from hive_ide.config import _sidebar_config  # noqa: E402
 from hive_ide.errors import UsageError  # noqa: E402
@@ -144,6 +144,76 @@ def test_subagent_count_renders_under_the_status_dot(tmp_path):
 
     assert _plain(lines[2]).rstrip().endswith("●")
     assert _plain(lines[3]).rstrip().endswith("3")
+
+
+def test_subagent_provider_parses_codex_child_agent_rows():
+    text = """
+›› auto mode on · ↵ for agents
+
+● main
+○ codex  L1 queue cleanup           7m 53s · ↓ 159.6k tokens
+○ codex  L2 land idempotency        3m 48s · ↓ 212.0k tokens
+"""
+
+    assert SubagentsProvider._parse_live_pane_count(text) == 2
+
+
+def test_subagent_provider_parses_background_agent_summary():
+    assert (
+        SubagentsProvider._parse_live_pane_count(
+            "\x1b[1m* Waiting for 1 background agent to finish\x1b[0m"
+        )
+        == 1
+    )
+
+
+def test_subagent_provider_parses_claude_background_session_message():
+    assert (
+        SubagentsProvider._parse_live_pane_count(
+            "Session abc is currently running as a background agent (bg)."
+        )
+        == 1
+    )
+
+
+def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="CURRENT",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+        plan={"path": "plans/x.md", "active_task": None},
+    )
+    store.write(
+        "status",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "state": "idle",
+            "driver": "term",
+            "subagents": {"running": 2},
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        session["id"],
+        0,
+        24,
+        focused=False,
+        sidebar=_sidebar_config({}, SidebarProviderRegistry()),
+        providers=SidebarProviderRegistry(),
+    )
+
+    assert _plain(lines[3]).rstrip().endswith("2")
 
 
 def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
@@ -518,7 +588,7 @@ def _sessions(n):
              "last_active": "2026-07-22T05:00:00+00:00"} for i in range(n)]
 
 
-def test_render_and_click_agree_for_every_density_and_size():
+def test_render_and_click_agree_for_every_density_and_size(tmp_path):
     """ROUND TRIP: whatever row `render_lines` draws a session on, `_click_index` must map
     back to that SAME session — at every density and list length.
 
@@ -527,11 +597,10 @@ def test_render_and_click_agree_for_every_density_and_size():
     against each other (rather than each against a hardcoded number) is what makes this
     class of drift impossible to reintroduce.
     """
-    from pathlib import Path
     for entry_rows in (1, 2, 3):
         for n in (1, 2, 5, 9):
             lines = IdeSidebar.render_lines(
-                Path(".skills/ide"), _sessions(n), "/workspace/example", "id-0", 0, 30,
+                tmp_path, _sessions(n), "/workspace/example", "id-0", 0, 30,
                 entry_rows=entry_rows)
             for i in range(n):
                 name_row0 = IdeSidebar.HEADER_ROWS + i * entry_rows      # 0-based
@@ -546,12 +615,11 @@ def test_render_and_click_agree_for_every_density_and_size():
 def test_entry_rows_choice_always_fits_the_rendered_block(tmp_path):
     """`_entry_rows` must pick a density whose ACTUAL rendered output fits the pane —
     otherwise the list overflows and screen rows stop matching sessions again."""
-    from pathlib import Path
     for height in (10, 12, 16, 20, 30, 40):
         for n in (1, 3, 6, 10):
             er = IdeSidebar._entry_rows(n, height)
             lines = IdeSidebar.render_lines(
-                Path(".skills/ide"), _sessions(n), "/workspace/example", "id-0", 0, 30,
+                tmp_path, _sessions(n), "/workspace/example", "id-0", 0, 30,
                 entry_rows=er)
             assert er in (1, 2, 3)
             # the entry block itself must fit; footer/header may still push a very short
