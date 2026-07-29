@@ -727,6 +727,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace-key",
         help="Workspace identity. Defaults to the current directory.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress the final JSON result for TUI side-effect commands.",
+    )
     sub = parser.add_subparsers(
         dest="command",
         required=True,
@@ -967,7 +972,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = args.handler(args)
         else:
             result = args.handler(args)
-        print(_json(result))
+        if not args.quiet:
+            print(_json(result))
         return 0
     except HiveIdeError as exc:
         print(f"hive-ide: {exc}", file=sys.stderr)

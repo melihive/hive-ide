@@ -19,6 +19,11 @@ All notable changes to `hive-ide` will be documented in this file.
 - `hive-ide current-chat` now focuses an existing live agent pane instead of
   respawning it, avoiding accidental interruption of active Codex or Claude
   sessions.
+- Codex resume commands now pass the session working directory with `-C`, so
+  Codex no longer asks which directory to use when a conversation was last
+  recorded from another cwd.
+- The package CLI now supports `--quiet` for wrapper/TUI commands that should
+  perform an action without printing JSON into the pane.
 - Sidebar browse selection now uses the legacy high-contrast green/teal palette
   for focused rows.
 

@@ -169,6 +169,12 @@ def test_cli_subcommand_help_describes_options(capsys):
     assert "--tmux-socket" in out
 
 
+def test_cli_quiet_suppresses_final_json_result(capsys):
+    assert main(["--quiet", "version"]) == 0
+
+    assert capsys.readouterr().out == ""
+
+
 def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -443,7 +449,13 @@ def test_adopt_discovers_codex_sessions_for_workspace(tmp_path, capsys, monkeypa
     ) == 0
     record = json.loads(capsys.readouterr().out)
     assert record["name"] == "CODEX ADOPT"
-    assert record["driver"]["launch_argv"] == ["codex", "resume", "old-codex"]
+    assert record["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "-C",
+        str(workspace),
+        "old-codex",
+    ]
 
 
 def test_editor_resolution_is_custom_then_micro_then_less(monkeypatch):
@@ -466,7 +478,7 @@ def test_bundled_driver_capabilities_are_explicit():
     )["launch_argv"] == ["claude", "--resume", "abc"]
     assert drivers["codex"].resolve(
         name="X", working_dir="/tmp", conversation_reference="abc"
-    )["launch_argv"] == ["codex", "resume", "abc"]
+    )["launch_argv"] == ["codex", "resume", "-C", "/tmp", "abc"]
     assert drivers["antigravity"].resolve(
         name="X", working_dir="/tmp", conversation_reference="continue"
     )["resume"]["strategy"] == "workspace_continue"
@@ -556,6 +568,8 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     assert updated["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "-C",
+        str(workspace),
         "conversation-1",
     ]
 
@@ -769,7 +783,13 @@ def test_current_plan_and_conversation_mutations_are_id_targeted(
     attached = json.loads(capsys.readouterr().out)
     assert attached["id"] == record["id"]
     assert attached["driver"]["resume"]["reference"] == "conversation-1"
-    assert attached["driver"]["launch_argv"] == ["codex", "resume", "conversation-1"]
+    assert attached["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "-C",
+        str(workspace),
+        "conversation-1",
+    ]
 
 
 def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch):
@@ -835,7 +855,7 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
     }
     assert calls == [
         (
-            ["codex", "resume", "conversation-1"],
+            ["codex", "resume", "-C", str(workspace), "conversation-1"],
             {"cwd": str(workspace)},
         )
     ]
