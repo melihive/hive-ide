@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.21] - 2026-07-29
+
 ### Fixed
 
 - Sidebar subagent counts now use only explicit `subagents.running` status
