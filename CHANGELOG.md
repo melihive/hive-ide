@@ -18,6 +18,9 @@ All notable changes to `hive-ide` will be documented in this file.
 
 - Merged-worktree checkout icons no longer show the green merged check while the
   session still reports running subagents.
+- Stable sessions now self-refresh their stored package patch version when the
+  installed package still matches the same protocol/schema, so missing-window
+  recovery does not break after a normal package upgrade.
 
 ## [1.0.9] - 2026-07-29
 

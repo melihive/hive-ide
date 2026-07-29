@@ -193,6 +193,25 @@ class Frame:
             f"HIVE_IDE_SOURCE={source.get('kind') or 'stable'}",
         ]
 
+    def _refresh_source_if_needed(
+        self, record: dict[str, Any], interpreter: str
+    ) -> None:
+        handshake = inspect_interpreter(interpreter)
+        source = record.get("source") or {}
+        if handshake["package_version"] == source.get("version"):
+            return
+        if (
+            source.get("kind") == "stable"
+            and handshake.get("protocol_version") == PROTOCOL_VERSION
+            and handshake.get("schema_version") == SCHEMA_VERSION
+        ):
+            record["source"] = {**source, "version": handshake["package_version"]}
+            self.store.write("sessions", record["id"], record)
+            return
+        raise UsageError(
+            f"Session source version changed at {interpreter}; run source-set again."
+        )
+
     def _sidebar_command(self, record: dict[str, Any]) -> str:
         interpreter = (record.get("source") or {}).get("interpreter") or self.python
         command = self._module(
@@ -417,11 +436,7 @@ class Frame:
         if not Path(working_dir).is_dir():
             raise UsageError(f"Session working directory does not exist: {working_dir}")
         interpreter = (record.get("source") or {}).get("interpreter") or self.python
-        handshake = inspect_interpreter(interpreter)
-        if handshake["package_version"] != (record.get("source") or {}).get("version"):
-            raise UsageError(
-                f"Session source version changed at {interpreter}; run source-set again."
-            )
+        self._refresh_source_if_needed(record, interpreter)
         env = self._environment(record)
         sidebar = ["sh", "-c", self._sidebar_command(record)]
         if self.exists():

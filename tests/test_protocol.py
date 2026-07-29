@@ -910,6 +910,64 @@ def test_current_chat_selects_existing_agent_pane_without_respawning(
     assert calls == [["select-pane", "-t", "%2"]]
 
 
+def test_stable_source_patch_upgrade_refreshes_session_record(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE",
+        working_dir=workspace,
+        source={
+            "kind": "stable",
+            "interpreter": sys.executable,
+            "version": "1.0.8",
+        },
+        driver=_term(),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(
+        "hive_ide.frame.inspect_interpreter",
+        lambda _interpreter: {
+            "package_version": "1.0.10",
+            "protocol_version": 1,
+            "schema_version": 1,
+        },
+    )
+
+    frame._refresh_source_if_needed(record, sys.executable)
+
+    assert record["source"]["version"] == "1.0.10"
+    assert store.find_session(record["id"])["source"]["version"] == "1.0.10"
+
+
+def test_dev_source_version_skew_stays_loud(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="DEV",
+        working_dir=workspace,
+        source={
+            "kind": "dev",
+            "interpreter": sys.executable,
+            "version": "1.0.8",
+        },
+        driver=_term(),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(
+        "hive_ide.frame.inspect_interpreter",
+        lambda _interpreter: {
+            "package_version": "1.0.10",
+            "protocol_version": 1,
+            "schema_version": 1,
+        },
+    )
+
+    with pytest.raises(UsageError, match="source version changed"):
+        frame._refresh_source_if_needed(record, sys.executable)
+
+
 def test_purge_requires_confirmation_and_removes_all_session_state(
     tmp_path, capsys
 ):
