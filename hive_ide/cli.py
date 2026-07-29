@@ -48,6 +48,13 @@ WORKSPACE_MUTATIONS = frozenset(
     }
 )
 
+QUIET_SUCCESS_COMMANDS = frozenset(
+    {
+        "current-chat",
+        "current-plan",
+    }
+)
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True)
@@ -989,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = args.handler(args)
         else:
             result = args.handler(args)
-        if not args.quiet:
+        if not args.quiet and args.command not in QUIET_SUCCESS_COMMANDS:
             print(_json(result))
         return 0
     except HiveIdeError as exc:

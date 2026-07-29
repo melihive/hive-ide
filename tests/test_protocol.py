@@ -228,6 +228,91 @@ def test_cli_quiet_suppresses_final_json_result(capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plan.md", "active_task": None},
+    )
+
+    monkeypatch.setattr(
+        Frame,
+        "current_plan",
+        lambda _self, session, focus=False: {
+            "session_id": session["id"],
+            "opened": "plan-pane",
+        },
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--workspace-key",
+                str(workspace),
+                "current-plan",
+                "--session-id",
+                record["id"],
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cli_current_chat_is_quiet_on_success(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+
+    monkeypatch.setattr(
+        Frame,
+        "current_chat",
+        lambda _self, session: {
+            "session_id": session["id"],
+            "opened": "existing-agent-pane",
+        },
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--workspace-key",
+                str(workspace),
+                "current-chat",
+                "--session-id",
+                record["id"],
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

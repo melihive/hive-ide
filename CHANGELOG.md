@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `current-plan` and `current-chat` are now quiet on success by default, so
+  interactive pane actions open/focus their target without dumping JSON into the
+  agent shell.
+
 ## [1.0.15] - 2026-07-29
 
 ### Fixed
