@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.15] - 2026-07-29
+
 ### Fixed
 
 - Sidebar subagent counts now persist live-pane fallback observations into
