@@ -698,13 +698,84 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hive-ide")
-    parser.add_argument("--state-home")
-    parser.add_argument("--config")
-    parser.add_argument("--workspace-key")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="hive-ide",
+        description=(
+            "Repository-scoped tmux IDE for Codex, Claude, Antigravity, and "
+            "terminal sessions."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  hive-ide open\n"
+            "  hive-ide create --driver=claude --name='API work'\n"
+            "  hive-ide adopt --driver=codex\n"
+            "  hive-ide current-chat\n"
+            "  hive-ide current-plan --focus\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--state-home",
+        help="Override the XDG state directory that stores IDE session records.",
+    )
+    parser.add_argument(
+        "--config",
+        help="Read package settings from this JSON config file.",
+    )
+    parser.add_argument(
+        "--workspace-key",
+        help="Workspace identity. Defaults to the current directory.",
+    )
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="COMMAND",
+        title="commands",
+    )
 
-    create = sub.add_parser("create")
+    command_help = {
+        "create": "Create a session, optionally adopting a known conversation.",
+        "adopt": "List or import existing Claude/Codex conversations for this directory.",
+        "list": "List active sessions for the workspace.",
+        "show": "Show one session record.",
+        "archive": "Archive an active session and close its window.",
+        "resume": "Restore an archived session and rebuild its window.",
+        "rename": "Rename a session without changing its immutable ID.",
+        "current": "Show the current session selected by ID or environment.",
+        "current-plan": "Open the current session's plan pane.",
+        "current-chat": "Focus or resume the current session's agent pane.",
+        "plan-set": "Attach, change, or clear a session plan.",
+        "attach-conversation": "Attach a driver conversation ID to an existing session.",
+        "working-dir-set": "Move a session to an existing working directory.",
+        "rebuild": "Rebuild one tmux window from its session record.",
+        "relayout": "Reapply or adopt the tmux frame geometry.",
+        "purge": "Permanently remove a session and all package state for it.",
+        "status-event": "Record agent activity for hooks.",
+        "record-error": "Record a recoverable frame/sidebar error.",
+        "clear-error": "Clear a recorded session error.",
+        "snapshot": "Inspect live tmux frame state.",
+        "ensure": "Build one missing session window if needed.",
+        "switch-driver": "Switch a session between configured drivers.",
+        "source-set": "Pin one session to stable, dev, or an explicit source.",
+        "open": "Open the tmux IDE, bootstrapping a TERM session if needed.",
+        "skill-install": "Install the packaged agent skill definition.",
+        "environment-setup": "Install stable/dev Python environments.",
+        "hook-setup": "Install shell/agent hooks used by the IDE.",
+        "verify": "Verify package, drivers, hooks, source, and frame health.",
+        "version": "Print package, protocol, schema, and interpreter versions.",
+    }
+
+    def command(name: str, **kwargs):
+        summary = command_help[name]
+        return sub.add_parser(
+            name,
+            help=summary,
+            description=summary,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+            **kwargs,
+        )
+
+    create = command("create")
     create.add_argument("--name")
     create.add_argument("--driver")
     create.add_argument("--working-dir")
@@ -714,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--reference")
     create.set_defaults(handler=cmd_create)
 
-    adopt = sub.add_parser("adopt")
+    adopt = command("adopt")
     adopt.add_argument("--driver", default="claude")
     adopt.add_argument("--working-dir")
     adopt.add_argument("--plan")
@@ -724,89 +795,89 @@ def build_parser() -> argparse.ArgumentParser:
     adopt.add_argument("--dry-run", action="store_true")
     adopt.set_defaults(handler=cmd_adopt)
 
-    listing = sub.add_parser("list", aliases=["ls"])
+    listing = command("list", aliases=["ls"])
     listing.add_argument("--archived", action="store_true")
     listing.set_defaults(handler=cmd_list)
 
-    show = sub.add_parser("show")
+    show = command("show")
     show.add_argument("--session-id", required=True)
     show.add_argument("--archived", action="store_true")
     show.set_defaults(handler=cmd_show)
 
-    archive = sub.add_parser("archive")
+    archive = command("archive")
     archive.add_argument("--session-id", required=True)
     archive.add_argument("--tmux-socket")
     archive.set_defaults(handler=cmd_archive)
 
-    resume = sub.add_parser("resume")
+    resume = command("resume")
     resume.add_argument("--session-id", required=True)
     resume.add_argument("--tmux-socket")
     resume.set_defaults(handler=cmd_resume)
 
-    rename = sub.add_parser("rename")
+    rename = command("rename")
     rename.add_argument("--session-id", required=True)
     rename.add_argument("--name", required=True)
     rename.add_argument("--tmux-socket")
     rename.set_defaults(handler=cmd_rename)
 
-    current = sub.add_parser("current")
+    current = command("current")
     current.add_argument("--session-id")
     current.set_defaults(handler=cmd_current)
 
-    current_plan = sub.add_parser("current-plan", aliases=["plan"])
+    current_plan = command("current-plan", aliases=["plan"])
     current_plan.add_argument("--session-id")
     current_plan.add_argument("--tmux-socket")
     current_plan.add_argument("--focus", action="store_true")
     current_plan.set_defaults(handler=cmd_current_plan)
 
-    current_chat = sub.add_parser("current-chat", aliases=["chat"])
+    current_chat = command("current-chat", aliases=["chat"])
     current_chat.add_argument("--session-id")
     current_chat.add_argument("--tmux-socket")
     current_chat.set_defaults(handler=cmd_current_chat)
 
-    plan = sub.add_parser("plan-set")
+    plan = command("plan-set")
     plan.add_argument("--session-id", required=True)
     plan.add_argument("--path")
     plan.add_argument("--active-task")
     plan.add_argument("--clear", action="store_true")
     plan.set_defaults(handler=cmd_plan_set)
 
-    attach = sub.add_parser("attach-conversation")
+    attach = command("attach-conversation")
     attach.add_argument("--session-id", required=True)
     attach.add_argument("--reference", required=True)
     attach.add_argument("--driver")
     attach.set_defaults(handler=cmd_attach_conversation)
 
-    directory = sub.add_parser("working-dir-set")
+    directory = command("working-dir-set")
     directory.add_argument("--session-id", required=True)
     directory.add_argument("--working-dir", required=True)
     directory.add_argument("--tmux-socket")
     directory.set_defaults(handler=cmd_working_dir_set)
 
-    rebuild = sub.add_parser("rebuild")
+    rebuild = command("rebuild")
     rebuild.add_argument("--session-id", required=True)
     rebuild.add_argument("--tmux-socket")
     rebuild.set_defaults(handler=cmd_rebuild)
 
-    relayout = sub.add_parser("relayout")
+    relayout = command("relayout")
     relayout.add_argument("--tmux-socket")
     relayout.add_argument("--mode", choices=("snap", "adopt"), default="snap")
     relayout.set_defaults(handler=cmd_relayout)
 
-    purge = sub.add_parser("purge")
+    purge = command("purge")
     purge.add_argument("--session-id", required=True)
     purge.add_argument("--confirm", action="store_true")
     purge.add_argument("--tmux-socket")
     purge.set_defaults(handler=cmd_purge)
 
-    status = sub.add_parser("status-event")
+    status = command("status-event")
     status.add_argument("--session-id", required=True)
     status.add_argument("--state", choices=("working", "waiting", "idle"), required=True)
     status.add_argument("--driver", required=True)
     status.add_argument("--conversation-reference")
     status.set_defaults(handler=cmd_status_event)
 
-    error = sub.add_parser("record-error")
+    error = command("record-error")
     error.add_argument("--session-id")
     error.add_argument("--component", required=True)
     error.add_argument("--summary", required=True)
@@ -815,35 +886,35 @@ def build_parser() -> argparse.ArgumentParser:
     error.add_argument("--recovery", required=True)
     error.set_defaults(handler=cmd_error)
 
-    clear = sub.add_parser("clear-error")
+    clear = command("clear-error")
     clear.add_argument("--session-id")
     clear.set_defaults(handler=cmd_clear_error)
 
-    snapshot = sub.add_parser("snapshot")
+    snapshot = command("snapshot")
     snapshot.add_argument("--tmux-socket", default="hive-ide")
     snapshot.set_defaults(handler=cmd_snapshot)
 
-    ensure = sub.add_parser("ensure")
+    ensure = command("ensure")
     target = ensure.add_mutually_exclusive_group(required=True)
     target.add_argument("--session-id")
     target.add_argument("--name")
     ensure.add_argument("--tmux-socket")
     ensure.set_defaults(handler=cmd_ensure)
 
-    switch = sub.add_parser("switch-driver")
+    switch = command("switch-driver")
     switch.add_argument("--session-id", required=True)
     switch.add_argument("--driver", required=True)
     switch.add_argument("--tmux-socket")
     switch.set_defaults(handler=cmd_switch_driver)
 
-    source = sub.add_parser("source-set")
+    source = command("source-set")
     source.add_argument("--session-id", required=True)
     source.add_argument("--source", required=True)
     source.add_argument("--tmux-socket")
     source.add_argument("--no-rebuild", action="store_true")
     source.set_defaults(handler=cmd_source_set)
 
-    open_command = sub.add_parser("open")
+    open_command = command("open")
     open_command.add_argument("--no-attach", action="store_true")
     open_command.add_argument("--tmux-socket")
     open_command.add_argument("--name")
@@ -853,27 +924,27 @@ def build_parser() -> argparse.ArgumentParser:
     open_command.add_argument("--source")
     open_command.set_defaults(handler=cmd_open)
 
-    skill = sub.add_parser("skill-install")
+    skill = command("skill-install")
     skill.add_argument("--target")
     skill.set_defaults(handler=cmd_skill_install)
 
-    environments = sub.add_parser("environment-setup")
+    environments = command("environment-setup")
     environments.add_argument("--environment-home")
     environments.add_argument("--stable-spec", default="hive-ide")
     environments.add_argument("--dev-checkout")
     environments.set_defaults(handler=cmd_environment_setup)
 
-    hooks = sub.add_parser("hook-setup")
+    hooks = command("hook-setup")
     hooks.add_argument("--apply", action="store_true")
     hooks.add_argument("--home")
     hooks.add_argument("--stable-python")
     hooks.set_defaults(handler=cmd_hook_setup)
 
-    verify = sub.add_parser("verify")
+    verify = command("verify")
     verify.add_argument("--stable-python")
     verify.set_defaults(handler=cmd_verify)
 
-    version = sub.add_parser("version")
+    version = command("version")
     version.set_defaults(
         handler=lambda _args: {
             "package_version": __version__,

@@ -144,6 +144,31 @@ def test_missing_config_uses_safe_defaults(tmp_path, capsys):
     assert record["source"]["kind"] == "stable"
 
 
+def test_cli_help_lists_commands_with_professional_summaries(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "Repository-scoped tmux IDE" in out
+    assert "open" in out
+    assert "Open the tmux IDE" in out
+    assert "current-chat" in out
+    assert "Focus or resume the current session's agent pane." in out
+    assert "Examples:" in out
+
+
+def test_cli_subcommand_help_describes_options(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["current-chat", "--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "Focus or resume the current session's agent pane." in out
+    assert "--session-id" in out
+    assert "--tmux-socket" in out
+
+
 def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
