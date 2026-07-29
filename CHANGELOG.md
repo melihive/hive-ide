@@ -4,6 +4,20 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.22] - 2026-07-30
+
+### Fixed
+
+- Relayout now uses the most recently active tmux client geometry and resizes
+  both width and height, so switching between desktop and mobile clients restores
+  the frame to the correct size instead of leaving stale desktop-height panes.
+- Mobile sidebar, chat, and plan pane switching now synchronously transfers tmux
+  zoom ownership to the selected pane, preventing the sidebar from getting stuck
+  active in a one-column strip.
+- Mobile popups now open near full-screen on narrow clients.
+- Sidebar focus recovery now keeps a real `after-select-pane` relayout hook, so
+  transient unzoomed mobile pane states self-correct on the next focus event.
+
 ## [1.0.21] - 2026-07-29
 
 ### Fixed
