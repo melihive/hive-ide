@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.10] - 2026-07-29
+
 ### Added
 
 - Sidebar status can now show a running subagent count under the right-side
