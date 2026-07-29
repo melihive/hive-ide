@@ -208,6 +208,11 @@ class IdeNewModal:
         )
         if window_id:
             subprocess.run(
+                ["tmux", "select-window", "-t", window_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
                 ["tmux", "select-pane", "-t", f"{window_id}.1"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

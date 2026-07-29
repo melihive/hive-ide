@@ -305,6 +305,7 @@ def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
     frame.ensure(record)
     frame.bind_keys()
+    frame.select_session(record["id"])
     return record
 
 

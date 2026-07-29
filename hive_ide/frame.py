@@ -508,6 +508,14 @@ class Frame:
         self.build(record)
         return True
 
+    def select_session(self, session_id: str, *, pane: int = 1) -> bool:
+        target = self.windows().get(session_id)
+        if not target:
+            return False
+        self.tmux(["select-window", "-t", target])
+        self.tmux(["select-pane", "-t", f"{target}.{pane}"])
+        return True
+
     def rebuild(self, record: dict[str, Any]) -> None:
         existing = self.windows().get(record["id"])
         previous_index = None

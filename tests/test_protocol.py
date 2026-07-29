@@ -102,6 +102,59 @@ def test_rename_archive_and_resume_keep_the_same_id_path(tmp_path, capsys):
     assert store.find_session(session_id)["name"] == "AFTER"
 
 
+def test_cli_resume_repairs_and_selects_restored_session(tmp_path, monkeypatch, capsys):
+    import hive_ide.cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="RESTORE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    session_id = record["id"]
+    store.archive_session(session_id)
+    calls = []
+
+    class FakeFrame:
+        def __init__(self, _store, *, socket=None):
+            self.socket = socket
+
+        def ensure(self, restored):
+            calls.append(("ensure", restored["id"]))
+            return True
+
+        def bind_keys(self):
+            calls.append(("bind_keys", None))
+
+        def select_session(self, restored_id):
+            calls.append(("select_session", restored_id))
+            return True
+
+    monkeypatch.setattr(cli_module, "Frame", FakeFrame)
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            store.workspace_key,
+            "resume",
+            "--session-id",
+            session_id,
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert calls == [
+        ("ensure", session_id),
+        ("bind_keys", None),
+        ("select_session", session_id),
+    ]
+    assert store.find_session(session_id) is not None
+
+
 def test_store_refuses_incompatible_schema(tmp_path):
     store = StateStore(tmp_path, tmp_path / "workspace")
     path = store.path("sessions", "bad")
@@ -970,6 +1023,33 @@ def test_current_chat_selects_existing_agent_pane_without_respawning(
         "opened": "existing-agent-pane",
     }
     assert calls == [["select-pane", "-t", "%2"]]
+
+
+def test_frame_select_session_selects_window_then_agent_pane(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="TARGET",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "windows", lambda: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda args, **_kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert frame.select_session(record["id"])
+    assert calls == [
+        ["select-window", "-t", "@7"],
+        ["select-pane", "-t", "@7.1"],
+    ]
 
 
 def test_stable_source_patch_upgrade_refreshes_session_record(tmp_path, monkeypatch):

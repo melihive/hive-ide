@@ -30,7 +30,7 @@ class IdeOptionsModal:
         ("agent", "change agent", "open the agent picker"),
         ("rename", "rename", "change the display label"),
         ("rebuild", "rebuild", "recreate this session window"),
-        ("card", "session card", "show session details"),
+        ("card", "session info", "show the info modal"),
     ]
 
     @staticmethod

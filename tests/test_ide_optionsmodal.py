@@ -3,6 +3,10 @@ from pathlib import Path
 from hive_ide.optionsmodal import IdeOptionsModal
 
 
+def test_options_modal_offers_session_info_action():
+    assert ("card", "session info", "show the info modal") in IdeOptionsModal.ACTIONS
+
+
 def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
     calls = []
 

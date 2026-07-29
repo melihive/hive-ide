@@ -63,20 +63,21 @@ def test_do_create_uses_public_cli_and_ensure(monkeypatch, tmp_path):
         "_cli",
         staticmethod(lambda _state, args: (calls.append(args) or next(outputs))),
     )
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda *args, **kwargs: type(
-            "Result",
-            (),
-            {"stdout": "@7\tsession-id\n", "returncode": 0},
-        )(),
-    )
+    tmux_calls = []
+
+    def fake_run(args, **_kwargs):
+        tmux_calls.append(args)
+        return type("Result", (), {"stdout": "@7\tsession-id\n", "returncode": 0})()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
     ok, message = IdeNewModal._do_create(tmp_path, "SESSION", "antigravity")
     assert ok and message == ""
     assert calls == [
         ["create", "--name=SESSION", "--driver=antigravity"],
         ["ensure", "--session-id=session-id"],
     ]
+    assert ["tmux", "select-window", "-t", "@7"] in tmux_calls
+    assert ["tmux", "select-pane", "-t", "@7.1"] in tmux_calls
 
 
 def test_do_create_can_adopt_selected_conversation(monkeypatch, tmp_path):
@@ -92,14 +93,13 @@ def test_do_create_can_adopt_selected_conversation(monkeypatch, tmp_path):
         "_cli",
         staticmethod(lambda _state, args: (calls.append(args) or next(outputs))),
     )
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda *args, **kwargs: type(
-            "Result",
-            (),
-            {"stdout": "@7\tsession-id\n", "returncode": 0},
-        )(),
-    )
+    tmux_calls = []
+
+    def fake_run(args, **_kwargs):
+        tmux_calls.append(args)
+        return type("Result", (), {"stdout": "@7\tsession-id\n", "returncode": 0})()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
     ok, message = IdeNewModal._do_create(
         tmp_path, "SESSION", "claude", adopt_reference="conversation-1"
     )
@@ -111,6 +111,8 @@ def test_do_create_can_adopt_selected_conversation(monkeypatch, tmp_path):
         "--adopt",
         "--reference=conversation-1",
     ]
+    assert ["tmux", "select-window", "-t", "@7"] in tmux_calls
+    assert ["tmux", "select-pane", "-t", "@7.1"] in tmux_calls
 
 
 def test_do_create_surfaces_failure_without_ensure(monkeypatch, tmp_path):
