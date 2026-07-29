@@ -22,6 +22,7 @@ import json
 import select
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .python_cmd import PythonCommand
@@ -254,9 +255,33 @@ class IdeNewModal:
             if needle
             in " ".join(
                 str(item.get(key) or "")
-                for key in ("name", "label", "reference", "updated_at", "preview")
+                for key in ("name", "label", "title", "updated_at", "preview")
             ).lower()
         ]
+
+    @staticmethod
+    def _rel_time(iso: str | None) -> str:
+        if not iso:
+            return ""
+        try:
+            t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return ""
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        secs = max(0, int((datetime.now(timezone.utc) - t).total_seconds()))
+        if secs < 60:
+            return f"{secs}s"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m"
+        hrs = mins // 60
+        if hrs < 24:
+            return f"{hrs}h"
+        days = hrs // 24
+        if days < 7:
+            return f"{days}d"
+        return f"{days // 7}w"
 
     @staticmethod
     def _validate(skill_dir: Path, repo: str, raw: str) -> tuple[str | None, str]:
@@ -395,12 +420,12 @@ class IdeNewModal:
                 visible = filtered[start:start + 10]
                 rows = []
                 for item in visible:
-                    label = str(item.get("label") or item.get("name") or item.get("reference") or "")
-                    reference = str(item.get("reference") or "")
-                    updated = str(item.get("updated_at") or "")
-                    when = updated.replace("T", " ")[:16] if updated else ""
+                    label = str(item.get("title") or item.get("label") or item.get("name") or "")
+                    updated = item.get("updated_at")
+                    when = C._rel_time(updated if isinstance(updated, str) else None)
                     preview = str(item.get("preview") or "").strip()
-                    note = f"{when} · {preview}" if preview else f"{when} · {reference[:8]}"
+                    note_parts = [part for part in (when, preview) if part]
+                    note = " · ".join(note_parts)
                     rows.append((label, note.strip(" ·")))
                 C._render_list(o, "", rows, st["adopt_sel"] - start)
                 if len(filtered) > len(visible):

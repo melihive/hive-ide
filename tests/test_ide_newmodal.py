@@ -168,3 +168,19 @@ def test_modal_filters_adoptable_conversations():
     assert IdeNewModal._filtered_conversations(state) == [
         {"label": "CODEX new", "reference": "bbb", "preview": "billing api fix"}
     ]
+
+
+def test_adopt_row_note_uses_relative_time_and_preview_only(monkeypatch):
+    item = {
+        "reference": "22222222-2222-4222-8222-222222222222",
+        "updated_at": "2026-07-28T11:00:00+00:00",
+        "preview": "Latest Hive Events allowlist work",
+    }
+
+    monkeypatch.setattr(IdeNewModal, "_rel_time", staticmethod(lambda _iso: "2h"))
+    updated = item.get("updated_at")
+    when = IdeNewModal._rel_time(updated if isinstance(updated, str) else None)
+    preview = str(item.get("preview") or "").strip()
+    note = " · ".join(part for part in (when, preview) if part)
+
+    assert note == "2h · Latest Hive Events allowlist work"

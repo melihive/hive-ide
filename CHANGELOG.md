@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Claude and Codex adoption candidates now show the conversation title or first
+  useful message as the row label, with a compact relative timestamp and message
+  preview instead of raw driver prefixes or conversation IDs.
+
 ## [1.0.10] - 2026-07-29
 
 ### Added

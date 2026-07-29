@@ -20,6 +20,7 @@ class AdoptableConversation:
     working_dir: str
     updated_at: str | None
     source_path: str
+    title: str | None = None
     preview: str | None = None
 
 
@@ -64,6 +65,16 @@ def _event_preview(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _event_title(payload: dict[str, Any]) -> str | None:
+    for key in ("customTitle", "title", "name", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            title = _compact_preview(value, limit=56)
+            if title:
+                return title
+    return None
+
+
 class ClaudeSessionAdopter:
     """Metadata-only scanner for Claude Code's directory-scoped JSONL sessions."""
 
@@ -92,6 +103,7 @@ class ClaudeSessionAdopter:
     ) -> AdoptableConversation | None:
         reference = path.stem
         updated_at: str | None = None
+        title: str | None = None
         preview: str | None = None
         try:
             with path.open(encoding="utf-8") as handle:
@@ -106,16 +118,20 @@ class ClaudeSessionAdopter:
                         reference = payload["sessionId"]
                     if isinstance(payload.get("timestamp"), str):
                         updated_at = payload["timestamp"]
-                    preview = _event_preview(payload) or preview
+                    title = _event_title(payload) or title
+                    if preview is None:
+                        preview = _event_preview(payload)
         except OSError:
             return None
+        label = title or preview or "Untitled Claude session"
         return AdoptableConversation(
             driver_id="claude",
             reference=reference,
-            label=f"CLAUDE {reference[:8]}",
+            label=label,
             working_dir=str(Path(working_dir).expanduser().resolve()),
             updated_at=updated_at,
             source_path=str(path),
+            title=title,
             preview=preview,
         )
 
@@ -145,6 +161,7 @@ class CodexSessionAdopter:
         reference: str | None = None
         updated_at: str | None = None
         cwd: str | None = None
+        title: str | None = None
         preview: str | None = None
         try:
             with path.open(encoding="utf-8") as handle:
@@ -158,10 +175,14 @@ class CodexSessionAdopter:
                     if isinstance(event.get("timestamp"), str):
                         updated_at = event["timestamp"]
                     payload = event.get("payload")
-                    preview = _event_preview(event) or preview
+                    title = _event_title(event) or title
+                    if preview is None:
+                        preview = _event_preview(event)
                     if not isinstance(payload, dict):
                         continue
-                    preview = _event_preview(payload) or preview
+                    title = _event_title(payload) or title
+                    if preview is None:
+                        preview = _event_preview(payload)
                     if event.get("type") != "session_meta":
                         continue
                     candidate = payload.get("session_id") or payload.get("id")
@@ -180,13 +201,15 @@ class CodexSessionAdopter:
                 ).isoformat()
             except OSError:
                 updated_at = None
+        label = title or preview or "Untitled Codex session"
         return AdoptableConversation(
             driver_id="codex",
             reference=reference,
-            label=f"CODEX {reference[:8]}",
+            label=label,
             working_dir=working_dir,
             updated_at=updated_at,
             source_path=str(path),
+            title=title,
             preview=preview,
         )
 

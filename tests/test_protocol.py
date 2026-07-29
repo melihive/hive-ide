@@ -229,6 +229,7 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
         json.dumps(
             {
                 "sessionId": "22222222-2222-4222-8222-222222222222",
+                "customTitle": "Hive Events Allowlist",
                 "timestamp": "2026-07-28T11:00:00.000Z",
                 "type": "assistant",
                 "message": {
@@ -276,6 +277,7 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
         "--resume",
         "22222222-2222-4222-8222-222222222222",
     ]
+    assert newest["name"] == "Hive Events Allowlist"
     assert newest["host"]["adopted"]["updated_at"] == "2026-07-28T11:00:00.000Z"
 
     assert main(
@@ -292,6 +294,66 @@ def test_adopt_imports_claude_sessions_for_workspace(tmp_path, capsys, monkeypat
     rerun = json.loads(capsys.readouterr().out)
     assert rerun["created"] == []
     assert rerun["skipped_existing"] == 2
+
+
+def test_adopt_dry_run_exposes_title_and_first_message(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    project = home / ".claude" / "projects" / ("-" + "-".join(workspace.resolve().parts[1:]))
+    project.mkdir(parents=True)
+    (project / "session-1.jsonl").write_text(
+        json.dumps(
+            {
+                "sessionId": "session-1",
+                "customTitle": "Real session title",
+                "timestamp": "2026-07-28T10:00:00.000Z",
+                "type": "summary",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "sessionId": "session-1",
+                "timestamp": "2026-07-28T10:01:00.000Z",
+                "type": "user",
+                "message": {"content": "First useful message"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "sessionId": "session-1",
+                "timestamp": "2026-07-28T10:02:00.000Z",
+                "type": "user",
+                "message": {"content": "Later message"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "adopt",
+            "--driver",
+            "claude",
+            "--dry-run",
+        ]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    item = result["created"][0]
+    assert item["title"] == "Real session title"
+    assert item["label"] == "Real session title"
+    assert item["name"] == "Real session title"
+    assert item["preview"] == "First useful message"
 
 
 def test_create_adopt_imports_most_recent_claude_session(tmp_path, capsys, monkeypatch):
