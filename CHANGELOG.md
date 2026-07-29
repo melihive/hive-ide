@@ -4,6 +4,20 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar click and Enter activation now end sidebar browse focus after the
+  target chat pane is selected, so the highlighted row follows the active
+  session instead of leaving a stale focused item in the sidebar.
+- Sidebar command execution is now routed through `SidebarCommandRunner`, giving
+  tmux window selection, agent-pane focus, missing-window ensure, archive resume,
+  and CLI mutation calls one tested boundary.
+- Sidebar cursor reconciliation now uses `SidebarCursorState`, keeping selection
+  identity, reorder behavior, and activation focus transitions isolated from the
+  render loop.
+- `relayout` help is pinned as a frame-level command and must not advertise
+  per-session targeting.
+
 ## [1.0.19] - 2026-07-29
 
 ### Fixed

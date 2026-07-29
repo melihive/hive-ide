@@ -28,6 +28,7 @@ import select
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +50,173 @@ from .state_compat import StateIO
 
 _DEFAULT_PROVIDERS = SidebarProviderRegistry()
 _DEFAULT_SIDEBAR = _sidebar_config({}, _DEFAULT_PROVIDERS)
+
+
+@dataclass
+class SidebarCursorState:
+    cursor: int = -1
+    session_id: str = ""
+    focused: bool = False
+
+    def reconcile(
+        self,
+        session_ids: list[str],
+        *,
+        free: bool,
+        archive_mode: bool,
+        current_session_id: str,
+    ) -> "SidebarCursorState":
+        if not session_ids:
+            return SidebarCursorState(0, "", self.focused)
+        cursor = self.cursor
+        if self.session_id in session_ids and (self.focused or archive_mode or free):
+            cursor = session_ids.index(self.session_id)
+        elif not self.focused or (not free and (cursor < 0 or cursor >= len(session_ids))):
+            cursor = (
+                session_ids.index(current_session_id)
+                if current_session_id in session_ids
+                else 0
+            )
+        else:
+            cursor = max(0, min(cursor, len(session_ids) - 1))
+        return SidebarCursorState(cursor, session_ids[cursor], self.focused)
+
+    def activate_chat(self, session_ids: list[str]) -> "SidebarCursorState":
+        session_id = (
+            session_ids[self.cursor]
+            if 0 <= self.cursor < len(session_ids)
+            else ""
+        )
+        return SidebarCursorState(self.cursor, session_id, False)
+
+
+@dataclass
+class SidebarCommandRunner:
+    state_home: Path
+    workspace_key: str
+    python: str = sys.executable
+
+    def cli(self, args: list[str]) -> bool:
+        """Run one public CLI mutation in response to a deliberate user action."""
+        try:
+            r = subprocess.run(
+                PythonCommand.cli_argv(
+                    [
+                        "--state-home",
+                        str(self.state_home),
+                        "--workspace-key",
+                        self.workspace_key,
+                        *args,
+                    ],
+                    python=self.python,
+                ),
+                cwd=self.workspace_key,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0
+
+    def window_id(self, session_id: str) -> str | None:
+        result = subprocess.run(
+            [
+                "tmux",
+                "list-windows",
+                "-a",
+                "-F",
+                "#{window_id}\t#{@hive_ide_session_id}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        return next(
+            (
+                line.split("\t", 1)[0]
+                for line in result.stdout.splitlines()
+                if line.endswith(f"\t{session_id}")
+            ),
+            None,
+        )
+
+    def active_session_id(self, fallback: str) -> str:
+        try:
+            result = subprocess.run(
+                ["tmux", "display-message", "-p", "#{@hive_ide_session_id}"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return fallback
+        active = result.stdout.strip() if result.returncode == 0 else ""
+        return active or fallback
+
+    def switch(self, session_id: str) -> bool:
+        """Select a session window and focus its agent/chat pane."""
+        target = self.window_id(session_id)
+        if target is None:
+            args = ["ensure", f"--session-id={session_id}"]
+            if socket := os.environ.get("HIVE_IDE_TMUX_SOCKET"):
+                args.append(f"--tmux-socket={socket}")
+            if not self.cli(args):
+                return False
+            target = self.window_id(session_id)
+        if target is None:
+            return False
+        window = subprocess.run(
+            ["tmux", "select-window", "-t", target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        pane = subprocess.run(
+            ["tmux", "select-pane", "-t", f"{target}.1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return window.returncode == 0 and pane.returncode == 0
+
+    def focus_agent(self, session_id: str) -> None:
+        target = self.window_id(session_id)
+        if target is None:
+            return
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", target, "#{window_zoomed_flag}"],
+            capture_output=True,
+            text=True,
+        )
+        if r.stdout.strip() == "1":
+            subprocess.run(
+                ["tmux", "resize-pane", "-Z", "-t", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        subprocess.run(
+            ["tmux", "select-pane", "-t", f"{target}.1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def resume(self, session_id: str) -> bool:
+        """Resume an archived session, rebuild/ensure its window, and focus chat."""
+        if not session_id:
+            return False
+        args = [
+            "resume",
+            f"--session-id={session_id}",
+            *(
+                [f"--tmux-socket={socket}"]
+                if (socket := os.environ.get("HIVE_IDE_TMUX_SOCKET"))
+                else []
+            ),
+        ]
+        if not self.cli(args):
+            return False
+        self.focus_agent(session_id)
+        return True
 
 
 class IdeSidebar:
@@ -349,55 +517,15 @@ class IdeSidebar:
 
     @staticmethod
     def _cli(skill_dir: Path, args: list[str]) -> bool:
-        """Run one public CLI mutation in response to a deliberate user action."""
-        try:
-            r = subprocess.run(
-                PythonCommand.cli_argv(
-                    [
-                        "--state-home",
-                        str(skill_dir),
-                        "--workspace-key",
-                        IdeSidebar._repo_hint,
-                        *args,
-                    ],
-                    python=sys.executable,
-                ),
-                cwd=IdeSidebar._repo_hint,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return r.returncode == 0
+        return SidebarCommandRunner(skill_dir, IdeSidebar._repo_hint).cli(args)
 
     @staticmethod
     def _window_id(session_id: str) -> str | None:
-        result = subprocess.run(
-            [
-                "tmux",
-                "list-windows",
-                "-a",
-                "-F",
-                "#{window_id}\t#{@hive_ide_session_id}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return None
-        return next(
-            (
-                line.split("\t", 1)[0]
-                for line in result.stdout.splitlines()
-                if line.endswith(f"\t{session_id}")
-            ),
-            None,
-        )
+        return SidebarCommandRunner(Path("."), IdeSidebar._repo_hint).window_id(session_id)
 
     @staticmethod
-    def _switch(session_id: str, skill_dir: Path | None = None) -> None:
-        """Switch to an ide session's window, keeping focus on the sidebar.
+    def _switch(session_id: str, skill_dir: Path | None = None) -> bool:
+        """Switch to an IDE session's window and focus its agent/chat pane.
         Running inside `tmux -L ide`, $TMUX routes these to the ide server.
 
         The sidebar lists RECORDS, but this can only select a WINDOW — and a record
@@ -406,39 +534,15 @@ class IdeSidebar:
         the window and selects it. Costs nothing in the common case (the window exists,
         `select-window` succeeds, no runtime boot).
         """
-        target = IdeSidebar._window_id(session_id)
-        if target is None and skill_dir is not None:
-            args = ["ensure", f"--session-id={session_id}"]
-            if socket := os.environ.get("HIVE_IDE_TMUX_SOCKET"):
-                args.append(f"--tmux-socket={socket}")
-            IdeSidebar._cli(skill_dir, args)
-            target = IdeSidebar._window_id(session_id)
-        if target is None:
-            return
-        subprocess.run(
-            ["tmux", "select-window", "-t", target],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["tmux", "select-pane", "-t", f"{target}.1"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        return SidebarCommandRunner(skill_dir or Path("."), IdeSidebar._repo_hint).switch(
+            session_id
         )
 
     @staticmethod
     def _active_session_id(fallback: str) -> str:
-        try:
-            result = subprocess.run(
-                ["tmux", "display-message", "-p", "#{@hive_ide_session_id}"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return fallback
-        active = result.stdout.strip() if result.returncode == 0 else ""
-        return active or fallback
+        return SidebarCommandRunner(Path("."), IdeSidebar._repo_hint).active_session_id(
+            fallback
+        )
 
     @staticmethod
     def _focus_agent(session_id: str) -> None:
@@ -458,17 +562,7 @@ class IdeSidebar:
         full-screen, and selecting another pane while zoomed leaves the zoom on a pane you
         can no longer see.
         """
-        target = IdeSidebar._window_id(session_id)
-        if target is None:
-            return
-        r = subprocess.run(["tmux", "display-message", "-p", "-t", target,
-                            "#{window_zoomed_flag}"],
-                           capture_output=True, text=True)
-        if r.stdout.strip() == "1":
-            subprocess.run(["tmux", "resize-pane", "-Z", "-t", target],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["tmux", "select-pane", "-t", f"{target}.1"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        SidebarCommandRunner(Path("."), IdeSidebar._repo_hint).focus_agent(session_id)
 
     @staticmethod
     def _reconcile_cursor(
@@ -481,19 +575,19 @@ class IdeSidebar:
         current_session_id: str,
         cursor_session_id: str,
     ) -> tuple[int, str]:
-        if not session_ids:
-            return 0, ""
-        if cursor_session_id in session_ids and (focused or archive_mode or free):
-            cursor = session_ids.index(cursor_session_id)
-        elif not focused or (not free and (cursor < 0 or cursor >= len(session_ids))):
-            cursor = (
-                session_ids.index(current_session_id)
-                if current_session_id in session_ids
-                else 0
-            )
-        else:
-            cursor = max(0, min(cursor, len(session_ids) - 1))
-        return cursor, session_ids[cursor]
+        state = SidebarCursorState(cursor, cursor_session_id, focused).reconcile(
+            session_ids,
+            free=free,
+            archive_mode=archive_mode,
+            current_session_id=current_session_id,
+        )
+        return state.cursor, state.session_id
+
+    @staticmethod
+    def _after_activation(session_ids: list[str], cursor: int) -> tuple[bool, str]:
+        """A successful activation moves focus to chat; sidebar browse selection ends."""
+        state = SidebarCursorState(cursor, "", True).activate_chat(session_ids)
+        return state.focused, state.session_id
 
     @staticmethod
     def _click_index(
@@ -642,27 +736,7 @@ class IdeSidebar:
         """Resume an archived session (the archive view's Enter). Shells out to `ide
         resume`, which restores it to active, re-homes to the repo root, and rebuilds its
         window; then focus its agent pane so you can type. Returns True on success."""
-        if not session_id or not IdeSidebar._cli(
-            skill_dir,
-            [
-                "resume",
-                f"--session-id={session_id}",
-                *(
-                    [f"--tmux-socket={socket}"]
-                    if (socket := os.environ.get("HIVE_IDE_TMUX_SOCKET"))
-                    else []
-                ),
-            ],
-        ):
-            return False
-        target = IdeSidebar._window_id(session_id)
-        if target:
-            subprocess.run(
-                ["tmux", "select-pane", "-t", f"{target}.1"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        return True
+        return SidebarCommandRunner(skill_dir, IdeSidebar._repo_hint).resume(session_id)
 
     _repo_hint: str = ""
 
@@ -1144,7 +1218,10 @@ class IdeSidebar:
                     elif 0 <= click < len(names):
                         cursor, on_plus, on_filter, on_archive, query = click, False, False, False, ""
                         cursor_session_id = session_ids[cursor]
-                        IdeSidebar._switch(session_ids[cursor], skill_dir)
+                        if IdeSidebar._switch(session_ids[cursor], skill_dir):
+                            focused, cursor_session_id = IdeSidebar._after_activation(
+                                session_ids, cursor
+                            )
                     continue
                 key = IdeSidebar._key(data)
                 # Any key input means THIS pane is focused — tmux only routes input to the
@@ -1226,7 +1303,10 @@ class IdeSidebar:
                     elif on_filter:
                         pass   # the filter line: typing filters; Enter does nothing here
                     elif session_ids:
-                        IdeSidebar._switch(session_ids[cursor], skill_dir)
+                        if IdeSidebar._switch(session_ids[cursor], skill_dir):
+                            focused, cursor_session_id = IdeSidebar._after_activation(
+                                session_ids, cursor
+                            )
                 if 0 <= cursor < len(session_ids):
                     cursor_session_id = session_ids[cursor]
                 else:

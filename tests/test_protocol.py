@@ -222,6 +222,18 @@ def test_cli_subcommand_help_describes_options(capsys):
     assert "--tmux-socket" in out
 
 
+def test_relayout_help_is_frame_level_not_session_level(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["relayout", "--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "Reapply or adopt the tmux frame geometry." in out
+    assert "--mode" in out
+    assert "--tmux-socket" in out
+    assert "--session-id" not in out
+
+
 def test_cli_quiet_suppresses_final_json_result(capsys):
     assert main(["--quiet", "version"]) == 0
 

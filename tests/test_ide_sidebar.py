@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hive_ide.sidebar import IdeSidebar  # noqa: E402
+from hive_ide.sidebar import IdeSidebar, SidebarCommandRunner, SidebarCursorState  # noqa: E402
 from hive_ide.sidebar_grid import SidebarGrid  # noqa: E402
 from hive_ide.sidebar_plugins import SidebarProviderRegistry, SubagentsProvider  # noqa: E402
 from hive_ide.state_compat import StateIO  # noqa: E402
@@ -314,6 +314,39 @@ def test_sidebar_unfocused_cursor_tracks_current_session():
         current_session_id="a",
         cursor_session_id="b",
     ) == (1, "a")
+
+
+def test_sidebar_cursor_state_follows_session_id_across_reorder():
+    state = SidebarCursorState(cursor=1, session_id="b", focused=True)
+    state = state.reconcile(
+        ["a", "b", "c"],
+        free=False,
+        archive_mode=False,
+        current_session_id="a",
+    )
+    assert state == SidebarCursorState(cursor=1, session_id="b", focused=True)
+
+    state = state.reconcile(
+        ["c", "a", "b"],
+        free=False,
+        archive_mode=False,
+        current_session_id="a",
+    )
+    assert state == SidebarCursorState(cursor=2, session_id="b", focused=True)
+
+
+def test_sidebar_cursor_activation_drops_sidebar_focus_but_keeps_session_id():
+    state = SidebarCursorState(cursor=2, session_id="old", focused=True)
+
+    assert state.activate_chat(["a", "b", "clicked"]) == SidebarCursorState(
+        cursor=2,
+        session_id="clicked",
+        focused=False,
+    )
+    assert IdeSidebar._after_activation(["a", "b", "clicked"], 2) == (
+        False,
+        "clicked",
+    )
 
 
 def test_sidebar_reads_active_session_id_from_tmux(monkeypatch):
@@ -754,13 +787,20 @@ def test_missing_window_is_built_on_the_current_ide_socket(tmp_path, monkeypatch
     calls = []
     windows = iter((None, "@9"))
     monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-next")
-    monkeypatch.setattr(IdeSidebar, "_window_id", lambda _session_id: next(windows))
     monkeypatch.setattr(
-        IdeSidebar,
-        "_cli",
-        lambda _skill_dir, args: calls.append(args) or True,
+        SidebarCommandRunner,
+        "window_id",
+        lambda _self, _session_id: next(windows),
     )
-    monkeypatch.setattr("hive_ide.sidebar.subprocess.run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        SidebarCommandRunner,
+        "cli",
+        lambda _self, args: calls.append(args) or True,
+    )
+    monkeypatch.setattr(
+        "hive_ide.sidebar.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
 
     IdeSidebar._switch("session-id", tmp_path)
 
@@ -771,6 +811,41 @@ def test_missing_window_is_built_on_the_current_ide_socket(tmp_path, monkeypatch
             "--tmux-socket=hive-ide-next",
         ]
     ]
+
+
+def test_sidebar_command_runner_switches_window_and_agent_pane(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        SidebarCommandRunner,
+        "window_id",
+        lambda _self, session_id: "@7" if session_id == "session-id" else None,
+    )
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("hive_ide.sidebar.subprocess.run", fake_run)
+
+    assert SidebarCommandRunner(tmp_path, str(tmp_path)).switch("session-id")
+    assert calls == [
+        ["tmux", "select-window", "-t", "@7"],
+        ["tmux", "select-pane", "-t", "@7.1"],
+    ]
+
+
+def test_sidebar_command_runner_does_not_select_after_failed_ensure(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-next")
+    monkeypatch.setattr(SidebarCommandRunner, "window_id", lambda _self, _sid: None)
+    monkeypatch.setattr(
+        SidebarCommandRunner,
+        "cli",
+        lambda _self, args: calls.append(args) or False,
+    )
+
+    assert not SidebarCommandRunner(tmp_path, str(tmp_path)).switch("missing")
+    assert calls == [["ensure", "--session-id=missing", "--tmux-socket=hive-ide-next"]]
 
 
 def test_normalized_driver_id_selects_the_legacy_icon(tmp_path):
