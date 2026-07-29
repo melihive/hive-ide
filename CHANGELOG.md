@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.16] - 2026-07-29
+
 ### Fixed
 
 - `current-plan` and `current-chat` are now quiet on success by default, so
