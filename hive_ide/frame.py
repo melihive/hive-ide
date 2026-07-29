@@ -722,6 +722,9 @@ class Frame:
                 self.socket,
             ],
         )
+        mobile_popup = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
+        new_popup_width = "#{?" + mobile_popup + ",96%,52%}"
+        new_popup_height = "#{?" + mobile_popup + ",92%,42%}"
         if key := keys.get("new"):
             self.tmux(
                 [
@@ -730,9 +733,9 @@ class Frame:
                     "display-popup",
                     "-E",
                     "-w",
-                    "52%",
+                    new_popup_width,
                     "-h",
-                    "42%",
+                    new_popup_height,
                     new_modal,
                 ]
             )
@@ -911,12 +914,7 @@ class Frame:
             ]
         )
         mobile = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
-        not_zoomed = "#{!:#{window_zoomed_flag}}"
-        focus_relayout = (
-            f"if-shell -F '{mobile}' "
-            f"{{ if-shell -F '{not_zoomed}' {{ resize-pane -Z }} }} "
-            f"{{ run-shell -b {shlex.quote(relayout_client)} }}"
-        )
+        focus_relayout = f"if-shell -F '{mobile}' {{ true }} {{ run-shell -b {shlex.quote(relayout_client)} }}"
         self.tmux(
             [
                 "set-hook",
@@ -935,7 +933,7 @@ class Frame:
                     "if-shell",
                     "-F",
                     f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    "select-pane -t .0 ; if-shell -F '#{!:#{window_zoomed_flag}}' 'resize-pane -Z'",
+                    "if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z ; select-pane -t .0 ; resize-pane -Z' 'select-pane -t .0 ; resize-pane -Z'",
                     "select-pane -t .0",
                 ]
             )
@@ -950,7 +948,7 @@ class Frame:
                     "if-shell",
                     "-F",
                     f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    f"select-pane -t .{index}",
+                    f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z ; select-pane -t .{index} ; resize-pane -Z' 'select-pane -t .{index} ; resize-pane -Z'",
                     "if-shell -F '#{window_zoomed_flag}' "
                     f"'resize-pane -Z ; select-pane -t .{index}' "
                     f"'select-pane -t .{index}'",

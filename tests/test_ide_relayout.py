@@ -207,6 +207,57 @@ def test_snap_uses_explicit_client_size_when_tmux_window_is_stale(tmp_path, monk
     ] in calls
 
 
+def test_snap_prefers_latest_client_size_over_stale_invoker(tmp_path, monkeypatch):
+    state = tmp_path / "layout.json"
+    calls: list[list[str]] = []
+
+    def fake_tmux(_socket, args):
+        calls.append(args)
+        if args[:2] == ["list-clients", "-F"]:
+            return "100\t254\t67\n200\t58\t24"
+        if args[:2] == ["list-windows", "-a"]:
+            return "@0"
+        if args[-1] == "#{window_width}\t#{window_height}":
+            return "58\t45"
+        if args[-1] == "#{window_width}":
+            return "58"
+        if args[-1] == "#{window_zoomed_flag}":
+            return "1"
+        if args[-1] == "#{window_id}":
+            return "@0"
+        if args[-1] == "#{pane_id}":
+            return "%1"
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fake_tmux)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "snap",
+            str(state),
+            "254",
+            "67",
+        ]
+    ) == 0
+    assert [
+        "resize-window",
+        "-t",
+        "@0",
+        "-x",
+        "58",
+        "-y",
+        "24",
+    ] in calls
+
+
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
 
 def test_breaker_ledger_prunes_to_the_window():

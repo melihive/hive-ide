@@ -138,8 +138,7 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert "run-shell -b" in hooks
         assert "--client-width" in hooks
         assert "#{client_width}" in hooks
-        assert "after-select-pane[0]" in hooks
-        assert "resize-pane -Z" in hooks
+        assert "after-select-pane" in hooks
         assert (
             frame.tmux(["show-option", "-v", "-t", frame.target, "set-titles"]).stdout.strip()
             == "on"
@@ -155,7 +154,7 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         for key in (" n ", " p ", " l ", " c ", " e ", " a ", " o ", " i ", " g ", " r ", " k "):
             assert key in keys
         assert "#{client_width}" in keys
-        assert "if-shell -F '#{!:#{window_zoomed_flag}}' 'resize-pane -Z'" in keys
+        assert "resize-pane -Z ; select-pane -t .0" in keys
         key_lines = {line.split()[3]: line for line in keys.splitlines() if " -T prefix " in line}
         for key in ("a", "o", "i", "k", "x"):
             assert "run-shell -b" in key_lines[key]

@@ -53,11 +53,20 @@ class IdeRelayout:
                                           "#{window_zoomed_flag}"]) == "1"
 
     @staticmethod
-    def _set_zoom(socket: str, win: str, want: bool) -> None:
+    def _set_zoom(socket: str, win: str, want: bool, target: str | None = None) -> None:
         # `resize-pane -Z` TOGGLES, so guard on the current flag — that is what stops
         # repeated resize events (tmux fires many) from flapping in and out of zoom.
-        if IdeRelayout._zoomed(socket, win) != want:
-            IdeRelayout._tmux(socket, ["resize-pane", "-t", f"{win}.1", "-Z"])
+        target = target or f"{win}.1"
+        zoomed = IdeRelayout._zoomed(socket, win)
+        if want and zoomed:
+            active = IdeRelayout._tmux(socket, ["display-message", "-p", "-t", win, "#{pane_id}"])
+            if active != target:
+                IdeRelayout._tmux(socket, ["resize-pane", "-t", active or f"{win}.1", "-Z"])
+                IdeRelayout._tmux(socket, ["select-pane", "-t", target])
+                IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
+            return
+        if zoomed != want:
+            IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
 
     @staticmethod
     def _role_panes(socket: str, win: str) -> dict[str, str]:
@@ -99,6 +108,26 @@ class IdeRelayout:
             if role_pane and index_pane and role_pane != index_pane:
                 IdeRelayout._tmux(socket, ["swap-pane", "-s", role_pane, "-t", index_pane])
         return IdeRelayout._role_panes(socket, win)
+
+    @staticmethod
+    def _latest_client_geometry(socket: str) -> tuple[int, int] | None:
+        rows = IdeRelayout._tmux(
+            socket,
+            [
+                "list-clients",
+                "-F",
+                "#{client_activity}\t#{client_width}\t#{client_height}",
+            ],
+        )
+        latest: tuple[int, int, int] | None = None
+        for line in rows.splitlines():
+            activity, width, height = line.split("\t") if line.count("\t") == 2 else ("", "", "")
+            if not (activity.isdigit() and width.isdigit() and height.isdigit()):
+                continue
+            candidate = (int(activity), int(width), int(height))
+            if latest is None or candidate[0] > latest[0]:
+                latest = candidate
+        return (latest[1], latest[2]) if latest else None
 
     @staticmethod
     def _plan_width(width: int, side: int, pw: int, pmin: int, amin: int, apref: int) -> int:
@@ -326,7 +355,8 @@ class IdeRelayout:
             sock,
             ["display-message", "-p", "#{window_width}\t#{window_height}"],
         ).split("\t")
-        canonical = forced_geometry or (
+        latest_geometry = IdeRelayout._latest_client_geometry(sock)
+        canonical = latest_geometry or forced_geometry or (
             (int(active_geometry[0]), int(active_geometry[1]))
             if len(active_geometry) == 2
             and active_geometry[0].isdigit()
@@ -335,11 +365,19 @@ class IdeRelayout:
         )
         remembered_plan = pw
         for win in IdeRelayout._tmux(sock, ["list-windows", "-a", "-F", "#{window_id}"]).split():
-            raw = IdeRelayout._tmux(sock, ["display-message", "-p", "-t", win, "#{window_width}"])
-            if not raw.isdigit():
+            raw_geometry = IdeRelayout._tmux(
+                sock,
+                ["display-message", "-p", "-t", win, "#{window_width}\t#{window_height}"],
+            ).split("\t")
+            if (
+                len(raw_geometry) != 2
+                or not raw_geometry[0].isdigit()
+                or not raw_geometry[1].isdigit()
+            ):
                 continue
-            width = int(raw)
-            if canonical and width != canonical[0]:
+            width = int(raw_geometry[0])
+            height = int(raw_geometry[1])
+            if canonical and (width, height) != canonical:
                 IdeRelayout._tmux(
                     sock,
                     [
@@ -354,12 +392,16 @@ class IdeRelayout:
                 )
                 width = canonical[0]
             if width < sw + amin + pmin:
-                IdeRelayout._order_role_panes(sock, win)
+                roles = IdeRelayout._order_role_panes(sock, win)
+                active_pane = IdeRelayout._tmux(
+                    sock,
+                    ["display-message", "-p", "-t", win, "#{pane_id}"],
+                )
                 # MOBILE: three columns cannot fit, so stop pretending. The FOCUSED column
                 # owns the whole window (the `pane-focus-in` hook picks which one) — a
                 # 4-column sidebar rail beside a squeezed plan is unusable on a phone.
                 # The ladder must not unzoom here or it would fight that hook.
-                IdeRelayout._set_zoom(sock, win, True)
+                IdeRelayout._set_zoom(sock, win, True, active_pane or roles.get("agent"))
                 continue
             side = sw
             plan = IdeRelayout._plan_width(width, side, pw, pmin, amin, apref)

@@ -9,6 +9,18 @@ import sys
 from .python_cmd import PythonCommand
 
 
+def _client_width(tmux: list[str]) -> int | None:
+    result = subprocess.run(
+        [*tmux, "display-message", "-p", "#{client_width}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    return int(raw) if raw.isdigit() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hive_ide.popup")
     parser.add_argument(
@@ -60,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     tmux = ["tmux"]
     if args.tmux_socket:
         tmux.extend(["-L", args.tmux_socket])
+    if (width_cells := _client_width(tmux)) is not None and width_cells < 120:
+        width, height = "96%", "92%"
     result = subprocess.run(
         [*tmux, "display-popup", "-E", "-w", width, "-h", height, command]
     )
