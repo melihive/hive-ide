@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.19] - 2026-07-29
+
 ### Fixed
 
 - Claude resume commands now fall back to `claude agents` when a resumed
