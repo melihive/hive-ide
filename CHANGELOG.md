@@ -4,6 +4,24 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.9] - 2026-07-29
+
+### Added
+
+- The new-session adoption picker now shows a short conversation preview and
+  searches that preview text, making existing Claude and Codex conversations
+  identifiable before adoption.
+- The package CLI help now includes readable command summaries, global option
+  descriptions, aliases, and examples.
+
+### Fixed
+
+- `hive-ide current-chat` now focuses an existing live agent pane instead of
+  respawning it, avoiding accidental interruption of active Codex or Claude
+  sessions.
+- Sidebar browse selection now uses the legacy high-contrast green/teal palette
+  for focused rows.
+
 ## [1.0.8] - 2026-07-29
 
 ### Fixed
