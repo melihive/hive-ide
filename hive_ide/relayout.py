@@ -251,22 +251,25 @@ class IdeRelayout:
             parser.add_argument("--workspace-key", required=True)
             parser.add_argument("--tmux-socket", required=True)
             parser.add_argument("--mode", choices=("snap", "adopt"), default="snap")
+            parser.add_argument("--client-width")
+            parser.add_argument("--client-height")
             parsed = parser.parse_args(argv[1:])
             store = StateStore(parsed.state_home, parsed.workspace_key)
-            return IdeRelayout.main(
-                [
-                    argv[0],
-                    parsed.tmux_socket,
-                    str(IdeLayout.SIDEBAR_W),
-                    str(IdeLayout.PLAN_W),
-                    "4",
-                    str(IdeLayout.AGENT_MIN),
-                    str(IdeLayout.PLAN_MIN),
-                    str(IdeLayout.AGENT_PREF),
-                    parsed.mode,
-                    str(store.workspace_dir / "layout.json"),
-                ]
-            )
+            relayout_argv = [
+                argv[0],
+                parsed.tmux_socket,
+                str(IdeLayout.SIDEBAR_W),
+                str(IdeLayout.PLAN_W),
+                "4",
+                str(IdeLayout.AGENT_MIN),
+                str(IdeLayout.PLAN_MIN),
+                str(IdeLayout.AGENT_PREF),
+                parsed.mode,
+                str(store.workspace_dir / "layout.json"),
+            ]
+            if parsed.client_width and parsed.client_height:
+                relayout_argv.extend([parsed.client_width, parsed.client_height])
+            return IdeRelayout.main(relayout_argv)
         if len(argv) < 4:
             return 0
         sock = argv[1]
@@ -288,6 +291,9 @@ class IdeRelayout:
         # path is loop-free by construction. Do not "improve" it with a resize hook.
         mode = argv[8] if len(argv) > 8 else "snap"
         state_path = argv[9] if len(argv) > 9 else ""
+        forced_geometry: tuple[int, int] | None = None
+        if len(argv) > 11 and argv[10].isdigit() and argv[11].isdigit():
+            forced_geometry = (int(argv[10]), int(argv[11]))
         # Bail BEFORE touching any pane: if something is feeding this script, every
         # resize-pane below is more fuel. Stderr (not stdout) so a `run-shell -b` hook
         # doesn't paint the message over a pane.
@@ -320,7 +326,7 @@ class IdeRelayout:
             sock,
             ["display-message", "-p", "#{window_width}\t#{window_height}"],
         ).split("\t")
-        canonical = (
+        canonical = forced_geometry or (
             (int(active_geometry[0]), int(active_geometry[1]))
             if len(active_geometry) == 2
             and active_geometry[0].isdigit()

@@ -812,6 +812,23 @@ class Frame:
                 "snap",
             ],
         )
+        relayout_client = self._module(
+            "relayout",
+            [
+                "--state-home",
+                str(self.store.home),
+                "--workspace-key",
+                self.store.workspace_key,
+                "--tmux-socket",
+                self.socket,
+                "--mode",
+                "snap",
+                "--client-width",
+                "#{client_width}",
+                "--client-height",
+                "#{client_height}",
+            ],
+        )
         if key := keys.get("reset"):
             self.tmux(["bind-key", key, "run-shell", "-b", relayout])
         seen = self._module(
@@ -863,7 +880,7 @@ class Frame:
                 "-t",
                 self.target,
                 "client-resized",
-                f"run-shell -b {shlex.quote(relayout)}",
+                f"run-shell -b {shlex.quote(relayout_client)}",
             ]
         )
         self.tmux(
@@ -872,23 +889,41 @@ class Frame:
                 "-t",
                 self.target,
                 "client-attached",
-                f"run-shell -b {shlex.quote(relayout)}",
+                f"run-shell -b {shlex.quote(relayout_client)}",
             ]
         )
-        mobile = f"#{{<:#{{window_width}},{self.SIDEBAR_ZOOM_MAX}}}"
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-active",
+                f"run-shell -b {shlex.quote(relayout_client)}",
+            ]
+        )
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-focus-in",
+                f"run-shell -b {shlex.quote(relayout_client)}",
+            ]
+        )
+        mobile = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
         not_zoomed = "#{!:#{window_zoomed_flag}}"
-        zoom_if_needed = f"if-shell -F '{not_zoomed}' 'resize-pane -Z'"
+        focus_relayout = (
+            f"if-shell -F '{mobile}' "
+            f"{{ if-shell -F '{not_zoomed}' {{ resize-pane -Z }} }} "
+            f"{{ run-shell -b {shlex.quote(relayout_client)} }}"
+        )
         self.tmux(
             [
                 "set-hook",
                 "-t",
                 self.target,
                 "after-select-pane",
-                (
-                    f"if-shell -F '{mobile}' "
-                    f"{shlex.quote(zoom_if_needed)} "
-                    f"'run-shell -b {shlex.quote(relayout)}'"
-                ),
+                focus_relayout,
             ]
         )
         sidebar_key = keys.get("sidebar")
@@ -899,7 +934,7 @@ class Frame:
                     sidebar_key,
                     "if-shell",
                     "-F",
-                    f"#{{<:#{{window_width}},{self.SIDEBAR_ZOOM_MAX}}}",
+                    f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
                     "select-pane -t .0 ; if-shell -F '#{!:#{window_zoomed_flag}}' 'resize-pane -Z'",
                     "select-pane -t .0",
                 ]
@@ -914,7 +949,7 @@ class Frame:
                     key,
                     "if-shell",
                     "-F",
-                    f"#{{<:#{{window_width}},{self.SIDEBAR_ZOOM_MAX}}}",
+                    f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
                     f"select-pane -t .{index}",
                     "if-shell -F '#{window_zoomed_flag}' "
                     f"'resize-pane -Z ; select-pane -t .{index}' "

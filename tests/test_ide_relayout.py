@@ -151,6 +151,62 @@ def test_adopt_with_only_mobile_windows_does_not_crash(tmp_path, monkeypatch):
     assert json.loads(state.read_text(encoding="utf-8"))["plan"] == PW
 
 
+def test_snap_uses_explicit_client_size_when_tmux_window_is_stale(tmp_path, monkeypatch):
+    state = tmp_path / "layout.json"
+    calls: list[list[str]] = []
+
+    def fake_tmux(_socket, args):
+        calls.append(args)
+        if args[:2] == ["list-windows", "-a"]:
+            return "@0 @1"
+        if args[-1] == "#{window_width}\t#{window_height}":
+            return "254\t66"
+        if args[-1] == "#{window_width}":
+            return "254"
+        if args[-1] == "#{window_zoomed_flag}":
+            return "0"
+        if args[-1] == "#{window_id}":
+            return "@0"
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fake_tmux)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "snap",
+            str(state),
+            "58",
+            "24",
+        ]
+    ) == 0
+    assert [
+        "resize-window",
+        "-t",
+        "@0",
+        "-x",
+        "58",
+        "-y",
+        "24",
+    ] in calls
+    assert [
+        "resize-window",
+        "-t",
+        "@1",
+        "-x",
+        "58",
+        "-y",
+        "24",
+    ] in calls
+
+
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
 
 def test_breaker_ledger_prunes_to_the_window():
