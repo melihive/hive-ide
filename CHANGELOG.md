@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.25] - 2026-07-30
+
 ### Fixed
 
 - Claude and Codex hook setup now installs `SubagentStart` and `SubagentStop`
