@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.26] - 2026-07-30
+
 ### Changed
 
 - Replaced the public `rebuild` command with explicit `force-rebuild`; normal
