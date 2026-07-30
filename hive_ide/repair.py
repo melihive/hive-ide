@@ -67,10 +67,25 @@ class SessionRepair:
                 if self.frame.ensure(repaired):
                     actions.append("window: built")
                 elif missing := self._missing_pane_roles(repaired):
-                    self.frame.rebuild(repaired)
-                    actions.append(
-                        "window: rebuilt for missing panes: " + ", ".join(missing)
-                    )
+                    if "agent" in missing:
+                        self.frame.rebuild(repaired)
+                        actions.append(
+                            "window: rebuilt for missing panes: " + ", ".join(missing)
+                        )
+                    else:
+                        restored = self.frame.restore_missing_panes(repaired, missing)
+                        if restored:
+                            actions.append(
+                                "window: restored panes: " + ", ".join(restored)
+                            )
+                        still_missing = tuple(
+                            role for role in missing if role not in restored
+                        )
+                        if still_missing:
+                            warnings.append(
+                                "window still missing panes: "
+                                + ", ".join(still_missing)
+                            )
                 elif self._pane_cwd_mismatch(repaired):
                     actions.append("window: pane cwd differs; live panes preserved")
                     warnings.append(

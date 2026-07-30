@@ -589,6 +589,52 @@ class Frame:
         self.build(record)
         return True
 
+    def restore_missing_panes(
+        self, record: dict[str, Any], missing_roles: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        target = self.windows().get(record["id"])
+        if not target:
+            return ()
+        restored: list[str] = []
+        env = self._environment(record)
+        working_dir = self.safe_working_dir(record)
+        commands = {
+            "sidebar": self._sidebar_command(record),
+            "plan": self._plan_command(record),
+        }
+        for role in missing_roles:
+            command = commands.get(role)
+            if command is None:
+                continue
+            created = self.tmux(
+                [
+                    "split-window",
+                    "-h",
+                    "-t",
+                    target,
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-c",
+                    working_dir,
+                    *env,
+                    "sh",
+                    "-c",
+                    command,
+                ]
+            )
+            if created.returncode != 0:
+                raise HiveIdeError(
+                    created.stderr.strip() or f"Could not restore {role} pane."
+                )
+            pane_id = created.stdout.strip()
+            if pane_id:
+                self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", role])
+            restored.append(role)
+        if restored:
+            self._apply_columns(target)
+        return tuple(restored)
+
     def select_session(self, session_id: str, *, pane: int = 1) -> bool:
         target = self.windows().get(session_id)
         if not target:

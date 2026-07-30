@@ -1076,6 +1076,47 @@ def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypa
     assert rebuilt == [record["id"]]
 
 
+def test_repair_restores_missing_plan_without_rebuilding_live_agent(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BROKEN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    restored = []
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "restore_missing_panes",
+        lambda _self, _record, missing: restored.extend(missing) or tuple(missing),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: restored panes: plan"]
+    assert restored == ["plan"]
+    assert rebuilt == []
+
+
 def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2313,14 +2354,7 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
     assert store.find_session(first["id"])["source"]["kind"] == "stable"
     assert store.find_session(first["id"])["last_active"] == first_last_active
     assert second_path.read_bytes() == untouched
-    assert rebuilt == [first["id"], first["id"]]
-
-    assert main([*common, "--source", "dev", "--no-rebuild"]) == 0
-    capsys.readouterr()
-    assert store.find_session(first["id"])["source"]["kind"] == "dev"
-    assert store.find_session(first["id"])["last_active"] == first_last_active
-    assert second_path.read_bytes() == untouched
-    assert rebuilt == [first["id"], first["id"]]
+    assert rebuilt == []
 
 
 def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_path, capsys):
@@ -2367,6 +2401,55 @@ def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_pa
     updated = store.find_session(record["id"])
     assert updated["source"]["kind"] == "stable"
     assert updated["source"]["interpreter"] == sys.executable
+
+
+def test_working_dir_set_updates_metadata_without_rebuilding_live_window(
+    monkeypatch, tmp_path, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    repairs = []
+    monkeypatch.setattr(
+        "hive_ide.cli.Frame.rebuild",
+        lambda _frame, _record: pytest.fail("working-dir-set must not rebuild"),
+    )
+    monkeypatch.setattr(
+        "hive_ide.cli.SessionRepair.repair",
+        lambda _repair, session: repairs.append(session["working_dir"])
+        or {"ok": True, "actions": [], "warnings": [], "errors": []},
+    )
+    monkeypatch.setattr("hive_ide.cli.Frame.bind_keys", lambda _frame: None)
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--workspace-key",
+                str(workspace),
+                "working-dir-set",
+                "--session-id",
+                record["id"],
+                "--working-dir",
+                str(linked),
+            ]
+        )
+        == 0
+    )
+
+    capsys.readouterr()
+    assert store.find_session(record["id"])["working_dir"] == str(linked.resolve())
+    assert repairs == [str(linked.resolve())]
 
 
 def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):

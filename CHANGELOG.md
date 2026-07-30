@@ -9,6 +9,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Replaced the public `rebuild` command with explicit `force-rebuild`; normal
   recovery stays on `repair`, and the internal `ensure` command is no longer
   exposed through the package CLI.
+- `source-set` and `working-dir-set` now update session metadata and run safe
+  repair without rebuilding the live window; `force-rebuild` is required for an
+  intentional process restart.
 
 ### Fixed
 
@@ -17,6 +20,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - `repair` no longer rebuilds a live window just because pane cwd differs from
   session metadata, preventing `on_merged` and worktree cleanup from killing the
   active Codex/Claude chat.
+- `repair` restores missing sidebar or plan panes around an existing agent pane
+  instead of killing the window; only a missing agent pane permits a full rebuild.
 
 ## [1.0.25] - 2026-07-30
 

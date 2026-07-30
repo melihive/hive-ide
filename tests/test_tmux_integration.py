@@ -280,10 +280,8 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             ]
         ) == 0
         rebuilt = frame.windows()
-        assert rebuilt[alpha["id"]] != alpha_window
+        assert rebuilt[alpha["id"]] == alpha_window
         assert rebuilt[beta["id"]] == beta_window
-        beta_window = rebuilt[beta["id"]]
-        alpha_window = rebuilt[alpha["id"]]
         assert (
             frame.tmux(
                 ["display-message", "-p", "-t", alpha_window, "#{window_index}"]
