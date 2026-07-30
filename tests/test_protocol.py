@@ -1076,6 +1076,50 @@ def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypa
     assert rebuilt == [record["id"]]
 
 
+def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_worktree = tmp_path / "old-worktree"
+    old_worktree.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=f"{old_worktree}\n{old_worktree}\n{old_worktree}\n",
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: pane cwd differs; live panes preserved"]
+    assert result["warnings"]
+    assert rebuilt == []
+
+
 def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

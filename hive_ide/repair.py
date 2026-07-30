@@ -72,8 +72,11 @@ class SessionRepair:
                         "window: rebuilt for missing panes: " + ", ".join(missing)
                     )
                 elif self._pane_cwd_mismatch(repaired):
-                    self.frame.rebuild(repaired)
-                    actions.append("window: rebuilt for pane cwd")
+                    actions.append("window: pane cwd differs; live panes preserved")
+                    warnings.append(
+                        "live pane cwd differs from session working_dir; use "
+                        "force-rebuild only if you intentionally want to restart panes"
+                    )
                 self._clear_repair_error(session_id)
             except HiveIdeError as exc:
                 errors.append(str(exc))

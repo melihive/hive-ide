@@ -14,6 +14,9 @@ All notable changes to `hive-ide` will be documented in this file.
 
 - `repair` now restores live windows that are missing required sidebar, chat, or
   plan panes, so a broken session does not require a separate rebuild command.
+- `repair` no longer rebuilds a live window just because pane cwd differs from
+  session metadata, preventing `on_merged` and worktree cleanup from killing the
+  active Codex/Claude chat.
 
 ## [1.0.25] - 2026-07-30
 
