@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.23] - 2026-07-30
+
 ### Added
 
 - Added `hive-ide repair` for safe session self-healing, including missing working
