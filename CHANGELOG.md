@@ -4,6 +4,27 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added `hive-ide repair` for safe session self-healing, including missing working
+  directory re-home, missing-window ensure, pane-cwd rebuild, and session error
+  recording when recovery needs operator attention.
+
+### Fixed
+
+- `hive-ide open`, `ensure`, and `rebuild` now run safe repair first, so a
+  removed worktree no longer makes the session unclickable or blocks the whole
+  frame from opening.
+- `<prefix> r` now runs session repair before relayout.
+- Session info cards now show the latest recorded session error and recovery hint.
+- Session options rename now handles Backspace/Delete and preserves typed case.
+- The session options modal now exposes `repair` as the normal recovery action
+  instead of asking users to choose between repair and rebuild.
+- Terminal titles now use the shorter folder-first form, for example
+  `repo IDE`.
+- Sidebar rows now show a tmux bell marker when a session window has a pending
+  tmux bell/activity alert.
+
 ## [1.0.22] - 2026-07-30
 
 ### Fixed

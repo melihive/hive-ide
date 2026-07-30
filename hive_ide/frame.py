@@ -660,7 +660,7 @@ class Frame:
 
     def _terminal_title(self) -> str:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
-        return f"HIVE IDE {workspace}"
+        return f"{workspace} IDE"
 
     def _normalize_terminal_title(self) -> None:
         self.tmux(["set-option", "-t", self.target, "set-titles", "on"])
@@ -833,7 +833,30 @@ class Frame:
             ],
         )
         if key := keys.get("reset"):
-            self.tmux(["bind-key", key, "run-shell", "-b", relayout])
+            repair = self._module(
+                "cli",
+                [
+                    "--state-home",
+                    str(self.store.home),
+                    "--workspace-key",
+                    self.store.workspace_key,
+                    "--quiet",
+                    "repair",
+                    "--session-id",
+                    "#{@hive_ide_session_id}",
+                    "--tmux-socket",
+                    self.socket,
+                ],
+            )
+            self.tmux(
+                [
+                    "bind-key",
+                    key,
+                    "run-shell",
+                    "-b",
+                    f"{repair} >/dev/null 2>&1; {relayout} >/dev/null 2>&1",
+                ]
+            )
         seen = self._module(
             "seen",
             [

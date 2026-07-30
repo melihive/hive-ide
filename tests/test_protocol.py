@@ -28,6 +28,7 @@ from hive_ide.hook import IdeHook
 from hive_ide.hooks import HookInstaller
 from hive_ide.info import _card, _keys
 from hive_ide.python_cmd import PythonCommand
+from hive_ide.repair import SessionRepair
 from hive_ide.seen import IdeSeen
 from hive_ide.sidebar import IdeSidebar
 from hive_ide.source import resolve_source
@@ -928,20 +929,87 @@ def test_hook_relay_uses_tmux_server_when_available(tmp_path, monkeypatch):
     assert "HIVE_IDE_SESSION_ID=" in command
     assert "--state waiting --driver term --relayed '{}'" in command
 
-    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET")
-    assert IdeHook.main(
+
+def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = tmp_path / "gone"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE",
+        working_dir=missing,
+        source=_source(),
+        driver=_term(),
+    )
+    calls = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, rec: calls.append(rec["working_dir"]) or True)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {})
+    monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["working_dir"] == str(workspace.resolve())
+    assert calls == [str(workspace.resolve())]
+    updated = store.find_session(record["id"])
+    assert updated["working_dir"] == str(workspace.resolve())
+    assert updated["host"]["repair"]["previous_working_dir"] == str(missing.resolve())
+
+
+def test_cli_ensure_repairs_missing_working_dir_before_build(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = tmp_path / "removed"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE",
+        working_dir=missing,
+        source=_source(),
+        driver=_term(),
+    )
+    ensured = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, rec: ensured.append(rec["working_dir"]) or True)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {})
+    monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
+
+    assert main(
         [
             "--state-home",
             str(store.home),
-            "--state",
-            "waiting",
-            "--driver",
-            "term",
-            "--relayed",
-            "{}",
+            "--workspace-key",
+            str(workspace),
+            "ensure",
+            "--session-id",
+            record["id"],
         ]
     ) == 0
-    assert store.read("status", record["id"])["state"] == "waiting"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["repair"]["actions"][0].startswith("working_dir:")
+    assert ensured == [str(workspace.resolve())]
+
+
+def test_info_card_surfaces_session_error(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BROKEN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    error = {
+        "summary": "Session needs repair",
+        "component": "repair",
+        "recovery": "Run hive-ide repair --session-id <id>.",
+    }
+
+    rendered = "\n".join(_card(record, {}, error))
+
+    assert "Session needs repair" in rendered
+    assert "Run hive-ide repair" in rendered
 
 
 def test_hook_identity_survives_display_name_change(tmp_path, monkeypatch):

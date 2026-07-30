@@ -29,7 +29,7 @@ class IdeOptionsModal:
         ("plan", "current plan", "open or focus the plan pane"),
         ("agent", "change agent", "open the agent picker"),
         ("rename", "rename", "change the display label"),
-        ("rebuild", "rebuild", "recreate this session window"),
+        ("repair", "repair", "heal session state and redraw"),
         ("card", "session info", "show the info modal"),
     ]
 
@@ -66,6 +66,11 @@ class IdeOptionsModal:
             return IdeNewModal._cli(
                 skill_dir,
                 ["--quiet", "rebuild", f"--session-id={session_id}", *socket_args],
+            )
+        if action == "repair":
+            return IdeNewModal._cli(
+                skill_dir,
+                ["--quiet", "repair", f"--session-id={session_id}", *socket_args],
             )
         if action == "rename":
             if not name:
@@ -162,12 +167,16 @@ class IdeOptionsModal:
             if key == "esc":
                 return None
             if key == "enter":
-                cleaned = " ".join(value.split()).upper()
+                cleaned = " ".join(value.split())
                 return cleaned if cleaned else None
-            if key == "backspace":
+            if key in ("bs", "delete", "backspace"):
                 value = value[:-1]
+            elif key == "\x15":  # Ctrl-U
+                value = ""
+            elif key == "\x17":  # Ctrl-W
+                value = value.rstrip().rsplit(" ", 1)[0]
             elif len(key) == 1 and key.lower() in "abcdefghijklmnopqrstuvwxyz0123456789-_ ":
-                value = (value + key.upper())[:14]
+                value = (value + key)[:24]
 
     @staticmethod
     def main(argv: list[str] | None = None) -> int:

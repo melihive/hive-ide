@@ -408,6 +408,37 @@ class IdeSidebar:
         )
 
     @staticmethod
+    def _tmux_alerts() -> dict[str, str]:
+        """Live tmux bell/activity markers keyed by IDE session id."""
+        try:
+            result = subprocess.run(
+                [
+                    "tmux",
+                    "list-windows",
+                    "-a",
+                    "-F",
+                    "#{@hive_ide_session_id}\t#{window_bell_flag}\t#{window_activity_flag}\t#{window_flags}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        if result.returncode != 0:
+            return {}
+        alerts: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            session_id, bell, activity, flags = (line.split("\t") + ["", "", "", ""])[:4]
+            if not session_id:
+                continue
+            if bell == "1" or "!" in flags:
+                alerts[session_id] = "🔔"
+            elif activity == "1" or "#" in flags:
+                alerts[session_id] = "•"
+        return alerts
+
+    @staticmethod
     def _width() -> int:
         try:
             return max(8, os.get_terminal_size(sys.stdout.fileno()).columns)
@@ -772,7 +803,8 @@ class IdeSidebar:
                      archive_mode: bool = False,
                      entry_rows: int = ENTRY_ROWS,
                      sidebar: dict | None = None,
-                     providers: SidebarProviderRegistry | None = None) -> list[str]:
+                     providers: SidebarProviderRegistry | None = None,
+                     tmux_alerts: dict[str, str] | None = None) -> list[str]:
         row = IdeSidebar._row
         # Where the terminal cursor should PARK after this draw: the filter/name input row,
         # so the block sits where you'd type instead of at the end of the last line drawn.
@@ -874,6 +906,8 @@ class IdeSidebar:
             subagent_mark = IdeSidebar._provider_mark(
                 skill_dir, s, "subagents", settings, provider_registry
             )
+            alert_mark = (tmux_alerts or {}).get(s.get("id") or "", "")
+            right_mark = subagent_mark or alert_mark
             # At one-row density the metadata row is gone. Preserve transient state by
             # borrowing the leading driver track until the activity clears.
             leading_mark = state if entry_rows == 1 and state else icon
@@ -883,17 +917,17 @@ class IdeSidebar:
             # math divides by the SAME number, so the two can never disagree.
             show_sub = entry_rows >= 2
             show_gap = entry_rows >= IdeSidebar.ENTRY_ROWS
-            inline_subagent = subagent_mark if not show_sub else ""
-            inline_subagent_width = grid.cell_width(inline_subagent)
+            inline_right = right_mark if not show_sub else ""
+            inline_right_width = grid.cell_width(inline_right)
 
             def append_inline_subagent(content: str) -> str:
-                if not inline_subagent:
+                if not inline_right:
                     return content
                 spacer = " " * max(
                     1,
-                    width - grid.cell_width(IdeSidebar._strip_ansi(content)) - inline_subagent_width,
+                    width - grid.cell_width(IdeSidebar._strip_ansi(content)) - inline_right_width,
                 )
-                return f"{content}{spacer}{inline_subagent}"
+                return f"{content}{spacer}{inline_right}"
 
             if selected:
                 # Full 2-line box: icon + name + time. The real bg colour means the
@@ -916,7 +950,7 @@ class IdeSidebar:
                                 state=state,
                                 slots=slot_marks,
                                 age=rel,
-                                right_status=subagent_mark,
+                                right_status=right_mark,
                             ),
                             True,
                             sel,
@@ -947,7 +981,7 @@ class IdeSidebar:
                                 age=rel,
                                 age_style=IdeSidebar.DIM,
                                 reset=keep,
-                                right_status=subagent_mark,
+                                right_status=right_mark,
                             ),
                             True,
                             IdeSidebar.CUR_BG,
@@ -972,7 +1006,7 @@ class IdeSidebar:
                                 age=rel,
                                 age_style=IdeSidebar.DIM,
                                 reset=IdeSidebar.RESET,
-                                right_status=subagent_mark,
+                                right_status=right_mark,
                             )
                         )
                     )
@@ -1150,7 +1184,8 @@ class IdeSidebar:
                                                 cursor, width, query, focused, on_plus,
                                                 on_filter, on_archive, archive_mode,
                                                 entry_rows, sidebar_settings,
-                                                provider_registry)
+                                                provider_registry,
+                                                IdeSidebar._tmux_alerts())
                 # Each line carries its own erase-to-EOL (see _row).
                 sys.stdout.write(IdeSidebar.NO_WRAP + IdeSidebar.HOME
                                  + "\n".join(lines) + IdeSidebar.CLEAR_BELOW)

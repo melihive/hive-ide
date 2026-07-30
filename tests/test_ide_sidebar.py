@@ -185,6 +185,79 @@ def test_subagent_count_renders_under_the_status_dot(tmp_path):
     assert _plain(lines[3]).rstrip().endswith("3")
 
 
+def test_tmux_bell_alert_renders_in_sidebar_right_status(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="ALERT",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+        plan={"path": "plans/x.md", "active_task": None},
+    )
+    registry = SidebarProviderRegistry()
+    sidebar = _sidebar_config({}, registry)
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        "none",
+        0,
+        24,
+        focused=False,
+        sidebar=sidebar,
+        providers=registry,
+        tmux_alerts={session["id"]: "🔔"},
+    )
+
+    assert _plain(lines[3]).rstrip().endswith("🔔")
+
+
+def test_subagent_count_takes_priority_over_tmux_bell_alert(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="BUSY ALERT",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+    )
+    store.write(
+        "status",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "state": "working",
+            "driver": "term",
+            "subagents": {"running": 2},
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+    registry = SidebarProviderRegistry()
+    sidebar = _sidebar_config({}, registry)
+
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        "none",
+        0,
+        24,
+        focused=False,
+        sidebar=sidebar,
+        providers=registry,
+        tmux_alerts={session["id"]: "🔔"},
+    )
+
+    assert _plain(lines[3]).rstrip().endswith("2")
+    assert "🔔" not in _plain(lines[3])
+
+
 def test_current_waiting_session_still_renders_status_dot(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

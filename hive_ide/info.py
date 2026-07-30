@@ -82,7 +82,7 @@ def _row(icon: str, label: str, value: str) -> str:
     return f"{icon} {label:<9}{value}"
 
 
-def _card(record: dict, snapshot: dict) -> list[str]:
+def _card(record: dict, snapshot: dict, error: dict | None = None) -> list[str]:
     driver = (record.get("driver") or {}).get("id") or "unknown"
     working_dir = record.get("working_dir") or ""
     folder = Path(working_dir).name if working_dir else "unknown"
@@ -113,6 +113,16 @@ def _card(record: dict, snapshot: dict) -> list[str]:
     else:
         rows.extend(["", _row("· ", "plan", "(none)")])
     rows.append(_row("🕐", "active", record.get("last_active") or "?"))
+    if error:
+        rows.extend(
+            [
+                "",
+                _row("!", "error", error.get("summary") or "session error"),
+                _row(" ", "source", error.get("component") or "unknown"),
+            ]
+        )
+        if error.get("recovery"):
+            rows.append(_row(" ", "fix", error["recovery"]))
     return _box(rows)
 
 
@@ -155,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
     snapshot = store.read_path(store.config_snapshot_path()) or {}
     if args.kind == "card":
         record = store.find_session(args.session_id)
-        lines = _card(record, snapshot) if record else _box(["Session record not found."])
+        error = store.read("errors", args.session_id)
+        lines = (
+            _card(record, snapshot, error)
+            if record
+            else _box(["Session record not found."])
+        )
     else:
         lines = _keys(snapshot)
     print("\n  " + "\n  ".join(lines))

@@ -19,6 +19,7 @@ from .environments import EnvironmentManager
 from .frame import Frame
 from .hooks import HookInstaller
 from .paths import config_path, state_home, workspace_key
+from .repair import SessionRepair
 from .relayout import IdeRelayout
 from .source import inspect_interpreter, resolve_source
 from .store import StateStore, utc_now
@@ -37,6 +38,7 @@ WORKSPACE_MUTATIONS = frozenset(
         "purge",
         "rebuild",
         "record-error",
+        "repair",
         "relayout",
         "rename",
         "resume",
@@ -455,9 +457,13 @@ def cmd_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, None)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    repair = SessionRepair(store, frame).repair(record)
+    if not repair["ok"]:
+        return {"session_id": record["id"], "rebuilt": False, "repair": repair}
+    record = _session(store, args.session_id, None)
     frame.rebuild(record)
     frame.bind_keys()
-    return {"session_id": record["id"], "rebuilt": True}
+    return {"session_id": record["id"], "rebuilt": True, "repair": repair}
 
 
 def cmd_relayout(args: argparse.Namespace) -> dict[str, Any]:
@@ -542,6 +548,23 @@ def cmd_clear_error(args: argparse.Namespace) -> dict[str, Any]:
     return {"cleared": removed}
 
 
+def cmd_repair(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    repair = SessionRepair(store, frame)
+    if args.all:
+        result = repair.repair_all(apply=not args.dry_run)
+    else:
+        record = _session(
+            store,
+            args.session_id or os.environ.get("HIVE_IDE_SESSION_ID"),
+            args.name,
+        )
+        result = repair.repair(record, apply=not args.dry_run)
+    frame.bind_keys()
+    return result
+
+
 def _unlink(path: Path) -> bool:
     try:
         path.unlink()
@@ -585,9 +608,13 @@ def cmd_ensure(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, args.name)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    built = frame.ensure(record)
+    repair = SessionRepair(store, frame).repair(record)
     frame.bind_keys()
-    return {"session_id": record["id"], "built": built}
+    return {
+        "session_id": record["id"],
+        "built": "window: built" in repair["actions"],
+        "repair": repair,
+    }
 
 
 def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
@@ -678,6 +705,7 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         config=config,
     )
     store.write_path(store.config_snapshot_path(), snapshot)
+    SessionRepair(store, Frame(store, socket=args.tmux_socket)).repair_all()
     return Frame(store, socket=args.tmux_socket).open(no_attach=args.no_attach)
 
 
@@ -787,6 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
         "status-event": "Record agent activity for hooks.",
         "record-error": "Record a recoverable frame/sidebar error.",
         "clear-error": "Clear a recorded session error.",
+        "repair": "Validate sessions and safely heal broken records/windows.",
         "snapshot": "Inspect live tmux frame state.",
         "ensure": "Build one missing session window if needed.",
         "switch-driver": "Switch a session between configured drivers.",
@@ -924,6 +953,15 @@ def build_parser() -> argparse.ArgumentParser:
     clear = command("clear-error")
     clear.add_argument("--session-id")
     clear.set_defaults(handler=cmd_clear_error)
+
+    repair = command("repair")
+    target = repair.add_mutually_exclusive_group()
+    target.add_argument("--session-id")
+    target.add_argument("--name")
+    target.add_argument("--all", action="store_true")
+    repair.add_argument("--dry-run", action="store_true")
+    repair.add_argument("--tmux-socket")
+    repair.set_defaults(handler=cmd_repair)
 
     snapshot = command("snapshot")
     snapshot.add_argument("--tmux-socket", default="hive-ide")
