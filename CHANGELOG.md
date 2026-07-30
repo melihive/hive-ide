@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.24] - 2026-07-30
+
 ### Fixed
 
 - `current-plan` now runs safe session repair before opening the plan pane, so a
