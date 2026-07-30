@@ -15,6 +15,7 @@ class SessionRepair:
     """Validate and safely repair one IDE session record/window."""
 
     COMPONENT = "repair"
+    REQUIRED_PANE_ROLES = ("sidebar", "agent", "plan")
 
     def __init__(self, store: StateStore, frame: Frame):
         self.store = store
@@ -65,6 +66,11 @@ class SessionRepair:
             try:
                 if self.frame.ensure(repaired):
                     actions.append("window: built")
+                elif missing := self._missing_pane_roles(repaired):
+                    self.frame.rebuild(repaired)
+                    actions.append(
+                        "window: rebuilt for missing panes: " + ", ".join(missing)
+                    )
                 elif self._pane_cwd_mismatch(repaired):
                     self.frame.rebuild(repaired)
                     actions.append("window: rebuilt for pane cwd")
@@ -85,6 +91,12 @@ class SessionRepair:
             "errors": errors,
             "working_dir": repaired.get("working_dir"),
         }
+
+    def _missing_pane_roles(self, record: dict[str, Any]) -> tuple[str, ...]:
+        if record["id"] not in self.frame.windows():
+            return ()
+        roles = self.frame.role_panes(record["id"])
+        return tuple(role for role in self.REQUIRED_PANE_ROLES if role not in roles)
 
     def repair_all(self, *, apply: bool = True) -> dict[str, Any]:
         results = [

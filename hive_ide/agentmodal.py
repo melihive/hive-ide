@@ -157,7 +157,7 @@ class IdeAgentModal:
             return IdeNewModal._bail(
                 "Could not determine which ide session this window is.",
                 "no @hive_ide_session_id on the window and no resolvable name — "
-                "run `hive-ide open` to rebuild the frame, or `hive-ide rebuild`.")
+                "run `hive-ide repair --all` to heal the frame.")
         repo, session_id, window = ctx
         IdeNewModal._workspace_key = repo
         if not (termios and tty and sys.stdin.isatty()):

@@ -159,7 +159,7 @@ class SidebarCommandRunner:
         """Select a session window and focus its agent/chat pane."""
         target = self.window_id(session_id)
         if target is None:
-            args = ["ensure", f"--session-id={session_id}"]
+            args = ["repair", f"--session-id={session_id}"]
             if socket := os.environ.get("HIVE_IDE_TMUX_SOCKET"):
                 args.append(f"--tmux-socket={socket}")
             if not self.cli(args):
@@ -201,7 +201,7 @@ class SidebarCommandRunner:
         )
 
     def resume(self, session_id: str) -> bool:
-        """Resume an archived session, rebuild/ensure its window, and focus chat."""
+        """Resume an archived session, repair its window, and focus chat."""
         if not session_id:
             return False
         args = [
@@ -572,7 +572,7 @@ class IdeSidebar:
 
         The sidebar lists RECORDS, but this can only select a WINDOW — and a record
         whose window doesn't exist used to make the click a silent no-op, because the
-        exit code was discarded. So a miss is now escalated to `ide ensure`, which builds
+        exit code was discarded. So a miss is now escalated to `repair`, which builds
         the window and selects it. Costs nothing in the common case (the window exists,
         `select-window` succeeds, no runtime boot).
         """

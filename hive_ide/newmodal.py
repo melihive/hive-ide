@@ -173,10 +173,10 @@ class IdeNewModal:
             session_id = json.loads(out)["id"]
         except (KeyError, TypeError, ValueError):
             return False, "create did not return a session id"
-        ensured, ensure_out = IdeNewModal._cli(
+        repaired, repair_out = IdeNewModal._cli(
             skill_dir,
             [
-                "ensure",
+                "repair",
                 f"--session-id={session_id}",
                 *(
                     [f"--tmux-socket={IdeNewModal._tmux_socket}"]
@@ -185,8 +185,8 @@ class IdeNewModal:
                 ),
             ],
         )
-        if not ensured:
-            return False, ensure_out or "window build failed"
+        if not repaired:
+            return False, repair_out or "window build failed"
         windows = subprocess.run(
             [
                 "tmux",

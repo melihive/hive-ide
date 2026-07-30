@@ -209,6 +209,9 @@ def test_cli_help_lists_commands_with_professional_summaries(capsys):
     assert "Open the tmux IDE" in out
     assert "current-chat" in out
     assert "Focus or resume the current session's agent pane." in out
+    assert "force-rebuild" in out
+    assert "Rebuild one tmux window" not in out
+    assert "ensure" not in out
     assert "Examples:" in out
 
 
@@ -1008,7 +1011,7 @@ def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
     assert updated["host"]["repair"]["previous_working_dir"] == str(missing.resolve())
 
 
-def test_cli_ensure_repairs_missing_working_dir_before_build(tmp_path, monkeypatch, capsys):
+def test_cli_repair_repairs_missing_working_dir_before_build(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     missing = tmp_path / "removed"
@@ -1031,14 +1034,83 @@ def test_cli_ensure_repairs_missing_working_dir_before_build(tmp_path, monkeypat
             str(store.home),
             "--workspace-key",
             str(workspace),
-            "ensure",
+            "repair",
             "--session-id",
             record["id"],
         ]
     ) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["repair"]["actions"][0].startswith("working_dir:")
+    assert payload["actions"][0].startswith("working_dir:")
     assert ensured == [str(workspace.resolve())]
+
+
+def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BROKEN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: rebuilt for missing panes: agent"]
+    assert rebuilt == [record["id"]]
+
+
+def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="TARGET",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+
+    base = ["--state-home", str(store.home), "--workspace-key", str(workspace)]
+    assert main([*base, "force-rebuild", "--session-id", record["id"]]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rebuilt"] is True
+    assert rebuilt == [record["id"]]
+
+    with pytest.raises(SystemExit) as exc:
+        main([*base, "rebuild", "--session-id", record["id"]])
+    assert exc.value.code != 0
 
 
 def test_info_card_surfaces_session_error(tmp_path):

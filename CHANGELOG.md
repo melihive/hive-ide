@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Replaced the public `rebuild` command with explicit `force-rebuild`; normal
+  recovery stays on `repair`, and the internal `ensure` command is no longer
+  exposed through the package CLI.
+
+### Fixed
+
+- `repair` now restores live windows that are missing required sidebar, chat, or
+  plan panes, so a broken session does not require a separate rebuild command.
+
 ## [1.0.25] - 2026-07-30
 
 ### Fixed

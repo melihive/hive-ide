@@ -24,7 +24,7 @@ Use `hive-ide` to manage the current directory's coding sessions.
 - `hive-ide archive --session-id=<ID>`
 - `hive-ide resume --session-id=<ID>`
 - `hive-ide repair --session-id=<ID>` or `hive-ide repair --all`
-- `hive-ide rebuild --session-id=<ID>`
+- `hive-ide force-rebuild --session-id=<ID>`
 - `hive-ide clear-error --session-id=<ID>`
 - `hive-ide relayout`
 - `hive-ide switch-driver --session-id=<ID> --driver=<DRIVER>`

@@ -925,10 +925,10 @@ def test_mutations_use_the_selected_python_module(tmp_path, monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda argv, **kw: (
         seen.update(argv=argv, cwd=kw.get("cwd")) or SimpleNamespace(returncode=0)))
 
-    assert IdeSidebar._cli(tmp_path, ["ensure", "--session-id=session-id"]) is True
+    assert IdeSidebar._cli(tmp_path, ["repair", "--session-id=session-id"]) is True
     assert seen["cwd"] == str(workspace)
     assert seen["argv"][:3] == [sys.executable, "-m", "hive_ide.cli"]
-    assert seen["argv"][-2:] == ["ensure", "--session-id=session-id"]
+    assert seen["argv"][-2:] == ["repair", "--session-id=session-id"]
 
 
 def test_missing_window_is_built_on_the_current_ide_socket(tmp_path, monkeypatch):
@@ -954,7 +954,7 @@ def test_missing_window_is_built_on_the_current_ide_socket(tmp_path, monkeypatch
 
     assert calls == [
         [
-            "ensure",
+            "repair",
             "--session-id=session-id",
             "--tmux-socket=hive-ide-next",
         ]
@@ -982,7 +982,7 @@ def test_sidebar_command_runner_switches_window_and_agent_pane(monkeypatch, tmp_
     ]
 
 
-def test_sidebar_command_runner_does_not_select_after_failed_ensure(monkeypatch, tmp_path):
+def test_sidebar_command_runner_does_not_select_after_failed_repair(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-next")
     monkeypatch.setattr(SidebarCommandRunner, "window_id", lambda _self, _sid: None)
@@ -993,7 +993,7 @@ def test_sidebar_command_runner_does_not_select_after_failed_ensure(monkeypatch,
     )
 
     assert not SidebarCommandRunner(tmp_path, str(tmp_path)).switch("missing")
-    assert calls == [["ensure", "--session-id=missing", "--tmux-socket=hive-ide-next"]]
+    assert calls == [["repair", "--session-id=missing", "--tmux-socket=hive-ide-next"]]
 
 
 def test_normalized_driver_id_selects_the_legacy_icon(tmp_path):

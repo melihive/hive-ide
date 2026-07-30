@@ -62,11 +62,6 @@ class IdeOptionsModal:
                     "--focus",
                 ],
             )
-        if action == "rebuild":
-            return IdeNewModal._cli(
-                skill_dir,
-                ["--quiet", "rebuild", f"--session-id={session_id}", *socket_args],
-            )
         if action == "repair":
             return IdeNewModal._cli(
                 skill_dir,

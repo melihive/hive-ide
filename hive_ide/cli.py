@@ -32,11 +32,10 @@ WORKSPACE_MUTATIONS = frozenset(
         "attach-conversation",
         "clear-error",
         "create",
-        "ensure",
+        "force-rebuild",
         "open",
         "plan-set",
         "purge",
-        "rebuild",
         "record-error",
         "repair",
         "relayout",
@@ -460,7 +459,7 @@ def cmd_working_dir_set(args: argparse.Namespace) -> dict[str, Any]:
     return record
 
 
-def cmd_rebuild(args: argparse.Namespace) -> dict[str, Any]:
+def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, None)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
@@ -609,19 +608,6 @@ def _socket(store: StateStore, explicit: str | None) -> str | None:
     snapshot = store.read_path(store.config_snapshot_path())
     tmux = snapshot.get("tmux") if snapshot else None
     return tmux.get("socket") if isinstance(tmux, dict) else None
-
-
-def cmd_ensure(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
-    record = _session(store, args.session_id, args.name)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(store, frame).repair(record)
-    frame.bind_keys()
-    return {
-        "session_id": record["id"],
-        "built": "window: built" in repair["actions"],
-        "repair": repair,
-    }
 
 
 def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
@@ -808,7 +794,7 @@ def build_parser() -> argparse.ArgumentParser:
         "list": "List active sessions for the workspace.",
         "show": "Show one session record.",
         "archive": "Archive an active session and close its window.",
-        "resume": "Restore an archived session and rebuild its window.",
+        "resume": "Restore an archived session and repair its window.",
         "rename": "Rename a session without changing its immutable ID.",
         "current": "Show the current session selected by ID or environment.",
         "current-plan": "Open the current session's plan pane.",
@@ -816,7 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "working-dir-set": "Move a session to an existing working directory.",
-        "rebuild": "Rebuild one tmux window from its session record.",
+        "force-rebuild": "Force replace one tmux window from its session record.",
         "relayout": "Reapply or adopt the tmux frame geometry.",
         "purge": "Permanently remove a session and all package state for it.",
         "status-event": "Record agent activity for hooks.",
@@ -824,7 +810,6 @@ def build_parser() -> argparse.ArgumentParser:
         "clear-error": "Clear a recorded session error.",
         "repair": "Validate sessions and safely heal broken records/windows.",
         "snapshot": "Inspect live tmux frame state.",
-        "ensure": "Build one missing session window if needed.",
         "switch-driver": "Switch a session between configured drivers.",
         "source-set": "Pin one session to stable, dev, or an explicit source.",
         "open": "Open the tmux IDE, bootstrapping a TERM session if needed.",
@@ -834,6 +819,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify": "Verify package, drivers, hooks, source, and frame health.",
         "version": "Print package, protocol, schema, and interpreter versions.",
     }
+    sub.metavar = "{" + ",".join(command_help) + "}"
 
     def command(name: str, **kwargs):
         summary = command_help[name]
@@ -924,10 +910,10 @@ def build_parser() -> argparse.ArgumentParser:
     directory.add_argument("--tmux-socket")
     directory.set_defaults(handler=cmd_working_dir_set)
 
-    rebuild = command("rebuild")
-    rebuild.add_argument("--session-id", required=True)
-    rebuild.add_argument("--tmux-socket")
-    rebuild.set_defaults(handler=cmd_rebuild)
+    force_rebuild = command("force-rebuild")
+    force_rebuild.add_argument("--session-id", required=True)
+    force_rebuild.add_argument("--tmux-socket")
+    force_rebuild.set_defaults(handler=cmd_force_rebuild)
 
     relayout = command("relayout")
     relayout.add_argument("--tmux-socket")
@@ -973,13 +959,6 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot = command("snapshot")
     snapshot.add_argument("--tmux-socket", default="hive-ide")
     snapshot.set_defaults(handler=cmd_snapshot)
-
-    ensure = command("ensure")
-    target = ensure.add_mutually_exclusive_group(required=True)
-    target.add_argument("--session-id")
-    target.add_argument("--name")
-    ensure.add_argument("--tmux-socket")
-    ensure.set_defaults(handler=cmd_ensure)
 
     switch = command("switch-driver")
     switch.add_argument("--session-id", required=True)

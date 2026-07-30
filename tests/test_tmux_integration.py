@@ -294,7 +294,7 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert main(
             [
                 *base,
-                "rebuild",
+                "force-rebuild",
                 f"--session-id={alpha['id']}",
                 f"--tmux-socket={socket}",
             ]

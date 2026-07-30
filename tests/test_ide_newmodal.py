@@ -50,7 +50,7 @@ def test_validate_rejects_empty_invalid_and_duplicate(tmp_path):
     assert name is None and "exists" in error
 
 
-def test_do_create_uses_public_cli_and_ensure(monkeypatch, tmp_path):
+def test_do_create_uses_public_cli_and_repair(monkeypatch, tmp_path):
     calls = []
     outputs = iter(
         [
@@ -74,7 +74,7 @@ def test_do_create_uses_public_cli_and_ensure(monkeypatch, tmp_path):
     assert ok and message == ""
     assert calls == [
         ["create", "--name=SESSION", "--driver=antigravity"],
-        ["ensure", "--session-id=session-id"],
+        ["repair", "--session-id=session-id"],
     ]
     assert ["tmux", "select-window", "-t", "@7"] in tmux_calls
     assert ["tmux", "select-pane", "-t", "@7.1"] in tmux_calls
@@ -115,7 +115,7 @@ def test_do_create_can_adopt_selected_conversation(monkeypatch, tmp_path):
     assert ["tmux", "select-pane", "-t", "@7.1"] in tmux_calls
 
 
-def test_do_create_surfaces_failure_without_ensure(monkeypatch, tmp_path):
+def test_do_create_surfaces_failure_without_repair(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
         IdeNewModal,
