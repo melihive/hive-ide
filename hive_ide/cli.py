@@ -363,9 +363,14 @@ def _current_record(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any
 
 def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
-    return Frame(store, socket=_socket(store, args.tmux_socket)).current_plan(
-        record, focus=args.focus
-    )
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    repair = SessionRepair(store, frame).repair(record)
+    if not repair["ok"]:
+        raise UsageError(
+            "; ".join(repair["errors"]) or "The current session needs repair."
+        )
+    record = store.find_session(record["id"]) or record
+    return frame.current_plan(record, focus=args.focus)
 
 
 def cmd_current_chat(args: argparse.Namespace) -> dict[str, Any]:
@@ -401,7 +406,9 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
         if args.path is not None:
             candidate = Path(args.path).expanduser()
             if not candidate.is_absolute():
-                candidate = Path(record["working_dir"]) / candidate
+                working_dir = Path(str(record.get("working_dir") or "")).expanduser()
+                base = working_dir if working_dir.is_dir() else Path(store.workspace_key)
+                candidate = base / candidate
             if not candidate.is_file():
                 raise UsageError(f"Plan file does not exist: {candidate}")
             plan["path"] = args.path

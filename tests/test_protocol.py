@@ -260,6 +260,8 @@ def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
         plan={"path": "plan.md", "active_task": None},
     )
 
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {})
     monkeypatch.setattr(
         Frame,
         "current_plan",
@@ -286,6 +288,55 @@ def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_cli_current_plan_repairs_missing_working_dir_before_open(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = workspace / "plans" / "linked.md"
+    plan.parent.mkdir()
+    plan.write_text("# Linked\n", encoding="utf-8")
+    missing = tmp_path / "removed-worktree"
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=missing,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/linked.md", "active_task": None},
+    )
+    opened = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {})
+
+    def fake_current_plan(_self, session, focus=False):
+        opened.append(session["working_dir"])
+        return {"session_id": session["id"], "opened": "plan-pane"}
+
+    monkeypatch.setattr(Frame, "current_plan", fake_current_plan)
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--workspace-key",
+                str(workspace),
+                "current-plan",
+                "--session-id",
+                record["id"],
+            ]
+        )
+        == 0
+    )
+
+    assert capsys.readouterr().out == ""
+    assert opened == [str(workspace.resolve())]
+    assert store.find_session(record["id"])["working_dir"] == str(workspace.resolve())
 
 
 def test_cli_current_chat_is_quiet_on_success(tmp_path, monkeypatch, capsys):
@@ -1183,6 +1234,42 @@ def test_current_plan_and_conversation_mutations_are_id_targeted(
     status = json.loads(capsys.readouterr().out)
     assert status["subagents"] == {"running": 4}
     assert status["subagents_running"] == 4
+
+
+def test_plan_set_resolves_relative_plan_from_workspace_when_working_dir_is_missing(
+    tmp_path, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = workspace / "plans" / "root-plan.md"
+    plan.parent.mkdir()
+    plan.write_text("# Root Plan\n", encoding="utf-8")
+    missing = tmp_path / "deleted-worktree"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE",
+        working_dir=missing,
+        source=_source(),
+        driver=_term(),
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(store.home),
+                "--workspace-key",
+                str(workspace),
+                "plan-set",
+                f"--session-id={record['id']}",
+                "--path=plans/root-plan.md",
+            ]
+        )
+        == 0
+    )
+
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["plan"]["path"] == "plans/root-plan.md"
 
 
 def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch):

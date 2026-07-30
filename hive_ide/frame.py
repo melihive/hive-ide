@@ -304,6 +304,12 @@ class Frame:
             'printf "\\n  No plan linked.\\n"; exec "${SHELL:-/bin/sh}"'
         )
 
+    def safe_working_dir(self, record: dict[str, Any]) -> str:
+        working_dir = Path(str(record.get("working_dir") or "")).expanduser()
+        if working_dir.is_dir():
+            return str(working_dir.resolve())
+        return self.store.workspace_key
+
     @staticmethod
     def plan_path(record: dict[str, Any]) -> Path:
         reference = (record.get("plan") or {}).get("path")
@@ -311,7 +317,9 @@ class Frame:
             raise UsageError("No plan is linked to this session.")
         path = Path(reference).expanduser()
         if not path.is_absolute():
-            path = Path(record["working_dir"]) / path
+            working_dir = Path(str(record.get("working_dir") or "")).expanduser()
+            base = working_dir if working_dir.is_dir() else Path(record["workspace_key"])
+            path = base / path
         path = path.resolve()
         if not path.is_file():
             raise UsageError(f"Plan file does not exist: {path}")
@@ -383,7 +391,7 @@ class Frame:
                     "-t",
                     pane_id,
                     "-c",
-                    record["working_dir"],
+                    self.safe_working_dir(record),
                     "sh",
                     "-c",
                     self._plan_command(record, line=line),

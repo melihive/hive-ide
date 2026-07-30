@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `current-plan` now runs safe session repair before opening the plan pane, so a
+  deleted worktree cannot kill the command before the session is re-homed.
+- Relative plan paths now resolve from the workspace root when a session's saved
+  working directory is missing, preventing plan relinks from failing on stale
+  worktree paths.
+- Plan pane respawns now use a safe existing directory instead of blindly using
+  stale session `working_dir` metadata.
+
 ## [1.0.23] - 2026-07-30
 
 ### Added
