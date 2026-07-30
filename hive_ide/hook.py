@@ -85,6 +85,7 @@ class IdeHook:
             action = parser.add_mutually_exclusive_group(required=True)
             action.add_argument("--state", choices=IdeHook.STATES)
             action.add_argument("--activity", choices=IdeHook.ACTIVITIES)
+            action.add_argument("--subagent", choices=("start", "stop"))
             parser.add_argument("--driver", required=True)
             parser.add_argument("--relayed", action="store_true")
             parser.add_argument("payload", nargs="?")
@@ -121,6 +122,15 @@ class IdeHook:
                                 "label": "Compacting context",
                                 "observed_at": utc_now(),
                             },
+                    )
+                    return 0
+                if parsed.subagent:
+                    IdeHook._write_subagent_status(
+                        store,
+                        session_id,
+                        parsed.driver,
+                        parsed.subagent,
+                        payload,
                     )
                     return 0
 
@@ -167,6 +177,46 @@ class IdeHook:
         return 0
 
     @staticmethod
+    def _write_subagent_status(
+        store: StateStore,
+        session_id: str,
+        driver: str,
+        action: str,
+        payload: dict,
+    ) -> None:
+        agent_id = payload.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            return
+        status = store.read("status", session_id) or {}
+        ids = (
+            (status.get("subagents") or {}).get("ids")
+            if isinstance(status.get("subagents"), dict)
+            else []
+        )
+        active = {value for value in ids if isinstance(value, str) and value}
+        if action == "start":
+            active.add(agent_id)
+        else:
+            active.discard(agent_id)
+        observed_at = utc_now()
+        document = {
+            **status,
+            "schema_version": 1,
+            "session_id": session_id,
+            "workspace_key": store.workspace_key,
+            "state": status.get("state") or ("working" if active else "waiting"),
+            "driver": driver,
+            "observed_at": observed_at,
+            "subagents": {"running": len(active), "ids": sorted(active)},
+            "subagents_running": len(active),
+        }
+        store.write("status", session_id, document)
+        record = store.find_session(session_id)
+        if record is not None:
+            record["last_active"] = observed_at
+            store.write("sessions", session_id, record)
+
+    @staticmethod
     def _subagents_running(payload: dict) -> int | None:
         """Best-effort generic extraction for host/agent hook payloads.
 
@@ -200,9 +250,13 @@ class IdeHook:
         if not socket:
             return False
         action = (
-            ["--activity", parsed.activity]
-            if parsed.activity
-            else ["--state", parsed.state]
+            ["--subagent", parsed.subagent]
+            if parsed.subagent
+            else (
+                ["--activity", parsed.activity]
+                if parsed.activity
+                else ["--state", parsed.state]
+            )
         )
         env = [
             f"{IdeHook.ENV_WORKSPACE}={workspace}",

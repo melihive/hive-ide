@@ -350,9 +350,6 @@ class Frame:
             None,
         )
         if todo is not None:
-            for index in range(todo, -1, -1):
-                if lines[index].startswith(("## ", "### ")):
-                    return index + 1
             return todo + 1
         tasks = next(
             (

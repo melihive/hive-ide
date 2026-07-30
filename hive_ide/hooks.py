@@ -34,12 +34,16 @@ class HookInstaller:
         "UserPromptSubmit": ("state", "working"),
         "Stop": ("state", "waiting"),
         "Notification": ("state", "waiting"),
+        "SubagentStart": ("subagent", "start"),
+        "SubagentStop": ("subagent", "stop"),
         "PreCompact": ("activity", "compacting"),
         "PostCompact": ("activity", "clear"),
     }
     CODEX_EVENTS = {
         "UserPromptSubmit": ("state", "working"),
         "Stop": ("state", "waiting"),
+        "SubagentStart": ("subagent", "start"),
+        "SubagentStop": ("subagent", "stop"),
         "PreCompact": ("activity", "compacting"),
         "PostCompact": ("activity", "clear"),
     }

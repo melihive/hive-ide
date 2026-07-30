@@ -1236,6 +1236,68 @@ def test_current_plan_and_conversation_mutations_are_id_targeted(
     assert status["subagents_running"] == 4
 
 
+def test_codex_subagent_hooks_maintain_structured_count(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+    def send(action: str, agent_id: str) -> None:
+        payload = json.dumps(
+            {
+                "agent_id": agent_id,
+                "agent_type": "general",
+                "hook_event_name": f"Subagent{action.title()}",
+            }
+        )
+        assert (
+            IdeHook.main(
+                [
+                    "--state-home",
+                    str(store.home),
+                    "--subagent",
+                    action,
+                    "--driver",
+                    "codex",
+                    payload,
+                ]
+            )
+            == 0
+        )
+
+    send("start", "agent-a")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {"running": 1, "ids": ["agent-a"]}
+    assert status["subagents_running"] == 1
+
+    send("start", "agent-b")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {"running": 2, "ids": ["agent-a", "agent-b"]}
+    assert status["subagents_running"] == 2
+
+    send("stop", "agent-a")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {"running": 1, "ids": ["agent-b"]}
+    assert status["subagents_running"] == 1
+
+    send("stop", "agent-b")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {"running": 0, "ids": []}
+    assert status["subagents_running"] == 0
+
+
 def test_plan_set_resolves_relative_plan_from_workspace_when_working_dir_is_missing(
     tmp_path, capsys
 ):
@@ -1299,6 +1361,27 @@ def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch)
 
     assert result["opened"] == "terminal"
     assert calls == [(["editor", "--wait", str(plan)], {})]
+
+
+def test_plan_focus_line_targets_first_unfinished_checkbox(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "\n".join(
+            [
+                "# Plan",
+                "",
+                "### Phase 1",
+                "",
+                "- [x] Done",
+                "- [ ] First open task",
+                "- [ ] Second open task",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert Frame.plan_focus_line(plan) == 6
 
 
 def test_current_chat_uses_recorded_resume_command_outside_frame(
@@ -2244,6 +2327,23 @@ def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):
     assert any("--activity compacting" in command for command in precompact_commands)
     assert merged["other"] == {"kept": True}
     assert claude.with_suffix(".json.hive-ide.bak").is_file()
+    codex = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    codex_commands = [
+        handler["command"]
+        for groups in codex["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ]
+    assert any("--subagent start" in command for command in codex_commands)
+    assert any("--subagent stop" in command for command in codex_commands)
+    claude_commands = [
+        handler["command"]
+        for groups in merged["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ]
+    assert any("--subagent start" in command for command in claude_commands)
+    assert any("--subagent stop" in command for command in claude_commands)
     assert installer.setup(apply=True)["changes"] == []
     assert installer.verify() == []
     merged["hooks"].pop("Notification")

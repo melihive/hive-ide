@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Claude and Codex hook setup now installs `SubagentStart` and `SubagentStop`
+  receivers and tracks active subagents by structured `agent_id` hook payloads.
+- Sidebar subagent counts now come from explicit hook status metadata only; the
+  package does not scrape chat panes or transcripts for worker counts.
+- `<prefix> g` now jumps directly to the first unfinished checkbox line instead
+  of stopping at the containing section heading.
+
 ## [1.0.24] - 2026-07-30
 
 ### Fixed
