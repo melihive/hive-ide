@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import SCHEMA_VERSION
+from .agents import AgentResumeState
 from .errors import SchemaVersionError, StateError, UsageError
 from .paths import workspace_hash
 
@@ -231,6 +232,9 @@ class StateStore:
             "archived_at": None,
             "host": host or {},
         }
+        driver_id = driver.get("id") if isinstance(driver, dict) else None
+        agents = AgentResumeState(record)
+        agents.mark_active(driver_id if isinstance(driver_id, str) else None)
         self.write("sessions", record["id"], record)
         return record
 

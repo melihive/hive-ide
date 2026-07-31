@@ -13,6 +13,7 @@ from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .adoption import AdoptableConversation, ConversationAdopter
+from .agents import AgentResumeState
 from .config import configured_registry, load_config, normalized_snapshot
 from .errors import HiveIdeError, UsageError
 from .environments import EnvironmentManager
@@ -434,6 +435,9 @@ def cmd_attach_conversation(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageError(
             f"Driver {driver_id!r} cannot find conversation {args.reference!r}."
         )
+    agents = AgentResumeState(record)
+    agents.remember(driver_id, args.reference)
+    agents.mark_active(driver_id)
     record["driver"] = driver.resolve(
         name=record["name"],
         working_dir=record["working_dir"],
@@ -525,6 +529,14 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
         document["subagents"] = {"running": max(0, args.subagents_running)}
         document["subagents_running"] = max(0, args.subagents_running)
     store.write("status", args.session_id, document)
+    record = store.find_session(args.session_id)
+    if record is not None:
+        agents = AgentResumeState(record)
+        agents.remember(args.driver, args.conversation_reference)
+        if (record.get("driver") or {}).get("id") == args.driver:
+            agents.mark_active(args.driver)
+        record["last_active"] = document["observed_at"]
+        store.write("sessions", args.session_id, record)
     return document
 
 
@@ -622,12 +634,16 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     availability = driver.detect()
     if not availability.available and args.driver != "term":
         raise UsageError(f"Driver {args.driver!r} is unavailable: {availability.detail}.")
-    reference = ((record.get("driver") or {}).get("resume") or {}).get("reference")
+    agents = AgentResumeState(record)
+    reference = agents.reference_for(args.driver)
     record["driver"] = driver.resolve(
         name=record["name"],
         working_dir=record["working_dir"],
-        conversation_reference=reference if (record.get("driver") or {}).get("id") == args.driver else None,
+        conversation_reference=reference,
     )
+    agents = AgentResumeState(record)
+    agents.mark_active(args.driver)
+    agents.remember(args.driver, reference)
     record["last_active"] = utc_now()
     store.write("sessions", record["id"], record)
     Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)

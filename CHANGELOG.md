@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Agent switches now preserve per-driver resume ids, so switching from Claude to
+  another driver and back resumes the original Claude Code conversation instead
+  of starting a new one.
+
 ## [1.0.26] - 2026-07-30
 
 ### Changed

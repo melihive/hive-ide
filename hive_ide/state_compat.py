@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from . import SCHEMA_VERSION
+from .agents import AgentResumeState
 from .store import StateStore, utc_now
 
 
@@ -128,9 +129,8 @@ class StateIO:
         out["cwd"] = out.get("working_dir")
         plan = out.get("plan")
         out["plan"] = plan.get("path") if isinstance(plan, dict) else plan
-        out["agents"] = {
-            "active": driver_id,
-            "parked": [],
-            "resume_ids": {driver_id: reference} if reference else {},
-        }
+        agents = AgentResumeState(out)
+        agents.remember(driver_id, reference)
+        agents.mark_active(driver_id)
+        out["agents"] = agents.as_legacy(driver_id)
         return out

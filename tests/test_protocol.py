@@ -894,6 +894,7 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     assert status["conversation_reference"] == "conversation-1"
     updated = store.find_session(record["id"])
     assert updated["driver"]["resume"]["reference"] == "conversation-1"
+    assert updated["agents"]["resume_ids"]["codex"] == "conversation-1"
     assert updated["driver"]["launch_argv"] == [
         "codex",
         "resume",
@@ -938,6 +939,7 @@ def test_hook_does_not_overwrite_existing_conversation_reference(tmp_path, monke
     assert status["conversation_reference"] == "background-1"
     updated = store.find_session(record["id"])
     assert updated["driver"]["resume"]["reference"] == "manual-1"
+    assert updated["agents"]["resume_ids"]["claude"] == "manual-1"
     assert updated["driver"]["launch_argv"] == ["claude", "--resume", "manual-1"]
 
 
@@ -1391,6 +1393,75 @@ def test_current_plan_and_conversation_mutations_are_id_targeted(
     status = json.loads(capsys.readouterr().out)
     assert status["subagents"] == {"running": 4}
     assert status["subagents_running"] == 4
+
+
+def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    record = store.create_session(
+        name="DM HIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="DM HIVE",
+            working_dir=str(workspace),
+            conversation_reference="claude-original",
+        ),
+    )
+
+    assert main(
+        [
+            "attach-conversation",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+            "--reference=codex-fallback",
+        ]
+    ) == 0
+    codex_record = json.loads(capsys.readouterr().out)
+    assert codex_record["driver"]["id"] == "codex"
+    assert codex_record["agents"]["resume_ids"] == {
+        "claude": "claude-original",
+        "codex": "codex-fallback",
+    }
+
+    assert main(
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=claude",
+        ]
+    ) == 0
+    claude_record = json.loads(capsys.readouterr().out)
+    assert claude_record["driver"]["id"] == "claude"
+    assert claude_record["driver"]["resume"]["reference"] == "claude-original"
+    assert claude_record["driver"]["launch_argv"] == [
+        "claude",
+        "--resume",
+        "claude-original",
+    ]
+    assert claude_record["agents"]["resume_ids"]["codex"] == "codex-fallback"
+
+    assert main(
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+        ]
+    ) == 0
+    codex_again = json.loads(capsys.readouterr().out)
+    assert codex_again["driver"]["id"] == "codex"
+    assert codex_again["driver"]["resume"]["reference"] == "codex-fallback"
+    assert codex_again["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "-C",
+        str(workspace),
+        "codex-fallback",
+    ]
 
 
 def test_codex_subagent_hooks_maintain_structured_count(tmp_path, monkeypatch):

@@ -34,6 +34,7 @@ import shlex
 import subprocess
 import sys
 
+from .agents import AgentResumeState
 from .config import configured_registry, load_config
 from .paths import config_path
 from .python_cmd import PythonCommand
@@ -161,11 +162,13 @@ class IdeHook:
                 record["last_active"] = status["observed_at"]
                 current_driver = record.get("driver") or {}
                 current_reference = (current_driver.get("resume") or {}).get("reference")
-                if (
-                    reference
-                    and current_driver.get("id") == parsed.driver
-                    and (not current_reference or current_reference == reference)
-                ):
+                agents = AgentResumeState(record)
+                current_driver_matches = current_driver.get("id") == parsed.driver
+                reference_matches = not current_reference or current_reference == reference
+                if reference and (not current_driver_matches or reference_matches):
+                    agents.remember(parsed.driver, reference)
+                if reference and current_driver_matches and reference_matches:
+                    agents.mark_active(parsed.driver)
                     record["driver"] = driver.resolve(
                         name=record["name"],
                         working_dir=record["working_dir"],
