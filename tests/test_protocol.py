@@ -1402,6 +1402,7 @@ def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatc
     monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
     monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
     monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setattr("hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}")
     record = store.create_session(
         name="DM HIVE",
         working_dir=workspace,
