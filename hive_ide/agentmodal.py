@@ -42,7 +42,9 @@ class IdeAgentModal:
     # ---- switch (testable, no tty) ----
 
     @staticmethod
-    def _switch(skill_dir: Path, session_id: str, kind: str) -> tuple[bool, str]:
+    def _switch(
+        skill_dir: Path, session_id: str, kind: str, *, handoff: bool = False
+    ) -> tuple[bool, str]:
         """Shell the switch through the launcher — the same path `pick_agent` uses, so the
         pane respawn/resume logic stays in one place (`switch_agent`)."""
         ok, out = IdeNewModal._cli(
@@ -51,6 +53,7 @@ class IdeAgentModal:
                 "switch-driver",
                 f"--session-id={session_id}",
                 f"--driver={kind}",
+                *(["--handoff"] if handoff else []),
                 *(
                     [f"--tmux-socket={IdeNewModal._tmux_socket}"]
                     if IdeNewModal._tmux_socket
@@ -108,7 +111,7 @@ class IdeAgentModal:
     # ---- interactive loop (tty) ----
 
     @staticmethod
-    def _draw(window: str, repo: str, active: str, sel: int) -> None:
+    def _draw(window: str, repo: str, active: str, sel: int, handoff: bool) -> None:
         M = IdeNewModal
         o = [M.CLR, f"  {M.BOLD}Change agent{M.RST}\n"]
         # Subtitle: which session, and what it runs now — the context a bare list lacks.
@@ -125,7 +128,11 @@ class IdeAgentModal:
                 o.append(f"  {M.SEL} {arrow} {label}  {note} {M.RST}{tag}{M.EL}\n")
             else:
                 o.append(f"   {arrow} {label}  {M.DIM}{note}{M.RST}{tag}{M.EL}\n")
-        o.append(f"\n  {M.DIM}↑/↓ or j/k · 1-4 or Enter → switch · Esc → cancel{M.RST}{M.EL}")
+        state = f"{M.NAME}on{M.RST}" if handoff else f"{M.DIM}off{M.RST}"
+        o.append(
+            f"\n  handoff package: {state}"
+            f"\n  {M.DIM}↑/↓ or j/k · ←/→ handoff · 1-4 or Enter → switch · Esc → cancel{M.RST}{M.EL}"
+        )
         sys.stdout.write("".join(o))
         sys.stdout.flush()
 
@@ -171,6 +178,7 @@ class IdeAgentModal:
         # Pre-select the active occupant, so opening the modal and pressing Enter keeps
         # things as they are — the safe default for a picker over an existing session.
         sel = next((i for i, (k, *_ ) in enumerate(types) if k == active), 0)
+        handoff = False
         fd = sys.stdin.fileno()
         saved = termios.tcgetattr(fd)
         tty.setcbreak(fd)
@@ -179,7 +187,7 @@ class IdeAgentModal:
         result = None
         try:
             while True:
-                IdeAgentModal._draw(window, repo, active, sel)
+                IdeAgentModal._draw(window, repo, active, sel, handoff)
                 k = IdeNewModal._getkey(fd)
                 if k == "esc":
                     return 0
@@ -187,6 +195,8 @@ class IdeAgentModal:
                     sel = (sel - 1) % len(types)
                 elif k in ("down", "j"):
                     sel = (sel + 1) % len(types)
+                elif k in ("left", "right"):
+                    handoff = not handoff
                 elif k.isdigit() and 1 <= int(k) <= len(types):
                     result = types[int(k) - 1][0]
                     break
@@ -200,7 +210,9 @@ class IdeAgentModal:
             sys.stdout.flush()
         if result is None or result == active:
             return 0                          # cancelled, or picked what's already running
-        ok, detail = IdeAgentModal._switch(skill_dir, session_id, result)
+        ok, detail = IdeAgentModal._switch(
+            skill_dir, session_id, result, handoff=handoff
+        )
         if ok:
             return 0
         return IdeNewModal._bail(

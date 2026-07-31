@@ -55,6 +55,28 @@ def test_switch_uses_immutable_id(monkeypatch, tmp_path):
     IdeNewModal._tmux_socket = ""
 
 
+def test_switch_can_request_handoff(monkeypatch, tmp_path):
+    workspace, record = _write(tmp_path)
+    IdeNewModal._workspace_key = str(workspace)
+    calls = []
+    monkeypatch.setattr(
+        IdeNewModal,
+        "_cli",
+        staticmethod(lambda _state, args: (calls.append(args) or (True, ""))),
+    )
+    assert IdeAgentModal._switch(
+        tmp_path, record["id"], "term", handoff=True
+    ) == (True, "")
+    assert calls == [
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=term",
+            "--handoff",
+        ]
+    ]
+
+
 def test_switch_returns_failure_detail(monkeypatch, tmp_path):
     workspace, record = _write(tmp_path)
     IdeNewModal._workspace_key = str(workspace)
@@ -94,8 +116,11 @@ def test_fourth_driver_can_be_selected_by_digit(monkeypatch, tmp_path):
         IdeAgentModal,
         "_switch",
         staticmethod(
-            lambda _state, session_id, driver: (
-                selected.update(session_id=session_id, driver=driver) or (True, "")
+            lambda _state, session_id, driver, *, handoff=False: (
+                selected.update(
+                    session_id=session_id, driver=driver, handoff=handoff
+                )
+                or (True, "")
             )
         ),
     )
@@ -111,4 +136,52 @@ def test_fourth_driver_can_be_selected_by_digit(monkeypatch, tmp_path):
             record["id"],
         ]
     ) == 0
-    assert selected == {"session_id": record["id"], "driver": "term"}
+    assert selected == {
+        "session_id": record["id"],
+        "driver": "term",
+        "handoff": False,
+    }
+
+
+def test_modal_left_right_toggles_handoff(monkeypatch, tmp_path):
+    workspace, record = _write(tmp_path, driver="codex")
+    selected = {}
+    keys = iter(["right", "4"])
+    monkeypatch.setattr(
+        "hive_ide.agentmodal.sys.stdin",
+        type("Input", (), {"isatty": lambda self: True, "fileno": lambda self: 0})(),
+    )
+    monkeypatch.setattr(agentmodal_module.termios, "tcgetattr", lambda _fd: [])
+    monkeypatch.setattr(agentmodal_module.termios, "tcsetattr", lambda *_args: None)
+    monkeypatch.setattr(agentmodal_module.tty, "setcbreak", lambda _fd: None)
+    monkeypatch.setattr(IdeAgentModal, "_draw", staticmethod(lambda *_args: None))
+    monkeypatch.setattr(IdeNewModal, "_getkey", staticmethod(lambda _fd: next(keys)))
+    monkeypatch.setattr(
+        IdeAgentModal,
+        "_switch",
+        staticmethod(
+            lambda _state, session_id, driver, *, handoff=False: (
+                selected.update(
+                    session_id=session_id, driver=driver, handoff=handoff
+                )
+                or (True, "")
+            )
+        ),
+    )
+
+    assert IdeAgentModal.main(
+        [
+            "agentmodal",
+            "--state-home",
+            str(tmp_path),
+            "--workspace-key",
+            str(workspace),
+            "--session-id",
+            record["id"],
+        ]
+    ) == 0
+    assert selected == {
+        "session_id": record["id"],
+        "driver": "term",
+        "handoff": True,
+    }

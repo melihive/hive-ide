@@ -635,8 +635,14 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     availability = driver.detect()
     if not availability.available and args.driver != "term":
         raise UsageError(f"Driver {args.driver!r} is unavailable: {availability.detail}.")
+    previous_driver = (record.get("driver") or {}).get("id")
     agents = AgentResumeState(record)
     reference = agents.reference_for(args.driver)
+    previous_reference = (
+        agents.reference_for(previous_driver)
+        if isinstance(previous_driver, str)
+        else None
+    )
     record["driver"] = driver.resolve(
         name=record["name"],
         working_dir=record["working_dir"],
@@ -646,6 +652,22 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     agents.mark_active(args.driver)
     agents.remember(args.driver, reference)
     record["last_active"] = utc_now()
+    if args.handoff:
+        plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+        record["handoff"] = {
+            "created_at": record["last_active"],
+            "session_id": record["id"],
+            "session_name": record["name"],
+            "from_driver": previous_driver,
+            "to_driver": args.driver,
+            "previous_resume_reference": previous_reference,
+            "target_resume_reference": reference,
+            "working_dir": record.get("working_dir"),
+            "plan": plan.get("path"),
+            "active_task": plan.get("active_task"),
+        }
+    else:
+        record.pop("handoff", None)
     store.write("sessions", record["id"], record)
     Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
     return record
@@ -1002,6 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
     switch.add_argument("--session-id", required=True)
     switch.add_argument("--driver", required=True)
     switch.add_argument("--tmux-socket")
+    switch.add_argument("--handoff", action="store_true")
     switch.set_defaults(handler=cmd_switch_driver)
 
     source = command("source-set")

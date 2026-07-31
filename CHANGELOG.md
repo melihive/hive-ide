@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added optional driver-switch handoff support. `switch-driver --handoff` now
+  records the previous and target driver references, current plan, active task,
+  and working directory, exposes the payload as `HIVE_IDE_HANDOFF_JSON`, and
+  prints a short handoff preamble in the new driver pane.
+- The change-agent modal can toggle the handoff package with left/right before
+  switching drivers.
+
 ## [1.0.29] - 2026-07-31
 
 ### Added

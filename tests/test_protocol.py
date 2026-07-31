@@ -1529,6 +1529,69 @@ def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatc
     ]
 
 
+def test_switch_driver_handoff_records_context_and_reaches_pane_env(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = workspace / "plans" / "handoff.md"
+    plan.parent.mkdir()
+    plan.write_text("# Handoff\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setattr("hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}")
+    record = store.create_session(
+        name="DM HIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="DM HIVE",
+            working_dir=str(workspace),
+            conversation_reference="claude-original",
+        ),
+        plan={"path": "plans/handoff.md", "active_task": "Phase 26"},
+    )
+
+    assert main(
+        [
+            "attach-conversation",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+            "--reference=codex-fallback",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    calls = []
+    monkeypatch.setattr(
+        "hive_ide.cli.Frame.rebuild",
+        lambda _self, rec: calls.append(rec),
+    )
+    assert main(
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=claude",
+            "--handoff",
+        ]
+    ) == 0
+    switched = json.loads(capsys.readouterr().out)
+    handoff = switched["handoff"]
+    assert handoff["from_driver"] == "codex"
+    assert handoff["to_driver"] == "claude"
+    assert handoff["previous_resume_reference"] == "codex-fallback"
+    assert handoff["target_resume_reference"] == "claude-original"
+    assert handoff["plan"] == "plans/handoff.md"
+    assert handoff["active_task"] == "Phase 26"
+    assert calls and calls[0]["handoff"] == handoff
+
+    env = Frame(store)._environment(switched)
+    assert any(item.startswith("HIVE_IDE_HANDOFF_JSON=") for item in env)
+    assert "HIVE IDE handoff" in Frame._agent_command(switched)
+
+
 def test_codex_subagent_hooks_maintain_structured_count(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -209,7 +210,7 @@ class Frame:
 
     def _environment(self, record: dict[str, Any]) -> list[str]:
         source = record.get("source") or {}
-        return [
+        env = [
             "-e",
             f"HIVE_IDE_PROTOCOL_VERSION={PROTOCOL_VERSION}",
             "-e",
@@ -227,6 +228,11 @@ class Frame:
             "-e",
             f"HIVE_IDE_SOURCE={source.get('kind') or 'stable'}",
         ]
+        handoff = record.get("handoff")
+        if isinstance(handoff, dict) and handoff:
+            payload = json.dumps(handoff, separators=(",", ":"), sort_keys=True)
+            env.extend(["-e", f"HIVE_IDE_HANDOFF_JSON={payload}"])
+        return env
 
     def _refresh_source_if_needed(
         self, record: dict[str, Any], interpreter: str
@@ -276,6 +282,21 @@ class Frame:
         driver = record.get("driver") or {}
         argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
         command = shlex.join(argv)
+        handoff = record.get("handoff")
+        if isinstance(handoff, dict) and handoff:
+            lines = [
+                "",
+                "HIVE IDE handoff",
+                f"- session: {handoff.get('session_name') or record.get('name')} ({record.get('id')})",
+                f"- driver: {handoff.get('from_driver') or 'unknown'} -> {handoff.get('to_driver') or driver.get('id') or 'unknown'}",
+                f"- cwd: {handoff.get('working_dir') or record.get('working_dir') or ''}",
+            ]
+            if handoff.get("plan"):
+                lines.append(f"- plan: {handoff['plan']}")
+            if handoff.get("active_task"):
+                lines.append(f"- active task: {handoff['active_task']}")
+            prefix = "printf %s " + shlex.quote("\n".join(lines) + "\n\n")
+            command = f"{prefix}; {command}"
         return cls._interactive_command(
             f"{command}; exec \"${{SHELL:-/bin/sh}}\""
         )
