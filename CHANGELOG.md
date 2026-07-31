@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.33] - 2026-07-31
+
 ### Fixed
 
 - `repair --dry-run` now reports live pane cwd drift, including sidebar panes
