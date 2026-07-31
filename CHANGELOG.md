@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.29] - 2026-07-31
+
 ### Added
 
 - Added `hive-ide map`, a read-only local workspace/session tree that can
