@@ -49,14 +49,14 @@ class IdeOptionsModal:
         if action == "chat":
             return IdeNewModal._cli(
                 skill_dir,
-                ["--quiet", "current-chat", f"--session-id={session_id}", *socket_args],
+                ["--quiet", "chat", f"--session-id={session_id}", *socket_args],
             )
         if action == "plan":
             return IdeNewModal._cli(
                 skill_dir,
                 [
                     "--quiet",
-                    "current-plan",
+                    "plan",
                     f"--session-id={session_id}",
                     *socket_args,
                     "--focus",

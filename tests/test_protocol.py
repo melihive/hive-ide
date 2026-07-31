@@ -33,6 +33,7 @@ from hive_ide.seen import IdeSeen
 from hive_ide.sidebar import IdeSidebar
 from hive_ide.source import resolve_source
 from hive_ide.store import StateStore
+from hive_ide.workspace_map import WorkspaceMap
 
 
 def _source() -> dict:
@@ -43,6 +44,65 @@ def _term() -> dict:
     return bundled_drivers()["term"].resolve(
         name="TEST", working_dir=str(Path.cwd()), conversation_reference=None
     )
+
+
+def test_workspace_map_lists_known_workspaces_and_missing_dirs(tmp_path, capsys):
+    first = tmp_path / "repos" / "one"
+    second = tmp_path / "repos" / "two"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    store = StateStore(tmp_path / "state", first)
+    store.create_session(
+        name="FIRST",
+        working_dir=first,
+        source=_source(),
+        driver=_term(),
+    )
+    missing = second / "gone"
+    other = StateStore(tmp_path / "state", second)
+    other.create_session(
+        name="BROKEN",
+        working_dir=missing,
+        source=_source(),
+        driver=_term(),
+    )
+
+    data = WorkspaceMap(tmp_path / "state").build()
+
+    assert data["totals"]["workspaces"] == 2
+    assert data["totals"]["active_sessions"] == 2
+    assert data["totals"]["missing_dirs"] == 1
+
+    text = WorkspaceMap(tmp_path / "state").render()
+    assert "one" in text
+    assert "BROKEN" in text
+    assert "missing-dir" in text
+
+    assert main(
+        [
+            "--state-home",
+            str(tmp_path / "state"),
+            "map",
+            "--root",
+            str(first.parent),
+        ]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "FIRST" in out
+    assert "BROKEN" in out
+
+    assert main(
+        [
+            "--state-home",
+            str(tmp_path / "state"),
+            "map",
+            "--workspace",
+            str(first),
+        ]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "FIRST" in out
+    assert "BROKEN" not in out
 
 
 def test_store_is_workspace_scoped_and_id_keyed(tmp_path):
@@ -207,7 +267,7 @@ def test_cli_help_lists_commands_with_professional_summaries(capsys):
     assert "Repository-scoped tmux IDE" in out
     assert "open" in out
     assert "Open the tmux IDE" in out
-    assert "current-chat" in out
+    assert "chat" in out
     assert "Focus or resume the current session's agent pane." in out
     assert "force-rebuild" in out
     assert "Rebuild one tmux window" not in out
@@ -217,7 +277,7 @@ def test_cli_help_lists_commands_with_professional_summaries(capsys):
 
 def test_cli_subcommand_help_describes_options(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["current-chat", "--help"])
+        main(["chat", "--help"])
 
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -283,7 +343,7 @@ def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
                 str(state),
                 "--workspace-key",
                 str(workspace),
-                "current-plan",
+                "plan",
                 "--session-id",
                 record["id"],
                 "--focus",
@@ -333,7 +393,7 @@ def test_cli_current_plan_repairs_missing_working_dir_before_open(
                 str(state),
                 "--workspace-key",
                 str(workspace),
-                "current-plan",
+                "plan",
                 "--session-id",
                 record["id"],
             ]
@@ -374,7 +434,7 @@ def test_cli_current_chat_is_quiet_on_success(tmp_path, monkeypatch, capsys):
                 str(state),
                 "--workspace-key",
                 str(workspace),
-                "current-chat",
+                "chat",
                 "--session-id",
                 record["id"],
             ]

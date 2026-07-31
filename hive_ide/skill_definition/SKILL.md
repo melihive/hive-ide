@@ -16,8 +16,8 @@ Use `hive-ide` to manage the current directory's coding sessions.
 - `hive-ide create --driver=claude|codex --adopt [--reference=<ID>]`
 - `hive-ide show --session-id=<ID>`
 - `hive-ide current`
-- `hive-ide current-plan [--session-id=<ID>]`
-- `hive-ide current-chat [--session-id=<ID>]`
+- `hive-ide plan [--session-id=<ID>]`
+- `hive-ide chat [--session-id=<ID>]`
 - `hive-ide plan-set --session-id=<ID> --path=<PATH>`
 - `hive-ide attach-conversation --session-id=<ID> --reference=<REFERENCE>`
 - `hive-ide working-dir-set --session-id=<ID> --working-dir=<PATH>`

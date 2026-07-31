@@ -34,8 +34,8 @@ The sidebar marks linked worktrees as clean, modified, missing, or unknown.
 Reopen the current session's plan or resume its recorded agent conversation:
 
 ```sh
-hive-ide current-plan
-hive-ide current-chat
+hive-ide plan
+hive-ide chat
 ```
 
 Both commands use `HIVE_IDE_SESSION_ID` inside the frame, or accept

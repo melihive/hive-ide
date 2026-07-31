@@ -159,7 +159,7 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         for key in ("a", "o", "i", "k", "x"):
             assert "run-shell -b" in key_lines[key]
         assert "run-shell -b" in key_lines["g"]
-        assert "current-plan" in key_lines["g"]
+        assert " plan " in key_lines["g"]
         assert ">/dev/null 2>&1" in key_lines["g"]
         assert "hive_ide.popup --kind agent" in keys
         assert "hive_ide.popup --kind options" in keys

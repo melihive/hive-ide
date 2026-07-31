@@ -824,7 +824,7 @@ class Frame:
                     str(self.store.home),
                     "--workspace-key",
                     self.store.workspace_key,
-                    "current-plan",
+                    "plan",
                     "--session-id",
                     "#{@hive_ide_session_id}",
                     "--tmux-socket",

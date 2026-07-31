@@ -24,6 +24,7 @@ from .repair import SessionRepair
 from .relayout import IdeRelayout
 from .source import inspect_interpreter, resolve_source
 from .store import StateStore, utc_now
+from .workspace_map import WorkspaceMap
 
 
 WORKSPACE_MUTATIONS = frozenset(
@@ -52,8 +53,8 @@ WORKSPACE_MUTATIONS = frozenset(
 
 QUIET_SUCCESS_COMMANDS = frozenset(
     {
-        "current-chat",
-        "current-plan",
+        "chat",
+        "plan",
     }
 )
 
@@ -768,6 +769,21 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_workspace_map(args: argparse.Namespace) -> dict[str, Any] | str:
+    mapper = WorkspaceMap(state_home(args.state_home))
+    if args.format == "json":
+        return mapper.build(
+            root=args.root,
+            workspace=args.workspace,
+            archived=args.archived,
+        )
+    return mapper.render(
+        root=args.root,
+        workspace=args.workspace,
+        archived=args.archived,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hive-ide",
@@ -780,8 +796,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  hive-ide open\n"
             "  hive-ide create --driver=claude --name='API work'\n"
             "  hive-ide adopt --driver=codex\n"
-            "  hive-ide current-chat\n"
-            "  hive-ide current-plan --focus\n"
+            "  hive-ide chat\n"
+            "  hive-ide plan --focus\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -818,8 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
         "resume": "Restore an archived session and repair its window.",
         "rename": "Rename a session without changing its immutable ID.",
         "current": "Show the current session selected by ID or environment.",
-        "current-plan": "Open the current session's plan pane.",
-        "current-chat": "Focus or resume the current session's agent pane.",
+        "plan": "Open the current session's plan pane.",
+        "chat": "Focus or resume the current session's agent pane.",
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "working-dir-set": "Move a session to an existing working directory.",
@@ -839,6 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
         "hook-setup": "Install shell/agent hooks used by the IDE.",
         "verify": "Verify package, drivers, hooks, source, and frame health.",
         "version": "Print package, protocol, schema, and interpreter versions.",
+        "map": "Show local IDE workspaces and their sessions.",
     }
     sub.metavar = "{" + ",".join(command_help) + "}"
 
@@ -901,13 +918,13 @@ def build_parser() -> argparse.ArgumentParser:
     current.add_argument("--session-id")
     current.set_defaults(handler=cmd_current)
 
-    current_plan = command("current-plan", aliases=["plan"])
+    current_plan = command("plan")
     current_plan.add_argument("--session-id")
     current_plan.add_argument("--tmux-socket")
     current_plan.add_argument("--focus", action="store_true")
     current_plan.set_defaults(handler=cmd_current_plan)
 
-    current_chat = command("current-chat", aliases=["chat"])
+    current_chat = command("chat")
     current_chat.add_argument("--session-id")
     current_chat.add_argument("--tmux-socket")
     current_chat.set_defaults(handler=cmd_current_chat)
@@ -1023,6 +1040,28 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--stable-python")
     verify.set_defaults(handler=cmd_verify)
 
+    workspace = command("map")
+    workspace.add_argument(
+        "--root",
+        help="Only show workspaces below this local directory.",
+    )
+    workspace.add_argument(
+        "--workspace",
+        help="Only show one exact workspace path.",
+    )
+    workspace.add_argument(
+        "--archived",
+        action="store_true",
+        help="Include archived sessions below each workspace.",
+    )
+    workspace.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format.",
+    )
+    workspace.set_defaults(handler=cmd_workspace_map)
+
     version = command("version")
     version.set_defaults(
         handler=lambda _args: {
@@ -1049,7 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = args.handler(args)
         if not args.quiet and args.command not in QUIET_SUCCESS_COMMANDS:
-            print(_json(result))
+            print(result if isinstance(result, str) else _json(result))
         return 0
     except HiveIdeError as exc:
         print(f"hive-ide: {exc}", file=sys.stderr)

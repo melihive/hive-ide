@@ -30,13 +30,13 @@ def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
     assert calls == [
         [
             "--quiet",
-            "current-chat",
+            "chat",
             "--session-id=session-id",
             "--tmux-socket=socket",
         ],
         [
             "--quiet",
-            "current-plan",
+            "plan",
             "--session-id=session-id",
             "--tmux-socket=socket",
             "--focus",

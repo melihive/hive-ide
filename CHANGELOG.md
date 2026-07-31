@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added `hive-ide map`, a read-only local workspace/session tree that can
+  filter by root or exact workspace and marks missing workspace/session
+  directories.
+
+### Changed
+
+- Simplified the public session reopen commands to `hive-ide plan` and
+  `hive-ide chat`, and updated TUI bindings to use those command names.
+
 ## [1.0.28] - 2026-07-31
 
 ### Fixed
