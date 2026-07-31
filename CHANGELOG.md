@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.27] - 2026-07-31
+
 ### Fixed
 
 - Agent switches now preserve per-driver resume ids, so switching from Claude to
