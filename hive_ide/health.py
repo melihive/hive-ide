@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from .frame import Frame
@@ -56,4 +57,30 @@ class SessionHealth:
             )
         if not status.get("observed_at"):
             warnings.append("status hook did not provide observed_at")
+        elif self._is_before(status.get("observed_at"), record.get("last_active")):
+            warnings.append(
+                "status hook observed_at is older than session last_active; "
+                "activity ordering may be stale until the agent emits a fresh status event"
+            )
+        resume = driver.get("resume") or {}
+        if resume.get("reference") and not status.get("conversation_reference"):
+            warnings.append(
+                "status hook did not report the remembered conversation reference; "
+                "resume still uses the session record, but status diagnostics are partial"
+            )
         return warnings
+
+    def _is_before(self, first: Any, second: Any) -> bool:
+        first_dt = self._parse_timestamp(first)
+        second_dt = self._parse_timestamp(second)
+        if first_dt is None or second_dt is None:
+            return False
+        return first_dt < second_dt
+
+    def _parse_timestamp(self, value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None

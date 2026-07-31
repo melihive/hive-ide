@@ -1116,6 +1116,63 @@ def test_repair_warns_for_live_agent_without_status_hooks(tmp_path, monkeypatch)
     assert store.find_session(record["id"])["last_active"] == original_last_active
 
 
+def test_repair_warns_for_stale_partial_status_hooks(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE HOOK",
+        working_dir=workspace,
+        source=_source(),
+        driver={
+            "id": "codex",
+            "label": "Codex",
+            "capabilities": ["launch", "resume", "status"],
+            "launch_argv": ["codex"],
+            "resume": {"strategy": "conversation_id", "reference": "conversation-1"},
+        },
+    )
+    record["last_active"] = "2026-07-31T11:04:39+00:00"
+    store.write("sessions", record["id"], record)
+    store.write(
+        "status",
+        record["id"],
+        {
+            "schema_version": SCHEMA_VERSION,
+            "workspace_key": store.workspace_key,
+            "session_id": record["id"],
+            "driver": "codex",
+            "state": "working",
+            "observed_at": "2026-07-31T10:51:25+00:00",
+            "conversation_reference": None,
+        },
+    )
+
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(
+        record, apply=False
+    )
+
+    assert result["ok"] is True
+    assert result["warnings"] == [
+        "status hook observed_at is older than session last_active; "
+        "activity ordering may be stale until the agent emits a fresh status event",
+        "status hook did not report the remembered conversation reference; "
+        "resume still uses the session record, but status diagnostics are partial",
+    ]
+
+
 def test_cli_repair_repairs_missing_working_dir_before_build(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1296,7 +1353,11 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
         "tmux",
         lambda _self, _args: SimpleNamespace(
             returncode=0,
-            stdout=f"{old_worktree}\n{old_worktree}\n{old_worktree}\n",
+            stdout=(
+                f"sidebar\t{old_worktree}\n"
+                f"agent\t{old_worktree}\n"
+                f"plan\t{old_worktree}\n"
+            ),
             stderr="",
         ),
     )
@@ -1305,8 +1366,56 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
 
     assert result["ok"] is True
     assert result["actions"] == ["window: pane cwd differs; live panes preserved"]
-    assert result["warnings"]
+    assert result["warnings"] == [
+        f"sidebar pane cwd differs from session working_dir: {old_worktree} != "
+        f"{workspace.resolve()}; repair preserves the live pane",
+        f"agent pane cwd differs from session working_dir: {old_worktree} != "
+        f"{workspace.resolve()}; repair preserves the live pane",
+        f"plan pane cwd differs from session working_dir: {old_worktree} != "
+        f"{workspace.resolve()}; repair preserves the live pane",
+    ]
     assert rebuilt == []
+
+
+def test_repair_dry_run_reports_deleted_sidebar_cwd(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    deleted = tmp_path / "removed-worktree"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=f"sidebar\t{deleted} (deleted)\nagent\t{workspace}\nplan\t{workspace}\n",
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(
+        record, apply=False
+    )
+
+    assert result["ok"] is True
+    assert result["actions"] == []
+    assert result["warnings"] == [
+        f"sidebar pane cwd no longer exists: {deleted} (deleted); "
+        "repair preserves the live pane, use force-rebuild only if "
+        "you intentionally want to restart it"
+    ]
 
 
 def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, capsys):

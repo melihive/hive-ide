@@ -63,6 +63,8 @@ class SessionRepair:
                 warnings.append(f"plan file missing: {plan}")
 
         warnings.extend(SessionHealth(self.store, self.frame).hook_warnings(repaired))
+        pane_cwd_warnings = self._pane_cwd_warnings(repaired)
+        warnings.extend(pane_cwd_warnings)
 
         if apply and not errors:
             try:
@@ -88,12 +90,8 @@ class SessionRepair:
                                 "window still missing panes: "
                                 + ", ".join(still_missing)
                             )
-                elif self._pane_cwd_mismatch(repaired):
+                elif pane_cwd_warnings:
                     actions.append("window: pane cwd differs; live panes preserved")
-                    warnings.append(
-                        "live pane cwd differs from session working_dir; use "
-                        "force-rebuild only if you intentionally want to restart panes"
-                    )
                 self._clear_repair_error(session_id)
             except HiveIdeError as exc:
                 errors.append(str(exc))
@@ -128,21 +126,43 @@ class SessionRepair:
             "sessions": results,
         }
 
-    def _pane_cwd_mismatch(self, record: dict[str, Any]) -> bool:
+    def _pane_cwd_warnings(self, record: dict[str, Any]) -> list[str]:
         target = self.frame.windows().get(record["id"])
         if not target:
-            return False
+            return []
         expected = str(Path(record["working_dir"]).expanduser().resolve())
         panes = self.frame.tmux(
-            ["list-panes", "-t", target, "-F", "#{pane_current_path}"]
+            [
+                "list-panes",
+                "-t",
+                target,
+                "-F",
+                "#{@hive_ide_pane}\t#{pane_current_path}",
+            ]
         )
         if panes.returncode != 0:
-            return False
-        return any(
-            str(Path(line).expanduser().resolve()) != expected
-            for line in panes.stdout.splitlines()
-            if line.strip()
-        )
+            return []
+        warnings: list[str] = []
+        for line in panes.stdout.splitlines():
+            role, _, raw_path = line.partition("\t")
+            if not raw_path.strip():
+                continue
+            label = role or "unknown"
+            shown_path = raw_path.strip()
+            clean_path = shown_path.removesuffix(" (deleted)")
+            current = str(Path(clean_path).expanduser().resolve())
+            if shown_path.endswith(" (deleted)") or not Path(clean_path).is_dir():
+                warnings.append(
+                    f"{label} pane cwd no longer exists: {shown_path}; "
+                    "repair preserves the live pane, use force-rebuild only if "
+                    "you intentionally want to restart it"
+                )
+            elif current != expected:
+                warnings.append(
+                    f"{label} pane cwd differs from session working_dir: "
+                    f"{shown_path} != {expected}; repair preserves the live pane"
+                )
+        return warnings
 
     def _record_error(
         self,

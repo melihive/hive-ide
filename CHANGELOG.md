@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `repair --dry-run` now reports live pane cwd drift, including sidebar panes
+  still running from deleted worktree directories, instead of only detecting it
+  on mutating repair runs.
+- `repair` now warns when status-hook timestamps lag behind session activity or
+  omit the remembered conversation reference, making stale/partial hook state
+  visible without using tmux focus as activity.
+
 ## [1.0.32] - 2026-07-31
 
 ### Fixed
