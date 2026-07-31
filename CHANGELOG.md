@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Publish verification is now CI-safe for the driver-switch resume regression;
+  the test stubs driver availability instead of requiring Claude Code on the
+  GitHub runner.
+
 ## [1.0.27] - 2026-07-31
 
 ### Fixed
