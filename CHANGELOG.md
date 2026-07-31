@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `repair` no longer stamps `last_active` when it only re-homes broken session
+  metadata, so clicking a broken session does not make it sort as recently
+  agent-active.
+- `repair` now reports a warning when a live agent pane has no status-hook
+  state, making stale hook setups visible without scraping chat transcripts or
+  treating tmux focus/redraw as activity.
+
 ## [1.0.31] - 2026-07-31
 
 ### Fixed

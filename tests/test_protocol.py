@@ -1061,6 +1061,7 @@ def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
         source=_source(),
         driver=_term(),
     )
+    original_last_active = record["last_active"]
     calls = []
 
     monkeypatch.setattr(Frame, "ensure", lambda _self, rec: calls.append(rec["working_dir"]) or True)
@@ -1074,7 +1075,45 @@ def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
     assert calls == [str(workspace.resolve())]
     updated = store.find_session(record["id"])
     assert updated["working_dir"] == str(workspace.resolve())
+    assert updated["last_active"] == original_last_active
     assert updated["host"]["repair"]["previous_working_dir"] == str(missing.resolve())
+
+
+def test_repair_warns_for_live_agent_without_status_hooks(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="HOOKLESS",
+        working_dir=workspace,
+        source=_source(),
+        driver={
+            "id": "codex",
+            "label": "Codex",
+            "capabilities": ["launch", "resume", "status"],
+            "launch_argv": ["codex"],
+        },
+    )
+    original_last_active = record["last_active"]
+
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(
+        record, apply=False
+    )
+
+    assert result["ok"] is True
+    assert result["warnings"] == [
+        "status hooks have not reported for this live agent pane; "
+        "visible chat activity may not update sidebar status or order "
+        "until the agent pane is restarted with the current hook environment"
+    ]
+    assert store.find_session(record["id"])["last_active"] == original_last_active
 
 
 def test_cli_repair_repairs_missing_working_dir_before_build(tmp_path, monkeypatch, capsys):
@@ -2399,6 +2438,7 @@ def test_seen_acknowledges_waiting_status(tmp_path):
         source=_source(),
         driver=_term(),
     )
+    original_last_active = record["last_active"]
     store.write(
         "status",
         record["id"],
@@ -2414,6 +2454,7 @@ def test_seen_acknowledges_waiting_status(tmp_path):
     )
     assert IdeSeen.mark(store.home, store.workspace_key, record["id"])
     assert store.read("status", record["id"])["state"] == "idle"
+    assert store.find_session(record["id"])["last_active"] == original_last_active
 
 
 def test_activity_is_environment_gated(tmp_path, monkeypatch):

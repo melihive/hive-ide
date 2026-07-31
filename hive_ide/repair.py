@@ -8,6 +8,7 @@ from typing import Any
 from . import SCHEMA_VERSION
 from .errors import HiveIdeError
 from .frame import Frame
+from .health import SessionHealth
 from .store import StateStore, utc_now
 
 
@@ -46,7 +47,6 @@ class SessionRepair:
                 host["repair"] = repair_meta
                 repaired["host"] = host
                 repaired["working_dir"] = fallback
-                repaired["last_active"] = utc_now()
                 self.store.write("sessions", session_id, repaired)
 
         source = repaired.get("source") or {}
@@ -61,6 +61,8 @@ class SessionRepair:
                 candidates.insert(0, Path(str(repaired["working_dir"])) / plan)
             if not any(candidate.is_file() for candidate in candidates):
                 warnings.append(f"plan file missing: {plan}")
+
+        warnings.extend(SessionHealth(self.store, self.frame).hook_warnings(repaired))
 
         if apply and not errors:
             try:
