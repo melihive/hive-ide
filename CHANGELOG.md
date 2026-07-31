@@ -4,6 +4,11 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `repair --name` now targets the named session instead of being overridden by an
+  ambient `HIVE_IDE_SESSION_ID` from the current pane.
+
 ## [1.0.30] - 2026-07-31
 
 ### Added

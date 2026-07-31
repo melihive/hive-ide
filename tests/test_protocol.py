@@ -1110,6 +1110,49 @@ def test_cli_repair_repairs_missing_working_dir_before_build(tmp_path, monkeypat
     assert ensured == [str(workspace.resolve())]
 
 
+def test_cli_repair_name_overrides_ambient_session_id(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    current = store.create_session(
+        name="CURRENT",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    target = store.create_session(
+        name="HIVE DRIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    repaired = []
+
+    def fake_repair(_self, record, *, apply=True):
+        repaired.append((record["id"], apply))
+        return {"ok": True, "session_id": record["id"], "name": record["name"]}
+
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", current["id"])
+    monkeypatch.setattr(SessionRepair, "repair", fake_repair)
+    monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            str(workspace),
+            "repair",
+            "--name",
+            "HIVE DRIVE",
+            "--dry-run",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == target["id"]
+    assert repaired == [(target["id"], False)]
+
+
 def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

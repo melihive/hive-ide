@@ -578,11 +578,11 @@ def cmd_repair(args: argparse.Namespace) -> dict[str, Any]:
     if args.all:
         result = repair.repair_all(apply=not args.dry_run)
     else:
-        record = _session(
-            store,
-            args.session_id or os.environ.get("HIVE_IDE_SESSION_ID"),
-            args.name,
-        )
+        session_id = args.session_id
+        name = args.name
+        if not session_id and not name:
+            session_id = os.environ.get("HIVE_IDE_SESSION_ID")
+        record = _session(store, session_id, name)
         result = repair.repair(record, apply=not args.dry_run)
     frame.bind_keys()
     return result
