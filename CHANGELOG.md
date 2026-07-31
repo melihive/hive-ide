@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.32] - 2026-07-31
+
 ### Fixed
 
 - `repair` no longer stamps `last_active` when it only re-homes broken session
