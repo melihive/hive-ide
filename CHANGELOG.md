@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.30] - 2026-07-31
+
 ### Added
 
 - Added optional driver-switch handoff support. `switch-driver --handoff` now
