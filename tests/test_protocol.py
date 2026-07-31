@@ -1592,6 +1592,51 @@ def test_switch_driver_handoff_records_context_and_reaches_pane_env(
     assert "HIVE IDE handoff" in Frame._agent_command(switched)
 
 
+def test_handoff_is_consumed_after_successful_frame_build(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="HANDOFF",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    record["handoff"] = {
+        "session_id": record["id"],
+        "session_name": record["name"],
+        "from_driver": "claude",
+        "to_driver": "term",
+        "working_dir": str(workspace),
+    }
+    store.write("sessions", record["id"], record)
+    frame = Frame(store)
+    calls = []
+
+    def fake_tmux(args, **kwargs):
+        calls.append((args, kwargs))
+        if args and args[0] in {"new-session", "new-window"}:
+            return SimpleNamespace(returncode=0, stdout="@7\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+    monkeypatch.setattr(frame, "_refresh_source_if_needed", lambda *_args: None)
+    monkeypatch.setattr(frame, "_tag", lambda *_args: None)
+    monkeypatch.setattr(frame, "_apply_columns", lambda *_args: None)
+
+    assert frame.build(record) == "@7"
+
+    stored = store.read("sessions", record["id"])
+    assert stored is not None
+    assert "handoff" not in stored
+    assert "handoff" not in record
+    assert any(
+        "HIVE_IDE_HANDOFF_JSON=" in item
+        for args, _kwargs in calls
+        for item in args
+    )
+
+
 def test_codex_subagent_hooks_maintain_structured_count(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -13,6 +13,11 @@ All notable changes to `hive-ide` will be documented in this file.
 - The change-agent modal can toggle the handoff package with left/right before
   switching drivers.
 
+### Fixed
+
+- Handoff payloads are now consumed after a successful agent-pane rebuild or
+  respawn, so later repairs do not replay stale handoff context.
+
 ## [1.0.29] - 2026-07-31
 
 ### Added

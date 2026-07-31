@@ -470,6 +470,7 @@ class Frame:
                     raise HiveIdeError(
                         result.stderr.strip() or "Could not reopen the agent pane."
                     )
+                self._clear_consumed_handoff(record)
                 self.tmux(["select-pane", "-t", pane_id])
                 return {
                     "session_id": record["id"],
@@ -498,6 +499,15 @@ class Frame:
             "driver": driver.get("id"),
             "opened": "terminal",
         }
+
+    def _clear_consumed_handoff(self, record: dict[str, Any]) -> None:
+        if not isinstance(record.get("handoff"), dict):
+            return
+        fresh = self.store.read("sessions", record["id"]) or record
+        if isinstance(fresh.get("handoff"), dict):
+            fresh.pop("handoff", None)
+            self.store.write("sessions", record["id"], fresh)
+        record.pop("handoff", None)
 
     def _tag(self, target: str, record: dict[str, Any]) -> None:
         self.tmux(["set-option", "-w", "-t", target, "automatic-rename", "off"])
@@ -602,6 +612,7 @@ class Frame:
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
+        self._clear_consumed_handoff(record)
         return target
 
     def ensure(self, record: dict[str, Any]) -> bool:
