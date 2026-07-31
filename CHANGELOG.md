@@ -11,6 +11,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - Publish verification is now CI-safe for the driver-switch resume regression;
   the test stubs driver availability instead of requiring Claude Code on the
   GitHub runner.
+- Stable sessions pick up the existing `current-plan --focus` CLI support once
+  refreshed, fixing plan-pane focus commands that failed on older package builds.
 
 ## [1.0.27] - 2026-07-31
 
