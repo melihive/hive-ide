@@ -40,6 +40,27 @@ def _processes_referencing(path) -> list[int]:
     return pids
 
 
+def _tmux_sockets_referencing(path) -> set[str]:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return set()
+    sockets: set[str] = set()
+    for line in result.stdout.splitlines():
+        if "tmux -L " not in line:
+            continue
+        tokens = line.split()
+        for index, token in enumerate(tokens[:-1]):
+            if token == "-L" and tokens[index + 1].startswith("hive-ide-"):
+                sockets.add(tokens[index + 1])
+    return sockets
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_tmux_test_processes(tmp_path):
     """Real tmux tests must not leave sidebar/agent loops under pytest tmp dirs.
@@ -49,6 +70,14 @@ def _cleanup_tmux_test_processes(tmp_path):
     It is scoped to the current test's tmp_path so live IDE sessions are never touched.
     """
     yield
+    for socket in _tmux_sockets_referencing(tmp_path):
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    time.sleep(0.2)
     pids = _processes_referencing(tmp_path)
     for pid in pids:
         try:
