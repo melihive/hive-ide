@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Real tmux integration tests now clean up pytest-owned tmux/sidebar/agent
+  children by test temp path, preventing failed or interrupted release gates
+  from leaving CPU-burning sidebar loops alive.
+
 ## [1.0.35] - 2026-08-01
 
 ### Added
