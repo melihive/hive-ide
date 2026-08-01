@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.34] - 2026-08-01
+
 ### Added
 
 - Added opt-in relayout debug tracing. Creating `layout.json.debug.enable`
