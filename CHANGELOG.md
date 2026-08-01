@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.35] - 2026-08-01
+
 ### Added
 
 - Enriched optional driver handoff packages with a target-driver prompt that
