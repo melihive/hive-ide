@@ -14,6 +14,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 - Moved driver handoff payload construction into a dedicated `HandoffPackage`
   class so the switch-driver command no longer owns that state-shaping logic.
+- The change-agent modal now renders the switch mode as an explicit
+  `quick switch` / `handoff package` selector instead of a vague on/off toggle.
 
 ## [1.0.34] - 2026-08-01
 

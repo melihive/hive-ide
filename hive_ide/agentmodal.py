@@ -128,9 +128,10 @@ class IdeAgentModal:
                 o.append(f"  {M.SEL} {arrow} {label}  {note} {M.RST}{tag}{M.EL}\n")
             else:
                 o.append(f"   {arrow} {label}  {M.DIM}{note}{M.RST}{tag}{M.EL}\n")
-        state = f"{M.NAME}on{M.RST}" if handoff else f"{M.DIM}off{M.RST}"
+        quick = f"{M.SEL} quick switch {M.RST}" if not handoff else f"{M.DIM}quick switch{M.RST}"
+        package = f"{M.SEL} handoff package {M.RST}" if handoff else f"{M.DIM}handoff package{M.RST}"
         o.append(
-            f"\n  handoff package: {state}"
+            f"\n  mode: {quick}  {package}"
             f"\n  {M.DIM}↑/↓ or j/k · ←/→ handoff · 1-4 or Enter → switch · Esc → cancel{M.RST}{M.EL}"
         )
         sys.stdout.write("".join(o))

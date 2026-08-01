@@ -185,3 +185,17 @@ def test_modal_left_right_toggles_handoff(monkeypatch, tmp_path):
         "driver": "term",
         "handoff": True,
     }
+
+
+def test_draw_shows_explicit_handoff_mode_selector(capsys):
+    IdeAgentModal._draw("SESSION", "/repo", "codex", 0, False)
+    quick = capsys.readouterr().out
+    assert "mode:" in quick
+    assert "quick switch" in quick
+    assert "handoff package" in quick
+
+    IdeAgentModal._draw("SESSION", "/repo", "codex", 0, True)
+    package = capsys.readouterr().out
+    assert "mode:" in package
+    assert "quick switch" in package
+    assert "handoff package" in package
