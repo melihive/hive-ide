@@ -11,6 +11,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - Real tmux integration tests now clean up pytest-owned tmux/sidebar/agent
   children by test temp path and at pytest session finish, preventing failed or
   interrupted release gates from leaving CPU-burning sidebar loops alive.
+- macOS install documentation now defaults to `pipx` so Homebrew-managed Python
+  environments do not fail on PEP 668 externally managed package installs.
 
 ## [1.0.35] - 2026-08-01
 

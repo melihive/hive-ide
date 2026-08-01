@@ -10,10 +10,26 @@ Unix (Linux/macOS), `tmux`, and Python 3.10+.
 
 ## Install
 
+macOS:
+
 ```sh
-python3 -m pip install hive-ide
+brew install pipx
+pipx ensurepath
+pipx install hive-ide
 hive-ide open
 ```
+
+Linux:
+
+```sh
+python3 -m pip install --user --upgrade hive-ide
+hive-ide open
+```
+
+If your Python reports an externally managed environment, use `pipx install
+hive-ide` instead. `pipx` is the recommended install method for CLI app users
+because it keeps `hive-ide` in its own environment while exposing the command on
+`PATH`.
 
 Bundled drivers are `claude`, `codex`, `antigravity`, and `term`. State is user-local and
 directory-scoped. Agent drivers require their corresponding local command; `term` opens a

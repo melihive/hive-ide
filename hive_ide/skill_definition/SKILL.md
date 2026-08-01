@@ -7,6 +7,21 @@ description: Manage agent-aware tmux sessions scoped to the current directory.
 
 Use `hive-ide` to manage the current directory's coding sessions.
 
+## Install
+
+On macOS, prefer `pipx` because Homebrew-managed Python may reject user-site
+installs:
+
+```bash
+brew install pipx
+pipx ensurepath
+pipx install hive-ide
+```
+
+On Linux, `python3 -m pip install --user --upgrade hive-ide` is acceptable when
+the Python environment allows user-site installs. If it reports an externally
+managed environment, use `pipx install hive-ide`.
+
 ## Commands
 
 - `hive-ide list`
