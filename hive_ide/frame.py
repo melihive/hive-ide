@@ -295,6 +295,8 @@ class Frame:
                 lines.append(f"- plan: {handoff['plan']}")
             if handoff.get("active_task"):
                 lines.append(f"- active task: {handoff['active_task']}")
+            if handoff.get("target_driver_prompt"):
+                lines.extend(["", str(handoff["target_driver_prompt"])])
             prefix = "printf %s " + shlex.quote("\n".join(lines) + "\n\n")
             command = f"{prefix}; {command}"
         return cls._interactive_command(

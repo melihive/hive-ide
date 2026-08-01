@@ -1776,11 +1776,16 @@ def test_switch_driver_handoff_records_context_and_reaches_pane_env(
     assert handoff["target_resume_reference"] == "claude-original"
     assert handoff["plan"] == "plans/handoff.md"
     assert handoff["active_task"] == "Phase 26"
+    assert "You are now the active driver" in handoff["target_driver_prompt"]
+    assert "plans/handoff.md" in handoff["target_driver_prompt"]
+    assert "Phase 26" in handoff["target_driver_prompt"]
     assert calls and calls[0]["handoff"] == handoff
 
     env = Frame(store)._environment(switched)
     assert any(item.startswith("HIVE_IDE_HANDOFF_JSON=") for item in env)
-    assert "HIVE IDE handoff" in Frame._agent_command(switched)
+    command = Frame._agent_command(switched)
+    assert "HIVE IDE handoff" in command
+    assert "You are now the active driver" in command
 
 
 def test_handoff_is_consumed_after_successful_frame_build(tmp_path, monkeypatch):

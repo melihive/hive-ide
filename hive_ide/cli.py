@@ -18,6 +18,7 @@ from .config import configured_registry, load_config, normalized_snapshot
 from .errors import HiveIdeError, UsageError
 from .environments import EnvironmentManager
 from .frame import Frame
+from .handoff import HandoffPackage
 from .hooks import HookInstaller
 from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
@@ -653,19 +654,14 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     agents.remember(args.driver, reference)
     record["last_active"] = utc_now()
     if args.handoff:
-        plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-        record["handoff"] = {
-            "created_at": record["last_active"],
-            "session_id": record["id"],
-            "session_name": record["name"],
-            "from_driver": previous_driver,
-            "to_driver": args.driver,
-            "previous_resume_reference": previous_reference,
-            "target_resume_reference": reference,
-            "working_dir": record.get("working_dir"),
-            "plan": plan.get("path"),
-            "active_task": plan.get("active_task"),
-        }
+        record["handoff"] = HandoffPackage(
+            record,
+            created_at=record["last_active"],
+            previous_driver=previous_driver,
+            target_driver=args.driver,
+            previous_reference=previous_reference,
+            target_reference=reference,
+        ).build()
     else:
         record.pop("handoff", None)
     store.write("sessions", record["id"], record)

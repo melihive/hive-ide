@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Enriched optional driver handoff packages with a target-driver prompt that
+  summarizes the IDE session, working directory, plan, active task, and previous
+  driver reference for the newly selected agent.
+
+### Changed
+
+- Moved driver handoff payload construction into a dedicated `HandoffPackage`
+  class so the switch-driver command no longer owns that state-shaping logic.
+
 ## [1.0.34] - 2026-08-01
 
 ### Added
