@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,53 @@ from hive_ide.store import StateStore
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is unavailable")
+
+
+def _processes_referencing(path) -> list[int]:
+    needle = str(path).encode()
+    pids: list[int] = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == os.getpid():
+            continue
+        try:
+            with open(os.path.join(entry.path, "cmdline"), "rb") as handle:
+                cmdline = handle.read()
+        except OSError:
+            continue
+        if needle in cmdline:
+            pids.append(pid)
+    return pids
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_tmux_test_processes(tmp_path):
+    """Real tmux tests must not leave sidebar/agent loops under pytest tmp dirs.
+
+    `kill-server` handles the happy path. This finalizer is the backstop for assertion
+    failures, interrupted release gates, and children that outlive their tmux server.
+    It is scoped to the current test's tmp_path so live IDE sessions are never touched.
+    """
+    yield
+    pids = _processes_referencing(tmp_path)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    if pids:
+        time.sleep(0.2)
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def _source() -> dict:
