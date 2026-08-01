@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.36] - 2026-08-01
+
 ### Fixed
 
 - Real tmux integration tests now clean up pytest-owned tmux/sidebar/agent
