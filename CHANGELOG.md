@@ -11,6 +11,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Enriched optional driver handoff packages with a target-driver prompt that
   summarizes the IDE session, working directory, plan, active task, and previous
   driver reference for the newly selected agent.
+- Relayout tracing is now a normal config-backed diagnostic:
+  `{"diagnostics": {"relayout_trace": true}}` writes JSONL records with client
+  geometry, tmux chrome options, and pane geometry before/after each relayout.
 
 ### Changed
 

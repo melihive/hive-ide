@@ -46,7 +46,17 @@ class IdeRelayout:
     def _debug_enabled(path: str) -> bool:
         if os.environ.get("HIVE_IDE_RELAYOUT_DEBUG", "").lower() in {"1", "true", "yes"}:
             return True
-        return bool(path) and os.path.exists(path + ".debug.enable")
+        if not path:
+            return False
+        if os.path.exists(path + ".debug.enable"):
+            return True
+        try:
+            with open(os.path.join(os.path.dirname(path), "config.json"), encoding="utf-8") as fh:
+                config = json.load(fh)
+        except (OSError, ValueError):
+            return False
+        diagnostics = config.get("diagnostics") if isinstance(config, dict) else None
+        return bool(isinstance(diagnostics, dict) and diagnostics.get("relayout_trace"))
 
     @staticmethod
     def _debug_write(path: str, event: dict) -> None:
@@ -158,13 +168,14 @@ class IdeRelayout:
             [
                 "list-clients",
                 "-F",
-                "#{client_activity}\t#{client_width}\t#{client_height}\t#{client_tty}",
+                "#{client_activity}\t#{client_width}\t#{client_height}\t"
+                "#{client_tty}\t#{client_session}",
             ],
         )
         clients = []
         for line in rows.splitlines():
-            activity, width, height, tty = (
-                line.split("\t") if line.count("\t") == 3 else ("", "", "", "")
+            activity, width, height, tty, session = (
+                line.split("\t") if line.count("\t") == 4 else ("", "", "", "", "")
             )
             clients.append(
                 {
@@ -172,9 +183,66 @@ class IdeRelayout:
                     "width": int(width) if width.isdigit() else width,
                     "height": int(height) if height.isdigit() else height,
                     "tty": tty,
+                    "session": session,
                 }
             )
         return clients
+
+    @staticmethod
+    def _pane_geometries(socket: str, win: str) -> list[dict]:
+        rows = IdeRelayout._tmux(
+            socket,
+            [
+                "list-panes",
+                "-t",
+                win,
+                "-F",
+                "#{pane_id}\t#{pane_index}\t#{@hive_ide_pane}\t#{pane_width}\t"
+                "#{pane_height}\t#{pane_top}\t#{pane_bottom}\t#{pane_active}\t"
+                "#{pane_current_command}",
+            ],
+        )
+        panes = []
+        for line in rows.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 9:
+                continue
+            pane_id, index, role, width, height, top, bottom, active, command = fields
+            panes.append(
+                {
+                    "pane": pane_id,
+                    "index": int(index) if index.isdigit() else index,
+                    "role": role,
+                    "width": int(width) if width.isdigit() else width,
+                    "height": int(height) if height.isdigit() else height,
+                    "top": int(top) if top.isdigit() else top,
+                    "bottom": int(bottom) if bottom.isdigit() else bottom,
+                    "active": active == "1",
+                    "command": command,
+                }
+            )
+        return panes
+
+    @staticmethod
+    def _tmux_options(socket: str) -> dict[str, str]:
+        options: dict[str, str] = {}
+        for scope, command, names in [
+            (
+                "server",
+                "show-options",
+                ["status", "status-position", "status-interval"],
+            ),
+            (
+                "window",
+                "show-window-options",
+                ["window-size", "pane-border-status", "aggressive-resize"],
+            ),
+        ]:
+            for name in names:
+                value = IdeRelayout._tmux(socket, [command, "-gv", name])
+                if value:
+                    options[f"{scope}.{name}"] = value
+        return options
 
     @staticmethod
     def _geometry_source(
@@ -422,6 +490,8 @@ class IdeRelayout:
                     "socket": sock,
                     "mode": mode,
                     "forced_geometry": list(forced_geometry) if forced_geometry else None,
+                    "clients": IdeRelayout._client_geometries(sock),
+                    "tmux_options": IdeRelayout._tmux_options(sock),
                 },
             )
             return 0
@@ -466,9 +536,12 @@ class IdeRelayout:
         )
         latest_geometry = IdeRelayout._latest_client_geometry(sock)
         canonical = latest_geometry or forced_geometry or active_tuple
+        debug_enabled = IdeRelayout._debug_enabled(state_path)
+        debug_options = IdeRelayout._tmux_options(sock) if debug_enabled else {}
         debug_windows = []
         remembered_plan = pw
         for win in IdeRelayout._tmux(sock, ["list-windows", "-a", "-F", "#{window_id}"]).split():
+            before_panes = IdeRelayout._pane_geometries(sock, win) if debug_enabled else []
             raw_geometry = IdeRelayout._tmux(
                 sock,
                 ["display-message", "-p", "-t", win, "#{window_width}\t#{window_height}"],
@@ -517,6 +590,10 @@ class IdeRelayout:
                         "after": [width, height],
                         "resized_to": list(resized_to) if resized_to else None,
                         "mode": "mobile-zoom",
+                        "panes_before": before_panes,
+                        "panes_after": (
+                            IdeRelayout._pane_geometries(sock, win) if debug_enabled else []
+                        ),
                     }
                 )
                 continue
@@ -548,9 +625,13 @@ class IdeRelayout:
                     "mode": "three-pane",
                     "sidebar": side,
                     "plan": plan,
+                    "panes_before": before_panes,
+                    "panes_after": (
+                        IdeRelayout._pane_geometries(sock, win) if debug_enabled else []
+                    ),
                 }
             )
-        if IdeRelayout._debug_enabled(state_path):
+        if debug_enabled:
             IdeRelayout._debug_write(
                 state_path,
                 {
@@ -563,6 +644,7 @@ class IdeRelayout:
                     "geometry_source": IdeRelayout._geometry_source(
                         latest_geometry, forced_geometry, active_tuple
                     ),
+                    "tmux_options": debug_options,
                     "clients": IdeRelayout._client_geometries(sock),
                     "windows": debug_windows,
                 },

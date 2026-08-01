@@ -71,6 +71,11 @@ DEFAULT_SIDEBAR = {
 }
 
 
+DEFAULT_DIAGNOSTICS = {
+    "relayout_trace": False,
+}
+
+
 def _icon(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise UsageError(f"Config field {field!r} must be a non-empty string.")
@@ -225,6 +230,21 @@ def _key_config(config: dict[str, Any]) -> dict[str, Any]:
     return {"prefix": prefix, "bindings": bindings}
 
 
+def _diagnostics_config(config: dict[str, Any]) -> dict[str, Any]:
+    incoming = config.get("diagnostics") or {}
+    if not isinstance(incoming, dict):
+        raise UsageError("Config field 'diagnostics' must be an object.")
+    unknown = sorted(set(incoming) - set(DEFAULT_DIAGNOSTICS))
+    if unknown:
+        raise UsageError(f"Unknown diagnostics options: {', '.join(unknown)}.")
+    out = dict(DEFAULT_DIAGNOSTICS)
+    for key, value in incoming.items():
+        if not isinstance(value, bool):
+            raise UsageError(f"Config field 'diagnostics.{key}' must be true or false.")
+        out[key] = value
+    return out
+
+
 def load_config(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -296,6 +316,7 @@ def normalized_snapshot(
         "theme": theme,
         "sidebar": _sidebar_config(config, sidebar_registry),
         "keys": _key_config(config),
+        "diagnostics": _diagnostics_config(config),
         "editor": {"argv": _editor_argv(config)},
         "drivers": drivers,
         "sources": config.get("sources") or {},

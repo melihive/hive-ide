@@ -71,6 +71,9 @@ editor, `HIVE_IDE_EDITOR`, `micro` when installed, then `less`:
     "prefix": "C-a",
     "bindings": {"next": "n", "previous": "p", "error": null}
   },
+  "diagnostics": {
+    "relayout_trace": false
+  },
   "sidebar": {
     "state": "activity",
     "slots": ["plan", "checkout", "ci"],

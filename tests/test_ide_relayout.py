@@ -264,11 +264,20 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
 
     def fake_tmux(_socket, args):
         if args[:2] == ["list-clients", "-F"]:
-            if args[-1].endswith("#{client_tty}"):
-                return "100\t254\t67\t/dev/pts/1\n200\t58\t24\t/dev/pts/2"
+            if args[-1].endswith("#{client_session}"):
+                return (
+                    "100\t254\t67\t/dev/pts/1\thive-ide\n"
+                    "200\t58\t24\t/dev/pts/2\thive-ide"
+                )
             return "100\t254\t67\n200\t58\t24"
+        if args[:2] == ["list-panes", "-t"]:
+            return "%1\t0\tsidebar\t24\t67\t0\t66\t1\tpython3"
         if args[:2] == ["list-windows", "-a"]:
             return "@0"
+        if args[:2] == ["show-options", "-gv"] and args[-1] == "status":
+            return "on"
+        if args[:2] == ["show-window-options", "-gv"] and args[-1] == "window-size":
+            return "latest"
         if args[-1] == "#{window_width}\t#{window_height}":
             return "254\t67"
         if args[-1] == "#{window_width}":
@@ -313,7 +322,57 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
     assert event["forced_geometry"] == [254, 67]
     assert event["latest_geometry"] == [58, 24]
     assert event["clients"][1]["tty"] == "/dev/pts/2"
+    assert event["clients"][1]["session"] == "hive-ide"
+    assert event["tmux_options"]["server.status"] == "on"
+    assert event["tmux_options"]["window.window-size"] == "latest"
     assert event["windows"][0]["resized_to"] == [58, 24]
+    assert event["windows"][0]["panes_before"][0]["role"] == "sidebar"
+
+
+def test_debug_trace_can_be_enabled_from_config_snapshot(tmp_path, monkeypatch):
+    state = tmp_path / "layout.json"
+    (tmp_path / "config.json").write_text(
+        json.dumps({"diagnostics": {"relayout_trace": True}}),
+        encoding="utf-8",
+    )
+
+    def fake_tmux(_socket, args):
+        if args[:2] == ["list-windows", "-a"]:
+            return "@0"
+        if args[-1] == "#{window_width}\t#{window_height}":
+            return "180\t40"
+        if args[-1] == "#{window_width}":
+            return "180"
+        if args[-1] == "#{window_zoomed_flag}":
+            return "0"
+        if args[-1] == "#{window_id}":
+            return "@0"
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fake_tmux)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "snap",
+            str(state),
+        ]
+    ) == 0
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "layout.json.debug.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert events[0]["event"] == "relayout"
 
 
 def test_debug_trace_is_silent_without_enable_file(tmp_path, monkeypatch):
