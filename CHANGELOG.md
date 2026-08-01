@@ -12,6 +12,11 @@ All notable changes to `hive-ide` will be documented in this file.
   per-window geometry decisions so transient tmux resize jitter can be
   diagnosed without affecting normal users.
 
+### Fixed
+
+- Coalesced bursty snap relayout hooks so transient one-row client height
+  changes do not resize every IDE window at intermediate heights.
+
 ## [1.0.33] - 2026-07-31
 
 ### Fixed

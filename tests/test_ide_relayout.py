@@ -351,6 +351,31 @@ def test_debug_trace_is_silent_without_enable_file(tmp_path, monkeypatch):
     assert not (tmp_path / "layout.json.debug.jsonl").exists()
 
 
+def test_snap_coalescer_allows_the_latest_resize_event(tmp_path):
+    state = str(tmp_path / "layout.json")
+    slept = []
+
+    assert not IdeRelayout._coalesced_by_newer_snap(
+        state,
+        sleep=lambda seconds: slept.append(seconds),
+        now=123.0,
+    )
+    assert slept == [IdeRelayout.SNAP_DEBOUNCE_SECONDS]
+
+
+def test_snap_coalescer_skips_an_event_superseded_during_debounce(tmp_path):
+    state = str(tmp_path / "layout.json")
+
+    def newer_snap(_seconds):
+        Path(state + ".pending").write_text("newer", encoding="utf-8")
+
+    assert IdeRelayout._coalesced_by_newer_snap(
+        state,
+        sleep=newer_snap,
+        now=123.0,
+    )
+
+
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
 
 def test_breaker_ledger_prunes_to_the_window():

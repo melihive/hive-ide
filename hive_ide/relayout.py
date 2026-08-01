@@ -238,6 +238,35 @@ class IdeRelayout:
     BREAKER_MAX = 200         # invocations allowed inside the window
     BREAKER_WINDOW = 30.0     # seconds — long on purpose; see above
     BREAKER_KEEP = 512        # ledger cap, so the file can't grow without bound
+    SNAP_DEBOUNCE_SECONDS = 0.08
+
+    @staticmethod
+    def _coalesced_by_newer_snap(
+        path: str,
+        *,
+        sleep=time.sleep,
+        now: float | None = None,
+    ) -> bool:
+        """True when a newer snap arrived during the short resize debounce.
+
+        tmux can report intermediate client heights during terminal chrome/status
+        transitions (`67 → 68 → 69` within ~100ms). Applying every intermediate size
+        makes all windows visibly jump by one row. Snap relayout is idempotent and
+        client-size driven, so the right behavior is last event wins.
+        """
+        if not path:
+            return False
+        token = f"{now if now is not None else time.time()}:{os.getpid()}"
+        marker = path + ".pending"
+        try:
+            os.makedirs(os.path.dirname(marker) or ".", exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(token)
+            sleep(IdeRelayout.SNAP_DEBOUNCE_SECONDS)
+            with open(marker, encoding="utf-8") as fh:
+                return fh.read() != token
+        except OSError:
+            return False
 
     @staticmethod
     def _breaker_hits(prev: list, now: float, window: float) -> list:
@@ -384,6 +413,18 @@ class IdeRelayout:
         forced_geometry: tuple[int, int] | None = None
         if len(argv) > 11 and argv[10].isdigit() and argv[11].isdigit():
             forced_geometry = (int(argv[10]), int(argv[11]))
+        if mode == "snap" and IdeRelayout._coalesced_by_newer_snap(state_path):
+            IdeRelayout._debug_write(
+                state_path,
+                {
+                    "event": "relayout-skipped",
+                    "reason": "newer-snap",
+                    "socket": sock,
+                    "mode": mode,
+                    "forced_geometry": list(forced_geometry) if forced_geometry else None,
+                },
+            )
+            return 0
         # Bail BEFORE touching any pane: if something is feeding this script, every
         # resize-pane below is more fuel. Stderr (not stdout) so a `run-shell -b` hook
         # doesn't paint the message over a pane.
