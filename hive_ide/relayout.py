@@ -43,6 +43,28 @@ class IdeRelayout:
     """Snap the sidebar/plan columns back to fixed widths across every ide window."""
 
     @staticmethod
+    def _debug_enabled(path: str) -> bool:
+        if os.environ.get("HIVE_IDE_RELAYOUT_DEBUG", "").lower() in {"1", "true", "yes"}:
+            return True
+        return bool(path) and os.path.exists(path + ".debug.enable")
+
+    @staticmethod
+    def _debug_write(path: str, event: dict) -> None:
+        if not IdeRelayout._debug_enabled(path):
+            return
+        payload = {
+            "ts": time.time(),
+            "pid": os.getpid(),
+            **event,
+        }
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path + ".debug.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, sort_keys=True) + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
     def _tmux(socket: str, args: list[str]) -> str:
         r = subprocess.run(["tmux", "-L", socket, *args], capture_output=True, text=True)
         return r.stdout.strip() if r.returncode == 0 else ""
@@ -128,6 +150,45 @@ class IdeRelayout:
             if latest is None or candidate[0] > latest[0]:
                 latest = candidate
         return (latest[1], latest[2]) if latest else None
+
+    @staticmethod
+    def _client_geometries(socket: str) -> list[dict]:
+        rows = IdeRelayout._tmux(
+            socket,
+            [
+                "list-clients",
+                "-F",
+                "#{client_activity}\t#{client_width}\t#{client_height}\t#{client_tty}",
+            ],
+        )
+        clients = []
+        for line in rows.splitlines():
+            activity, width, height, tty = (
+                line.split("\t") if line.count("\t") == 3 else ("", "", "", "")
+            )
+            clients.append(
+                {
+                    "activity": int(activity) if activity.isdigit() else activity,
+                    "width": int(width) if width.isdigit() else width,
+                    "height": int(height) if height.isdigit() else height,
+                    "tty": tty,
+                }
+            )
+        return clients
+
+    @staticmethod
+    def _geometry_source(
+        latest: tuple[int, int] | None,
+        forced: tuple[int, int] | None,
+        active: tuple[int, int] | None,
+    ) -> str:
+        if latest:
+            return "latest-client"
+        if forced:
+            return "hook-client"
+        if active:
+            return "active-window"
+        return "unknown"
 
     @staticmethod
     def _plan_width(width: int, side: int, pw: int, pmin: int, amin: int, apref: int) -> int:
@@ -355,14 +416,16 @@ class IdeRelayout:
             sock,
             ["display-message", "-p", "#{window_width}\t#{window_height}"],
         ).split("\t")
-        latest_geometry = IdeRelayout._latest_client_geometry(sock)
-        canonical = latest_geometry or forced_geometry or (
+        active_tuple = (
             (int(active_geometry[0]), int(active_geometry[1]))
             if len(active_geometry) == 2
             and active_geometry[0].isdigit()
             and active_geometry[1].isdigit()
             else None
         )
+        latest_geometry = IdeRelayout._latest_client_geometry(sock)
+        canonical = latest_geometry or forced_geometry or active_tuple
+        debug_windows = []
         remembered_plan = pw
         for win in IdeRelayout._tmux(sock, ["list-windows", "-a", "-F", "#{window_id}"]).split():
             raw_geometry = IdeRelayout._tmux(
@@ -377,6 +440,8 @@ class IdeRelayout:
                 continue
             width = int(raw_geometry[0])
             height = int(raw_geometry[1])
+            before = (width, height)
+            resized_to = None
             if canonical and (width, height) != canonical:
                 IdeRelayout._tmux(
                     sock,
@@ -391,6 +456,8 @@ class IdeRelayout:
                     ],
                 )
                 width = canonical[0]
+                height = canonical[1]
+                resized_to = canonical
             if width < sw + amin + pmin:
                 roles = IdeRelayout._order_role_panes(sock, win)
                 active_pane = IdeRelayout._tmux(
@@ -402,6 +469,15 @@ class IdeRelayout:
                 # 4-column sidebar rail beside a squeezed plan is unusable on a phone.
                 # The ladder must not unzoom here or it would fight that hook.
                 IdeRelayout._set_zoom(sock, win, True, active_pane or roles.get("agent"))
+                debug_windows.append(
+                    {
+                        "window": win,
+                        "before": list(before),
+                        "after": [width, height],
+                        "resized_to": list(resized_to) if resized_to else None,
+                        "mode": "mobile-zoom",
+                    }
+                )
                 continue
             side = sw
             plan = IdeRelayout._plan_width(width, side, pw, pmin, amin, apref)
@@ -421,6 +497,34 @@ class IdeRelayout:
             IdeRelayout._tmux(
                 sock,
                 ["resize-pane", "-t", roles.get("plan", f"{win}.2"), "-x", str(plan)],
+            )
+            debug_windows.append(
+                {
+                    "window": win,
+                    "before": list(before),
+                    "after": [width, height],
+                    "resized_to": list(resized_to) if resized_to else None,
+                    "mode": "three-pane",
+                    "sidebar": side,
+                    "plan": plan,
+                }
+            )
+        if IdeRelayout._debug_enabled(state_path):
+            IdeRelayout._debug_write(
+                state_path,
+                {
+                    "event": "relayout",
+                    "socket": sock,
+                    "mode": mode,
+                    "forced_geometry": list(forced_geometry) if forced_geometry else None,
+                    "active_geometry": list(active_tuple) if active_tuple else None,
+                    "latest_geometry": list(latest_geometry) if latest_geometry else None,
+                    "geometry_source": IdeRelayout._geometry_source(
+                        latest_geometry, forced_geometry, active_tuple
+                    ),
+                    "clients": IdeRelayout._client_geometries(sock),
+                    "windows": debug_windows,
+                },
             )
         # Remember which window is active NOW: on the next switch it is the one being LEFT,
         # so its columns are where a manual drag would live. A `snap` (real terminal resize)

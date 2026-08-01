@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added opt-in relayout debug tracing. Creating `layout.json.debug.enable`
+  beside a workspace's layout state, or setting `HIVE_IDE_RELAYOUT_DEBUG=1`,
+  writes JSONL records with hook, client, active-window, latest-client, and
+  per-window geometry decisions so transient tmux resize jitter can be
+  diagnosed without affecting normal users.
+
 ## [1.0.33] - 2026-07-31
 
 ### Fixed
