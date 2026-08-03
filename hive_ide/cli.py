@@ -365,8 +365,11 @@ def _current_record(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any
 
 def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
+    _, config = _context(args)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(store, frame).repair(record)
+    repair = SessionRepair(
+        store, frame, registry=configured_registry(config)
+    ).repair(record)
     if not repair["ok"]:
         raise UsageError(
             "; ".join(repair["errors"]) or "The current session needs repair."
@@ -451,7 +454,7 @@ def cmd_attach_conversation(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_working_dir_set(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
+    store, config = _context(args)
     record = _session(store, args.session_id, None)
     directory = Path(args.working_dir).expanduser().resolve()
     if not directory.is_dir():
@@ -460,7 +463,9 @@ def cmd_working_dir_set(args: argparse.Namespace) -> dict[str, Any]:
     record["last_active"] = utc_now()
     store.write("sessions", record["id"], record)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(store, frame).repair(record)
+    repair = SessionRepair(
+        store, frame, registry=configured_registry(config)
+    ).repair(record)
     frame.bind_keys()
     return {
         "session_id": record["id"],
@@ -470,10 +475,12 @@ def cmd_working_dir_set(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
+    store, config = _context(args)
     record = _session(store, args.session_id, None)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(store, frame).repair(record)
+    repair = SessionRepair(
+        store, frame, registry=configured_registry(config)
+    ).repair(record)
     if not repair["ok"]:
         return {"session_id": record["id"], "rebuilt": False, "repair": repair}
     record = _session(store, args.session_id, None)
@@ -573,9 +580,9 @@ def cmd_clear_error(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_repair(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
+    store, config = _context(args)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(store, frame)
+    repair = SessionRepair(store, frame, registry=configured_registry(config))
     if args.all:
         result = repair.repair_all(apply=not args.dry_run)
     else:
@@ -677,7 +684,9 @@ def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:
     )
     store.write("sessions", record["id"], record)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(store, frame).repair(record)
+    repair = SessionRepair(
+        store, frame, registry=configured_registry(config)
+    ).repair(record)
     frame.bind_keys()
     return {"session_id": record["id"], "source": record["source"], "repair": repair}
 
@@ -738,7 +747,11 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         config=config,
     )
     store.write_path(store.config_snapshot_path(), snapshot)
-    SessionRepair(store, Frame(store, socket=args.tmux_socket)).repair_all()
+    SessionRepair(
+        store,
+        Frame(store, socket=args.tmux_socket),
+        registry=registry,
+    ).repair_all()
     return Frame(store, socket=args.tmux_socket).open(no_attach=args.no_attach)
 
 

@@ -1079,6 +1079,44 @@ def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
     assert updated["host"]["repair"]["previous_working_dir"] == str(missing.resolve())
 
 
+def test_repair_refreshes_resume_command_after_rehoming_working_dir(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = tmp_path / "gone"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE CODEX",
+        working_dir=missing,
+        source=_source(),
+        driver={
+            "id": "codex",
+            "label": "Codex",
+            "capabilities": ["launch", "resume", "status", "conversation_check"],
+            "launch_argv": ["codex", "resume", "-C", str(missing), "conversation-1"],
+            "resume": {"strategy": "conversation_id", "reference": "conversation-1"},
+        },
+    )
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {})
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert "driver: refreshed resume command for working_dir" in result["actions"]
+    updated = store.find_session(record["id"])
+    assert updated["working_dir"] == str(workspace.resolve())
+    assert updated["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "-C",
+        str(workspace.resolve()),
+        "conversation-1",
+    ]
+
+
 def test_repair_warns_for_live_agent_without_status_hooks(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1413,9 +1451,50 @@ def test_repair_dry_run_reports_deleted_sidebar_cwd(tmp_path, monkeypatch):
     assert result["actions"] == []
     assert result["warnings"] == [
         f"sidebar pane cwd no longer exists: {deleted} (deleted); "
-        "repair preserves the live pane, use force-rebuild only if "
-        "you intentionally want to restart it"
+        "repair will rebuild the window from the session record"
     ]
+
+
+def test_repair_rebuilds_window_with_deleted_pane_cwd(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    deleted = tmp_path / "removed-worktree"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=f"sidebar\t{deleted} (deleted)\nagent\t{workspace}\nplan\t{workspace}\n",
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: rebuilt for deleted pane cwd"]
+    assert rebuilt == [record["id"]]
 
 
 def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, capsys):
@@ -2858,18 +2937,23 @@ def test_working_dir_set_updates_metadata_without_rebuilding_live_window(
         name="LIVE",
         working_dir=workspace,
         source=_source(),
-        driver=_term(),
+        driver={
+            "id": "codex",
+            "label": "Codex",
+            "capabilities": ["launch", "resume", "status", "conversation_check"],
+            "launch_argv": ["codex", "resume", "-C", str(workspace), "conversation-1"],
+            "resume": {"strategy": "conversation_id", "reference": "conversation-1"},
+        },
     )
-    repairs = []
     monkeypatch.setattr(
         "hive_ide.cli.Frame.rebuild",
         lambda _frame, _record: pytest.fail("working-dir-set must not rebuild"),
     )
     monkeypatch.setattr(
-        "hive_ide.cli.SessionRepair.repair",
-        lambda _repair, session: repairs.append(session["working_dir"])
-        or {"ok": True, "actions": [], "warnings": [], "errors": []},
+        "hive_ide.cli.Frame.ensure",
+        lambda _frame, session: session["working_dir"] == str(linked.resolve()),
     )
+    monkeypatch.setattr("hive_ide.cli.Frame.windows", lambda _frame: {})
     monkeypatch.setattr("hive_ide.cli.Frame.bind_keys", lambda _frame: None)
 
     assert (
@@ -2890,8 +2974,15 @@ def test_working_dir_set_updates_metadata_without_rebuilding_live_window(
     )
 
     capsys.readouterr()
-    assert store.find_session(record["id"])["working_dir"] == str(linked.resolve())
-    assert repairs == [str(linked.resolve())]
+    updated = store.find_session(record["id"])
+    assert updated["working_dir"] == str(linked.resolve())
+    assert updated["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "-C",
+        str(linked.resolve()),
+        "conversation-1",
+    ]
 
 
 def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):

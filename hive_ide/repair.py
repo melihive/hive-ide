@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import SCHEMA_VERSION
+from .drivers import DriverRegistry
 from .errors import HiveIdeError
 from .frame import Frame
 from .health import SessionHealth
@@ -18,9 +19,16 @@ class SessionRepair:
     COMPONENT = "repair"
     REQUIRED_PANE_ROLES = ("sidebar", "agent", "plan")
 
-    def __init__(self, store: StateStore, frame: Frame):
+    def __init__(
+        self,
+        store: StateStore,
+        frame: Frame,
+        *,
+        registry: DriverRegistry | None = None,
+    ):
         self.store = store
         self.frame = frame
+        self.registry = registry or DriverRegistry()
 
     def repair(self, record: dict[str, Any], *, apply: bool = True) -> dict[str, Any]:
         session_id = record["id"]
@@ -48,6 +56,8 @@ class SessionRepair:
                 repaired["host"] = host
                 repaired["working_dir"] = fallback
                 self.store.write("sessions", session_id, repaired)
+
+        self._refresh_driver_resume(repaired, actions, apply=apply)
 
         source = repaired.get("source") or {}
         interpreter = source.get("interpreter")
@@ -91,7 +101,11 @@ class SessionRepair:
                                 + ", ".join(still_missing)
                             )
                 elif pane_cwd_warnings:
-                    actions.append("window: pane cwd differs; live panes preserved")
+                    if self._has_deleted_pane_cwd(pane_cwd_warnings):
+                        self.frame.rebuild(repaired)
+                        actions.append("window: rebuilt for deleted pane cwd")
+                    else:
+                        actions.append("window: pane cwd differs; live panes preserved")
                 self._clear_repair_error(session_id)
             except HiveIdeError as exc:
                 errors.append(str(exc))
@@ -116,6 +130,38 @@ class SessionRepair:
         roles = self.frame.role_panes(record["id"])
         return tuple(role for role in self.REQUIRED_PANE_ROLES if role not in roles)
 
+    def _refresh_driver_resume(
+        self, record: dict[str, Any], actions: list[str], *, apply: bool
+    ) -> None:
+        driver_record = record.get("driver")
+        if not isinstance(driver_record, dict):
+            return
+        driver_id = driver_record.get("id")
+        resume = driver_record.get("resume")
+        reference = resume.get("reference") if isinstance(resume, dict) else None
+        if (
+            not isinstance(driver_id, str)
+            or not driver_id
+            or not isinstance(reference, str)
+            or not reference
+        ):
+            return
+        try:
+            driver = self.registry.get(driver_id)
+        except HiveIdeError:
+            return
+        refreshed = driver.resolve(
+            name=str(record.get("name") or ""),
+            working_dir=str(record.get("working_dir") or self.store.workspace_key),
+            conversation_reference=reference,
+        )
+        if refreshed.get("launch_argv") == driver_record.get("launch_argv"):
+            return
+        record["driver"] = refreshed
+        actions.append("driver: refreshed resume command for working_dir")
+        if apply:
+            self.store.write("sessions", record["id"], record)
+
     def repair_all(self, *, apply: bool = True) -> dict[str, Any]:
         results = [
             self.repair(record, apply=apply) for record in self.store.list("sessions")
@@ -125,6 +171,9 @@ class SessionRepair:
             "applied": apply,
             "sessions": results,
         }
+
+    def _has_deleted_pane_cwd(self, warnings: list[str]) -> bool:
+        return any("pane cwd no longer exists:" in warning for warning in warnings)
 
     def _pane_cwd_warnings(self, record: dict[str, Any]) -> list[str]:
         target = self.frame.windows().get(record["id"])
@@ -154,8 +203,7 @@ class SessionRepair:
             if shown_path.endswith(" (deleted)") or not Path(clean_path).is_dir():
                 warnings.append(
                     f"{label} pane cwd no longer exists: {shown_path}; "
-                    "repair preserves the live pane, use force-rebuild only if "
-                    "you intentionally want to restart it"
+                    "repair will rebuild the window from the session record"
                 )
             elif current != expected:
                 warnings.append(

@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `repair` now refreshes a session driver's stored resume command after a
+  working-directory repair, so Codex resumes do not keep `-C` pointed at a
+  deleted worktree after the session is re-homed.
+- `working-dir-set` now updates the saved driver resume command through the
+  configured driver registry instead of leaving stale launch arguments behind.
+- `repair` now rebuilds windows whose live panes are sitting in a deleted cwd,
+  rather than preserving panes that cannot accept new turns.
+
 ## [1.0.36] - 2026-08-01
 
 ### Fixed
