@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.37] - 2026-08-04
+
 ### Fixed
 
 - `repair` now refreshes a session driver's stored resume command after a
