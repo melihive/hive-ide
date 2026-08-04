@@ -66,7 +66,7 @@ class IdeHook:
         if not sys.stdin.isatty():
             try:
                 return json.loads(sys.stdin.read() or "{}")
-            except ValueError:
+            except (OSError, ValueError):
                 return {}
         return {}
 
@@ -187,31 +187,41 @@ class IdeHook:
         action: str,
         payload: dict,
     ) -> None:
-        agent_id = payload.get("agent_id")
-        if not isinstance(agent_id, str) or not agent_id:
-            return
         status = store.read("status", session_id) or {}
-        ids = (
-            (status.get("subagents") or {}).get("ids")
-            if isinstance(status.get("subagents"), dict)
-            else []
-        )
+        subagents = status.get("subagents") if isinstance(status.get("subagents"), dict) else {}
+        ids = subagents.get("ids") or []
         active = {value for value in ids if isinstance(value, str) and value}
+        anonymous = subagents.get("anonymous_running")
+        anonymous_running = anonymous if isinstance(anonymous, int) and anonymous > 0 else 0
+        agent_id = payload.get("agent_id")
         if action == "start":
-            active.add(agent_id)
+            if isinstance(agent_id, str) and agent_id:
+                active.add(agent_id)
+            else:
+                anonymous_running += 1
         else:
-            active.discard(agent_id)
+            if isinstance(agent_id, str) and agent_id:
+                active.discard(agent_id)
+            else:
+                anonymous_running = max(0, anonymous_running - 1)
+        running = len(active) + anonymous_running
         observed_at = utc_now()
+        subagent_status: dict[str, object] = {
+            "running": running,
+            "ids": sorted(active),
+        }
+        if anonymous_running:
+            subagent_status["anonymous_running"] = anonymous_running
         document = {
             **status,
             "schema_version": 1,
             "session_id": session_id,
             "workspace_key": store.workspace_key,
-            "state": status.get("state") or ("working" if active else "waiting"),
+            "state": status.get("state") or ("working" if running else "waiting"),
             "driver": driver,
             "observed_at": observed_at,
-            "subagents": {"running": len(active), "ids": sorted(active)},
-            "subagents_running": len(active),
+            "subagents": subagent_status,
+            "subagents_running": running,
         }
         store.write("status", session_id, document)
         record = store.find_session(session_id)

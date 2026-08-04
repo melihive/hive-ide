@@ -1974,6 +1974,72 @@ def test_codex_subagent_hooks_maintain_structured_count(tmp_path, monkeypatch):
     assert status["subagents_running"] == 0
 
 
+def test_codex_subagent_hooks_count_anonymous_lifecycle_events(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+    def send(action: str) -> None:
+        assert (
+            IdeHook.main(
+                [
+                    "--state-home",
+                    str(store.home),
+                    "--subagent",
+                    action,
+                    "--driver",
+                    "codex",
+                ]
+            )
+            == 0
+        )
+
+    send("start")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {
+        "running": 1,
+        "ids": [],
+        "anonymous_running": 1,
+    }
+    assert status["subagents_running"] == 1
+
+    send("start")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {
+        "running": 2,
+        "ids": [],
+        "anonymous_running": 2,
+    }
+    assert status["subagents_running"] == 2
+
+    send("stop")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {
+        "running": 1,
+        "ids": [],
+        "anonymous_running": 1,
+    }
+    assert status["subagents_running"] == 1
+
+    send("stop")
+    status = store.read("status", record["id"])
+    assert status["subagents"] == {"running": 0, "ids": []}
+    assert status["subagents_running"] == 0
+
+
 def test_plan_set_resolves_relative_plan_from_workspace_when_working_dir_is_missing(
     tmp_path, capsys
 ):
