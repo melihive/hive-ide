@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.40] - 2026-08-04
+
+### Fixed
+
+- Relayout now repairs swapped sidebar/agent panes by live pane index with
+  bounded retries, avoiding tmux-version-dependent pane ordering during
+  resize and snap repair.
+
 ## [1.0.39] - 2026-08-04
 
 ### Fixed
