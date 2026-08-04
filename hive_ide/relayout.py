@@ -127,18 +127,47 @@ class IdeRelayout:
         return out
 
     @staticmethod
+    def _pane_rows(socket: str, win: str) -> list[tuple[int, str, str]]:
+        rows = IdeRelayout._tmux(
+            socket,
+            ["list-panes", "-t", win, "-F", "#{pane_index}\t#{pane_id}\t#{@hive_ide_pane}"],
+        )
+        out: list[tuple[int, str, str]] = []
+        for line in rows.splitlines():
+            index, pane_id, role = (
+                line.split("\t") if line.count("\t") == 2 else ("", "", "")
+            )
+            if index.isdigit() and pane_id:
+                out.append((int(index), pane_id, role))
+        return out
+
+    @staticmethod
     def _order_role_panes(socket: str, win: str) -> dict[str, str]:
         desired = ("sidebar", "agent", "plan")
-        roles = IdeRelayout._role_panes(socket, win)
+        rows = IdeRelayout._pane_rows(socket, win)
+        roles = {role: pane_id for _, pane_id, role in rows if role}
         if set(desired) - set(roles):
             return roles
-        for index, role in enumerate(desired):
-            roles = IdeRelayout._role_panes(socket, win)
-            indices = IdeRelayout._pane_indices(socket, win)
-            role_pane = roles.get(role)
-            index_pane = indices.get(index)
-            if role_pane and index_pane and role_pane != index_pane:
-                IdeRelayout._tmux(socket, ["swap-pane", "-s", role_pane, "-t", index_pane])
+        for _ in range(len(desired)):
+            changed = False
+            rows = IdeRelayout._pane_rows(socket, win)
+            by_index = {index: (pane_id, role) for index, pane_id, role in rows}
+            by_role = {role: index for index, _, role in rows if role}
+            for index, role in enumerate(desired):
+                current = by_index.get(index)
+                if current and current[1] == role:
+                    continue
+                source_index = by_role.get(role)
+                if source_index is None:
+                    continue
+                IdeRelayout._tmux(
+                    socket,
+                    ["swap-pane", "-d", "-s", f"{win}.{source_index}", "-t", f"{win}.{index}"],
+                )
+                changed = True
+                break
+            if not changed:
+                break
         return IdeRelayout._role_panes(socket, win)
 
     @staticmethod

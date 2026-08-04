@@ -188,17 +188,58 @@ class Frame:
                 rows[int(index)] = pane_id
         return rows
 
+    def _pane_rows(self, window_id: str) -> list[tuple[int, str, str]]:
+        result = self.tmux(
+            [
+                "list-panes",
+                "-t",
+                window_id,
+                "-F",
+                "#{pane_index}\t#{pane_id}\t#{@hive_ide_pane}",
+            ]
+        )
+        if result.returncode != 0:
+            return []
+        rows: list[tuple[int, str, str]] = []
+        for line in result.stdout.splitlines():
+            index, pane_id, role = (
+                line.split("\t") if line.count("\t") == 2 else ("", "", "")
+            )
+            if index.isdigit() and pane_id:
+                rows.append((int(index), pane_id, role))
+        return rows
+
     def _order_role_panes(self, window_id: str) -> dict[str, str]:
-        roles = self._role_panes_in_window(window_id)
+        rows = self._pane_rows(window_id)
+        roles = {role: pane_id for _, pane_id, role in rows if role}
         if set(self.PANE_ROLES) - set(roles):
             return roles
-        for index, role in enumerate(self.PANE_ROLES):
-            roles = self._role_panes_in_window(window_id)
-            indices = self._pane_indices(window_id)
-            role_pane = roles.get(role)
-            index_pane = indices.get(index)
-            if role_pane and index_pane and role_pane != index_pane:
-                self.tmux(["swap-pane", "-s", role_pane, "-t", index_pane])
+        for _ in range(len(self.PANE_ROLES)):
+            changed = False
+            rows = self._pane_rows(window_id)
+            by_index = {index: (pane_id, role) for index, pane_id, role in rows}
+            by_role = {role: index for index, _, role in rows if role}
+            for index, role in enumerate(self.PANE_ROLES):
+                current = by_index.get(index)
+                if current and current[1] == role:
+                    continue
+                source_index = by_role.get(role)
+                if source_index is None:
+                    continue
+                self.tmux(
+                    [
+                        "swap-pane",
+                        "-d",
+                        "-s",
+                        f"{window_id}.{source_index}",
+                        "-t",
+                        f"{window_id}.{index}",
+                    ]
+                )
+                changed = True
+                break
+            if not changed:
+                break
         return self._role_panes_in_window(window_id)
 
     def _module(
