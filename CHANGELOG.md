@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.39] - 2026-08-04
+
+### Fixed
+
+- Codex and Claude subagent lifecycle hooks without a structured child ID now
+  maintain a bounded anonymous running count, so IDE sidebar counts still update
+  when a driver emits start/stop events without a payload.
+
 ## [1.0.38] - 2026-08-04
 
 ### Fixed
