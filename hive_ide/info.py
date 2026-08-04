@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from .config import DEFAULT_KEYS, DEFAULT_SIDEBAR
+from .modal_io import wait_any_key
 from .sidebar_grid import SidebarGrid
 from .store import StateStore
 
@@ -174,12 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         lines = _keys(snapshot)
     print("\n  " + "\n  ".join(lines))
-    if sys.stdin.isatty():
-        print("\n  (press Enter to close)", end="", flush=True)
-        try:
-            sys.stdin.readline()
-        except OSError:
-            pass
+    wait_any_key()
     return 0
 
 

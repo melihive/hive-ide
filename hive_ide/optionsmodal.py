@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
+import select
 import subprocess
 import sys
 from pathlib import Path
@@ -24,12 +27,16 @@ except ImportError:
 class IdeOptionsModal:
     """One popup for common session maintenance actions."""
 
+    MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([mM])")
+    ACTION_ROW = 4
+
     ACTIONS = [
         ("chat", "current chat", "focus the agent pane"),
         ("plan", "current plan", "open or focus the plan pane"),
         ("agent", "change agent", "open the agent picker"),
         ("rename", "rename", "change the display label"),
         ("repair", "repair", "heal session state and redraw"),
+        ("archive", "archive", "close and move to archive"),
         ("card", "session info", "show the info modal"),
     ]
 
@@ -66,6 +73,11 @@ class IdeOptionsModal:
             return IdeNewModal._cli(
                 skill_dir,
                 ["--quiet", "repair", f"--session-id={session_id}", *socket_args],
+            )
+        if action == "archive":
+            return IdeNewModal._cli(
+                skill_dir,
+                ["--quiet", "archive", f"--session-id={session_id}", *socket_args],
             )
         if action == "rename":
             if not name:
@@ -154,11 +166,69 @@ class IdeOptionsModal:
         sys.stdout.flush()
 
     @staticmethod
+    def _mouse_selection(data: bytes, count: int) -> int | None:
+        match = IdeOptionsModal.MOUSE_RE.fullmatch(data)
+        if not match or match.group(4) != b"M":
+            return None
+        button = int(match.group(1))
+        if button != 0:
+            return None
+        row = int(match.group(3))
+        index = row - IdeOptionsModal.ACTION_ROW
+        return index if 0 <= index < count else None
+
+    @staticmethod
+    def _getkey(fd: int) -> str:
+        data = os.read(fd, 1)
+        if not data or data == b"\x03":
+            return "esc"
+        if data != b"\x1b":
+            if data in (b"\r", b"\n"):
+                return "enter"
+            if data in (b"\x7f", b"\x08"):
+                return "bs"
+            return data.decode("utf-8", "ignore") or "other"
+        r, _, _ = select.select([fd], [], [], IdeNewModal.ESC_PEEK_SECONDS)
+        if not r:
+            return "esc"
+        rest = os.read(fd, 1)
+        if rest == b"[":
+            r, _, _ = select.select([fd], [], [], IdeNewModal.ESC_PEEK_SECONDS)
+            code = os.read(fd, 1) if r else b""
+            if code == b"<":
+                report = bytearray(b"\x1b[<")
+                while len(report) < 32:
+                    r, _, _ = select.select([fd], [], [], IdeNewModal.ESC_PEEK_SECONDS)
+                    if not r:
+                        break
+                    chunk = os.read(fd, 1)
+                    report += chunk
+                    if chunk in (b"M", b"m"):
+                        break
+                picked = IdeOptionsModal._mouse_selection(
+                    bytes(report), len(IdeOptionsModal.ACTIONS)
+                )
+                return f"mouse:{picked}" if picked is not None else "other"
+            return {
+                b"A": "up",
+                b"B": "down",
+                b"C": "right",
+                b"D": "left",
+            }.get(code, "other")
+        if rest == b"O":
+            r, _, _ = select.select([fd], [], [], IdeNewModal.ESC_PEEK_SECONDS)
+            code = os.read(fd, 1) if r else b""
+            return {b"A": "up", b"B": "down", b"C": "right", b"D": "left"}.get(
+                code, "other"
+            )
+        return "esc"
+
+    @staticmethod
     def _rename_prompt(fd: int, record: dict, repo: str, sel: int) -> str | None:
         value = record.get("name") or ""
         while True:
             IdeOptionsModal._draw(record, repo, sel, value)
-            key = IdeNewModal._getkey(fd)
+            key = IdeOptionsModal._getkey(fd)
             if key == "esc":
                 return None
             if key == "enter":
@@ -212,7 +282,7 @@ class IdeOptionsModal:
         try:
             while True:
                 IdeOptionsModal._draw(record, repo, sel)
-                key = IdeNewModal._getkey(fd)
+                key = IdeOptionsModal._getkey(fd)
                 if key == "esc":
                     return 0
                 if key in ("up", "k"):
@@ -221,6 +291,9 @@ class IdeOptionsModal:
                 if key in ("down", "j"):
                     sel = (sel + 1) % len(IdeOptionsModal.ACTIONS)
                     continue
+                if key.startswith("mouse:"):
+                    sel = int(key.split(":", 1)[1])
+                    key = "enter"
                 if key.isdigit() and 1 <= int(key) <= len(IdeOptionsModal.ACTIONS):
                     sel = int(key) - 1
                     key = "enter"

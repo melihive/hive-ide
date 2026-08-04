@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
+from .modal_io import wait_any_key
 from .store import StateStore
 
 
@@ -30,12 +30,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n  {error['detail']}")
         if error.get("recovery"):
             print(f"\n  Recovery: {error['recovery']}")
-    if sys.stdin.isatty():
-        print("\n  (press Enter to close)", end="", flush=True)
-        try:
-            sys.stdin.readline()
-        except OSError:
-            pass
+    wait_any_key()
     return 0
 
 

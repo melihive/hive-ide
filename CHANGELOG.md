@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Read-only popups now close on any keypress instead of mixing Enter-only and
+  any-key behavior across info/help/error modals.
+- The session options modal now includes archive and supports mouse clicks on
+  action rows.
+
 ## [1.0.37] - 2026-08-04
 
 ### Fixed
