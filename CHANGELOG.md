@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.43] - 2026-08-06
+
 ### Fixed
 
 - Plan jump now targets the last completed checkbox when every checkbox in the
