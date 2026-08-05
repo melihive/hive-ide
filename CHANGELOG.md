@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.41] - 2026-08-05
+
 ### Fixed
 
 - Claude driver commands now propagate the IDE session display name with
