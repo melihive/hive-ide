@@ -178,14 +178,16 @@ def _create_adopted_session(
 ) -> dict[str, Any]:
     registry = configured_registry(config)
     driver = registry.get(conversation.driver_id)
-    session_name = " ".join((name or conversation.label).split())
+    session_name = _unique_session_name(
+        store, " ".join((name or conversation.label).split())
+    )
     resolved = driver.resolve(
         name=session_name,
         working_dir=conversation.working_dir,
         conversation_reference=conversation.reference,
     )
     record = store.create_session(
-        name=_unique_session_name(store, session_name),
+        name=session_name,
         working_dir=conversation.working_dir,
         source=resolve_source(
             source or config.get("default_source") or "stable",
@@ -326,7 +328,7 @@ def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_rename(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
+    store, config = _context(args)
     if existing := store.find_by_name(" ".join(args.name.split())):
         if existing["id"] != args.session_id:
             raise UsageError(f"Session {args.name!r} already exists in this workspace.")
@@ -335,6 +337,11 @@ def cmd_rename(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageError(f"No session with id {args.session_id}.")
     record["name"] = " ".join(args.name.split())
     record["last_active"] = utc_now()
+    SessionRepair(
+        store,
+        Frame(store, socket=_socket(store, args.tmux_socket)),
+        registry=configured_registry(config),
+    ).refresh_driver(record, [], apply=False)
     store.write("sessions", args.session_id, record)
     Frame(store, socket=_socket(store, args.tmux_socket)).rename(
         args.session_id, record["name"]

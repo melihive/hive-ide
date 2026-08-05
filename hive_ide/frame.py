@@ -529,7 +529,11 @@ class Frame:
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
             if driver.get("id") == "claude":
-                fallback = subprocess.run(["claude"], cwd=record["working_dir"])
+                fallback_argv = ["claude"]
+                name = " ".join(str(record.get("name") or "").split())
+                if name:
+                    fallback_argv.extend(["--name", name])
+                fallback = subprocess.run(fallback_argv, cwd=record["working_dir"])
                 if fallback.returncode == 0:
                     return {
                         "session_id": record["id"],

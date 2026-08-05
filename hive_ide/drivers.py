@@ -46,6 +46,7 @@ class CommandDriver:
         resume_strategy: str = "none",
         resume_argv: list[str] | None = None,
         resume_cwd_flag: str | None = None,
+        name_argv: list[str] | None = None,
         capabilities: tuple[str, ...] = ("launch",),
     ):
         self.id = driver_id
@@ -54,6 +55,7 @@ class CommandDriver:
         self.resume_strategy = resume_strategy
         self.resume_argv = resume_argv or []
         self.resume_cwd_flag = resume_cwd_flag
+        self.name_argv = name_argv or []
         self.capabilities = capabilities
 
     def detect(self) -> DriverAvailability:
@@ -64,13 +66,16 @@ class CommandDriver:
         self, *, name: str, working_dir: str, conversation_reference: str | None
     ) -> dict[str, Any]:
         launch = list(self.command)
+        launch.extend(self._name_argv(name))
         if conversation_reference and self.resume_strategy == "conversation_id":
             launch = list(self.resume_argv)
             if self.resume_cwd_flag:
                 launch.extend([self.resume_cwd_flag, working_dir])
             launch.append(conversation_reference)
+            launch.extend(self._name_argv(name))
         elif conversation_reference and self.resume_strategy == "workspace_continue":
             launch = list(self.resume_argv)
+            launch.extend(self._name_argv(name))
         return {
             "id": self.id,
             "label": self.label,
@@ -81,6 +86,12 @@ class CommandDriver:
             },
             "capabilities": list(self.capabilities),
         }
+
+    def _name_argv(self, name: str) -> list[str]:
+        clean = " ".join(name.split())
+        if not clean or not self.name_argv:
+            return []
+        return [*self.name_argv, clean]
 
     def conversation_exists(self, reference: str, working_dir: str) -> bool | None:
         return None
@@ -108,6 +119,7 @@ def bundled_drivers() -> dict[str, AgentDriver]:
             ["claude"],
             resume_strategy="conversation_id",
             resume_argv=["claude", "--resume"],
+            name_argv=["--name"],
             capabilities=("launch", "resume", "status", "conversation_check"),
         ),
         "codex": CommandDriver(

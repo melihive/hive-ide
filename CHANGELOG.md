@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Claude driver commands now propagate the IDE session display name with
+  `--name`, including new sessions, adopted conversations, driver switching,
+  rename, repair, and fresh fallback launches after a stale resume.
+
 ## [1.0.40] - 2026-08-04
 
 ### Fixed

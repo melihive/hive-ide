@@ -57,7 +57,7 @@ class SessionRepair:
                 repaired["working_dir"] = fallback
                 self.store.write("sessions", session_id, repaired)
 
-        self._refresh_driver_resume(repaired, actions, apply=apply)
+        self.refresh_driver(repaired, actions, apply=apply)
 
         source = repaired.get("source") or {}
         interpreter = source.get("interpreter")
@@ -130,7 +130,7 @@ class SessionRepair:
         roles = self.frame.role_panes(record["id"])
         return tuple(role for role in self.REQUIRED_PANE_ROLES if role not in roles)
 
-    def _refresh_driver_resume(
+    def refresh_driver(
         self, record: dict[str, Any], actions: list[str], *, apply: bool
     ) -> None:
         driver_record = record.get("driver")
@@ -139,12 +139,9 @@ class SessionRepair:
         driver_id = driver_record.get("id")
         resume = driver_record.get("resume")
         reference = resume.get("reference") if isinstance(resume, dict) else None
-        if (
-            not isinstance(driver_id, str)
-            or not driver_id
-            or not isinstance(reference, str)
-            or not reference
-        ):
+        if not isinstance(reference, str) or not reference:
+            reference = None
+        if not isinstance(driver_id, str) or not driver_id:
             return
         try:
             driver = self.registry.get(driver_id)
@@ -158,7 +155,7 @@ class SessionRepair:
         if refreshed.get("launch_argv") == driver_record.get("launch_argv"):
             return
         record["driver"] = refreshed
-        actions.append("driver: refreshed resume command for working_dir")
+        actions.append("driver: refreshed launch command")
         if apply:
             self.store.write("sessions", record["id"], record)
 

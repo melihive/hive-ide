@@ -163,6 +163,46 @@ def test_rename_archive_and_resume_keep_the_same_id_path(tmp_path, capsys):
     assert store.find_session(session_id)["name"] == "AFTER"
 
 
+def test_rename_refreshes_claude_display_name_in_launch_command(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BEFORE",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="BEFORE",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            store.workspace_key,
+            "rename",
+            "--session-id",
+            record["id"],
+            "--name",
+            "AFTER",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"] == [
+        "claude",
+        "--resume",
+        "conversation-1",
+        "--name",
+        "AFTER",
+    ]
+
+
 def test_cli_resume_repairs_and_selects_restored_session(tmp_path, monkeypatch, capsys):
     import hive_ide.cli as cli_module
 
@@ -606,6 +646,8 @@ def test_adopt_imports_claude_sessions_with_explicit_limit(tmp_path, capsys, mon
         "claude",
         "--resume",
         "22222222-2222-4222-8222-222222222222",
+        "--name",
+        "Hive Events Allowlist",
     ]
     assert newest["name"] == "Hive Events Allowlist"
     assert newest["host"]["adopted"]["updated_at"] == "2026-07-28T11:00:00.000Z"
@@ -718,7 +760,13 @@ def test_create_adopt_imports_most_recent_claude_session(tmp_path, capsys, monke
     ) == 0
     record = json.loads(capsys.readouterr().out)
     assert record["driver"]["resume"]["reference"] == "new-session"
-    assert record["driver"]["launch_argv"] == ["claude", "--resume", "new-session"]
+    assert record["driver"]["launch_argv"] == [
+        "claude",
+        "--resume",
+        "new-session",
+        "--name",
+        "Untitled Claude session",
+    ]
 
 
 def test_create_adopt_can_target_named_claude_session(tmp_path, capsys, monkeypatch):
@@ -867,8 +915,11 @@ def test_bundled_driver_capabilities_are_explicit():
     drivers = bundled_drivers()
     assert set(drivers) == {"claude", "codex", "antigravity", "term"}
     assert drivers["claude"].resolve(
+        name="X", working_dir="/tmp", conversation_reference=None
+    )["launch_argv"] == ["claude", "--name", "X"]
+    assert drivers["claude"].resolve(
         name="X", working_dir="/tmp", conversation_reference="abc"
-    )["launch_argv"] == ["claude", "--resume", "abc"]
+    )["launch_argv"] == ["claude", "--resume", "abc", "--name", "X"]
     assert drivers["codex"].resolve(
         name="X", working_dir="/tmp", conversation_reference="abc"
     )["launch_argv"] == ["codex", "resume", "-C", "/tmp", "abc"]
@@ -1004,7 +1055,13 @@ def test_hook_does_not_overwrite_existing_conversation_reference(tmp_path, monke
     updated = store.find_session(record["id"])
     assert updated["driver"]["resume"]["reference"] == "manual-1"
     assert updated["agents"]["resume_ids"]["claude"] == "manual-1"
-    assert updated["driver"]["launch_argv"] == ["claude", "--resume", "manual-1"]
+    assert updated["driver"]["launch_argv"] == [
+        "claude",
+        "--resume",
+        "manual-1",
+        "--name",
+        "HOOK",
+    ]
 
 
 def test_hook_relay_uses_tmux_server_when_available(tmp_path, monkeypatch):
@@ -1105,7 +1162,7 @@ def test_repair_refreshes_resume_command_after_rehoming_working_dir(
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
 
     assert result["ok"] is True
-    assert "driver: refreshed resume command for working_dir" in result["actions"]
+    assert "driver: refreshed launch command" in result["actions"]
     updated = store.find_session(record["id"])
     assert updated["working_dir"] == str(workspace.resolve())
     assert updated["driver"]["launch_argv"] == [
@@ -1777,6 +1834,8 @@ def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatc
         "claude",
         "--resume",
         "claude-original",
+        "--name",
+        "DM HIVE",
     ]
     assert claude_record["agents"]["resume_ids"]["codex"] == "codex-fallback"
 
@@ -2194,7 +2253,7 @@ def test_current_chat_allows_plain_agent_without_conversation_reference(
     result = frame.current_chat(record)
 
     assert result["opened"] == "terminal"
-    assert calls == [(["claude"], {"cwd": str(workspace)})]
+    assert calls == [(["claude", "--name", "CHAT"], {"cwd": str(workspace)})]
 
 
 def test_current_chat_selects_plain_agent_pane_without_conversation_reference(
@@ -2252,7 +2311,7 @@ def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        if argv == ["claude", "--resume", "conversation-1"]:
+        if argv == ["claude", "--resume", "conversation-1", "--name", "CHAT"]:
             return SimpleNamespace(returncode=1)
         return SimpleNamespace(returncode=0)
 
@@ -2265,8 +2324,8 @@ def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch
         "opened": "claude",
     }
     assert calls == [
-        (["claude", "--resume", "conversation-1"], {"cwd": str(workspace)}),
-        (["claude"], {"cwd": str(workspace)}),
+        (["claude", "--resume", "conversation-1", "--name", "CHAT"], {"cwd": str(workspace)}),
+        (["claude", "--name", "CHAT"], {"cwd": str(workspace)}),
     ]
 
 
@@ -2290,7 +2349,7 @@ def test_current_chat_never_uses_claude_agents_when_resume_fails(tmp_path, monke
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        if argv == ["claude", "--resume", "stale-conversation"]:
+        if argv == ["claude", "--resume", "stale-conversation", "--name", "CHAT"]:
             return SimpleNamespace(returncode=1)
         return SimpleNamespace(returncode=0)
 
@@ -2299,8 +2358,8 @@ def test_current_chat_never_uses_claude_agents_when_resume_fails(tmp_path, monke
 
     assert result["opened"] == "claude"
     assert calls == [
-        (["claude", "--resume", "stale-conversation"], {"cwd": str(workspace)}),
-        (["claude"], {"cwd": str(workspace)}),
+        (["claude", "--resume", "stale-conversation", "--name", "CHAT"], {"cwd": str(workspace)}),
+        (["claude", "--name", "CHAT"], {"cwd": str(workspace)}),
     ]
 
 
@@ -2321,7 +2380,7 @@ def test_claude_agent_pane_uses_normal_resume_command(tmp_path):
 
     command = Frame._agent_command(record)
 
-    assert "claude --resume conversation-1; exec" in command
+    assert "claude --resume conversation-1 --name CHAT; exec" in command
     assert "claude agents" not in command
     assert command.endswith('; exec "${SHELL:-/bin/sh}"')
 
