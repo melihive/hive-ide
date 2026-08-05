@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.42] - 2026-08-05
+
 ### Fixed
 
 - Switching drivers now rehomes the session working directory to the workspace
