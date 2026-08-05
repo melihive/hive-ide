@@ -1858,6 +1858,52 @@ def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatc
     ]
 
 
+def test_switch_driver_rehomes_worktree_cwd_to_workspace_root(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    worktree = workspace / "worktree" / "feature"
+    worktree.mkdir(parents=True)
+    store = StateStore(tmp_path / "state", workspace)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setattr(
+        "hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}"
+    )
+    monkeypatch.setattr("hive_ide.cli.Frame.rebuild", lambda _self, _record: None)
+    record = store.create_session(
+        name="FEATURE",
+        working_dir=worktree,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="FEATURE",
+            working_dir=str(worktree),
+            conversation_reference="claude-original",
+        ),
+    )
+    record["agents"]["resume_ids"]["codex"] = "codex-fallback"
+    store.write("sessions", record["id"], record)
+
+    assert main(
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+        ]
+    ) == 0
+    switched = json.loads(capsys.readouterr().out)
+
+    assert switched["working_dir"] == str(workspace.resolve())
+    assert switched["driver"]["launch_argv"] == [
+        "codex",
+        "resume",
+        "-C",
+        str(workspace.resolve()),
+        "codex-fallback",
+    ]
+
+
 def test_switch_driver_handoff_records_context_and_reaches_pane_env(
     tmp_path, monkeypatch, capsys
 ):

@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Switching drivers now rehomes the session working directory to the workspace
+  root before resolving and rebuilding the new driver, so a previous worktree
+  cwd cannot leak into the new Claude or Codex session.
+
 ## [1.0.41] - 2026-08-05
 
 ### Fixed

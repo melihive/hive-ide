@@ -652,6 +652,16 @@ def _socket(store: StateStore, explicit: str | None) -> str | None:
     return tmux.get("socket") if isinstance(tmux, dict) else None
 
 
+def _driver_switch_working_dir(store: StateStore, record: dict[str, Any]) -> str:
+    workspace = Path(store.workspace_key).expanduser()
+    if workspace.is_dir():
+        return str(workspace.resolve())
+    working_dir = Path(str(record.get("working_dir") or "")).expanduser()
+    if working_dir.is_dir():
+        return str(working_dir.resolve())
+    return store.workspace_key
+
+
 def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     record = _session(store, args.session_id, None)
@@ -668,6 +678,7 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(previous_driver, str)
         else None
     )
+    record["working_dir"] = _driver_switch_working_dir(store, record)
     record["driver"] = driver.resolve(
         name=record["name"],
         working_dir=record["working_dir"],
