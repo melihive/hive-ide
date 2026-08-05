@@ -415,6 +415,16 @@ class Frame:
         )
         if todo is not None:
             return todo + 1
+        done = next(
+            (
+                index
+                for index, text in reversed(list(enumerate(lines)))
+                if text.lstrip().lower().startswith("- [x]")
+            ),
+            None,
+        )
+        if done is not None:
+            return done + 1
         tasks = next(
             (
                 index

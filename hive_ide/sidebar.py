@@ -467,6 +467,30 @@ class IdeSidebar:
         return IdeLayout.entry_rows(n_sessions, height, archive_mode)
 
     @staticmethod
+    def _viewport(
+        sessions: list[dict],
+        cursor: int,
+        height: int,
+        entry_rows: int,
+        archive_mode: bool = False,
+    ) -> tuple[list[dict], int, int]:
+        """Visible session slice, plus cursor and start offset.
+
+        The sidebar must never print more rows than its pane height. When a workspace has
+        more sessions than one-row density can fit, keep the full cursor over the full
+        list but render only the slice around it.
+        """
+        capacity = IdeLayout.session_capacity(height, entry_rows, archive_mode)
+        if capacity <= 0 or not sessions:
+            return [], 0, 0
+        if len(sessions) <= capacity:
+            return sessions, cursor, 0
+        cursor = max(0, min(cursor, len(sessions) - 1))
+        start = min(max(0, cursor - capacity // 2), len(sessions) - capacity)
+        end = start + capacity
+        return sessions[start:end], cursor - start, start
+
+    @staticmethod
     def _wheel_delta(m: "re.Match[bytes]") -> int:
         """Cursor movement for one SGR mouse report: +1 wheel-up, -1 wheel-down, else 0.
 
@@ -1176,16 +1200,32 @@ class IdeSidebar:
                     cursor_session_id=cursor_session_id,
                 )
                 width = IdeSidebar._width()
+                height = IdeSidebar._height()
                 # Density for THIS draw — and the divisor the click math must reuse, so a
                 # short pane can't desync rendering from hit-testing.
-                entry_rows = IdeSidebar._entry_rows(len(names), IdeSidebar._height(),
-                                                    archive_mode)
-                lines = IdeSidebar.render_lines(skill_dir, sessions, repo, active_session_id,
-                                                cursor, width, query, focused, on_plus,
-                                                on_filter, on_archive, archive_mode,
-                                                entry_rows, sidebar_settings,
-                                                provider_registry,
-                                                IdeSidebar._tmux_alerts())
+                entry_rows = IdeSidebar._entry_rows(len(names), height, archive_mode)
+                visible_sessions, visible_cursor, visible_start = IdeSidebar._viewport(
+                    sessions, cursor, height, entry_rows, archive_mode
+                )
+                visible_session_ids = [s.get("id") or "" for s in visible_sessions]
+                lines = IdeSidebar.render_lines(
+                    skill_dir,
+                    visible_sessions,
+                    repo,
+                    active_session_id,
+                    visible_cursor,
+                    width,
+                    query,
+                    focused,
+                    on_plus,
+                    on_filter,
+                    on_archive,
+                    archive_mode,
+                    entry_rows,
+                    sidebar_settings,
+                    provider_registry,
+                    IdeSidebar._tmux_alerts(),
+                )[:height]
                 # Each line carries its own erase-to-EOL (see _row).
                 sys.stdout.write(IdeSidebar.NO_WRAP + IdeSidebar.HOME
                                  + "\n".join(lines) + IdeSidebar.CLEAR_BELOW)
@@ -1239,16 +1279,19 @@ class IdeSidebar:
                     focused = True
                     options_index = IdeSidebar._options_index(click)
                     if options_index is not None:
-                        if not archive_mode and 0 <= options_index < len(session_ids):
+                        if (
+                            not archive_mode
+                            and 0 <= options_index < len(visible_session_ids)
+                        ):
                             IdeSidebar._launch_options_modal(
                                 skill_dir,
                                 IdeSidebar._repo_of(skill_dir),
-                                session_ids[options_index],
+                                visible_session_ids[options_index],
                             )
                         continue
                     if archive_mode:
-                        if 0 <= click < len(session_ids) and IdeSidebar._resume(
-                            skill_dir, session_ids[click]
+                        if 0 <= click < len(visible_session_ids) and IdeSidebar._resume(
+                            skill_dir, visible_session_ids[click]
                         ):
                             archive_mode, query, cursor = False, "", 0   # resumed → back to active
                             cursor_session_id = ""
@@ -1263,8 +1306,9 @@ class IdeSidebar:
                     elif click == IdeSidebar.ARCHIVE_HIT:
                         archive_mode, on_archive, on_filter, query, cursor = True, False, False, "", 0
                         cursor_session_id = ""
-                    elif 0 <= click < len(names):
-                        cursor, on_plus, on_filter, on_archive, query = click, False, False, False, ""
+                    elif 0 <= click < len(visible_session_ids):
+                        cursor = visible_start + click
+                        on_plus, on_filter, on_archive, query = False, False, False, ""
                         cursor_session_id = session_ids[cursor]
                         if IdeSidebar._switch(session_ids[cursor], skill_dir):
                             focused, cursor_session_id = IdeSidebar._after_activation(

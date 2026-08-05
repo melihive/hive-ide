@@ -90,6 +90,13 @@ def test_entry_rows_degrades_and_never_returns_zero():
     assert IdeLayout.entry_rows(50, 5) == 1                     # pathological still usable
 
 
+def test_session_capacity_accounts_for_header_and_footer():
+    assert IdeLayout.session_capacity(40, 3) == 11
+    assert IdeLayout.session_capacity(12, 1) == 7
+    assert IdeLayout.session_capacity(4, 1) == 0
+    assert IdeLayout.session_capacity(7, 1, archive_mode=True) == 3
+
+
 def test_consumers_alias_rather_than_redefine():
     """The skill and sidebar must expose the SAME values as the owner — proving the
     aliases are live, not stale copies that happen to match today."""

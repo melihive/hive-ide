@@ -112,6 +112,15 @@ class IdeLayout:
         return 1
 
     @classmethod
+    def session_capacity(
+        cls, height: int, entry_rows: int, archive_mode: bool = False
+    ) -> int:
+        """Maximum visible session rows for a pane at the chosen density."""
+        footer = cls.FOOTER_ROWS_ARCHIVE if archive_mode else cls.FOOTER_ROWS
+        budget = height - cls.HEADER_ROWS - footer
+        return max(0, budget // max(1, entry_rows))
+
+    @classmethod
     def session_row(cls, index: int, entry_rows: int) -> int:
         """The 0-based screen row where session `index` draws its NAME line."""
         return cls.HEADER_ROWS + index * entry_rows

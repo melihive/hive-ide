@@ -1147,3 +1147,27 @@ def test_entry_rows_choice_always_fits_the_rendered_block(tmp_path):
             # pane over, but the sessions must never be the part that overflows
             assert IdeSidebar.HEADER_ROWS + n * er <= max(height, IdeSidebar.HEADER_ROWS + n)
             assert len(lines) > 0
+
+
+def test_crowded_sidebar_viewport_keeps_render_inside_pane(tmp_path):
+    height = 14
+    sessions = _sessions(30)
+    cursor = 20
+    entry_rows = IdeSidebar._entry_rows(len(sessions), height)
+    visible, visible_cursor, start = IdeSidebar._viewport(
+        sessions, cursor, height, entry_rows
+    )
+    lines = IdeSidebar.render_lines(
+        tmp_path,
+        visible,
+        "/workspace/example",
+        "id-20",
+        visible_cursor,
+        20,
+        entry_rows=entry_rows,
+    )[:height]
+
+    assert len(lines) <= height
+    assert start <= cursor < start + len(visible)
+    assert any("example" in line for line in lines[:2])
+    assert any("S20" in line for line in lines)

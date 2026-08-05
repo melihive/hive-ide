@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Plan jump now targets the last completed checkbox when every checkbox in the
+  linked plan is already done.
+- Crowded sidebars now render a fitting viewport instead of scrolling the repo
+  header off-screen when there are more sessions than visible rows.
+
 ## [1.0.42] - 2026-08-05
 
 ### Fixed

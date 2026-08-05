@@ -2231,6 +2231,26 @@ def test_plan_focus_line_targets_first_unfinished_checkbox(tmp_path):
     assert Frame.plan_focus_line(plan) == 6
 
 
+def test_plan_focus_line_targets_last_finished_checkbox_when_all_done(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "\n".join(
+            [
+                "# Plan",
+                "",
+                "## Tasks",
+                "",
+                "- [x] First done task",
+                "- [X] Last done task",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert Frame.plan_focus_line(plan) == 6
+
+
 def test_current_chat_uses_recorded_resume_command_outside_frame(
     tmp_path, monkeypatch
 ):
