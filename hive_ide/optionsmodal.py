@@ -39,6 +39,17 @@ class IdeOptionsModal:
         ("archive", "archive", "close and move to archive"),
         ("card", "session info", "show the info modal"),
     ]
+    DRIVER_RENAME_ACTIONS = [
+        ("driver-rename", "rename driver", "send /rename when agent is idle"),
+    ]
+
+    @staticmethod
+    def _actions(record: dict) -> list[tuple[str, str, str]]:
+        actions = list(IdeOptionsModal.ACTIONS)
+        driver = (record.get("driver") or {}).get("id")
+        if driver in {"claude", "codex"}:
+            actions[4:4] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
+        return actions
 
     @staticmethod
     def _command(
@@ -89,6 +100,16 @@ class IdeOptionsModal:
                     "rename",
                     f"--session-id={session_id}",
                     f"--name={name}",
+                    *socket_args,
+                ],
+            )
+        if action == "driver-rename":
+            return IdeNewModal._cli(
+                skill_dir,
+                [
+                    "--quiet",
+                    "driver-rename",
+                    f"--session-id={session_id}",
                     *socket_args,
                 ],
             )
@@ -145,12 +166,13 @@ class IdeOptionsModal:
     def _draw(record: dict, repo: str, sel: int, rename_value: str = "") -> None:
         M = IdeNewModal
         driver = (record.get("driver") or {}).get("id") or "term"
+        actions = IdeOptionsModal._actions(record)
         o = [M.CLR, f"  {M.BOLD}Session options{M.RST}\n"]
         o.append(
             f"  {M.NAME}{record.get('name') or '?'}{M.RST}"
             f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}\n\n"
         )
-        for i, (_action, label, note) in enumerate(IdeOptionsModal.ACTIONS):
+        for i, (_action, label, note) in enumerate(actions):
             arrow = "▸" if i == sel else " "
             if i == sel:
                 o.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}\n")
@@ -178,7 +200,7 @@ class IdeOptionsModal:
         return index if 0 <= index < count else None
 
     @staticmethod
-    def _getkey(fd: int) -> str:
+    def _getkey(fd: int, *, action_count: int | None = None) -> str:
         data = os.read(fd, 1)
         if not data or data == b"\x03":
             return "esc"
@@ -206,7 +228,7 @@ class IdeOptionsModal:
                     if chunk in (b"M", b"m"):
                         break
                 picked = IdeOptionsModal._mouse_selection(
-                    bytes(report), len(IdeOptionsModal.ACTIONS)
+                    bytes(report), action_count or len(IdeOptionsModal.ACTIONS)
                 )
                 return f"mouse:{picked}" if picked is not None else "other"
             return {
@@ -282,24 +304,27 @@ class IdeOptionsModal:
         try:
             while True:
                 IdeOptionsModal._draw(record, repo, sel)
-                key = IdeOptionsModal._getkey(fd)
+                actions = IdeOptionsModal._actions(record)
+                if sel >= len(actions):
+                    sel = len(actions) - 1
+                key = IdeOptionsModal._getkey(fd, action_count=len(actions))
                 if key == "esc":
                     return 0
                 if key in ("up", "k"):
-                    sel = (sel - 1) % len(IdeOptionsModal.ACTIONS)
+                    sel = (sel - 1) % len(actions)
                     continue
                 if key in ("down", "j"):
-                    sel = (sel + 1) % len(IdeOptionsModal.ACTIONS)
+                    sel = (sel + 1) % len(actions)
                     continue
                 if key.startswith("mouse:"):
                     sel = int(key.split(":", 1)[1])
                     key = "enter"
-                if key.isdigit() and 1 <= int(key) <= len(IdeOptionsModal.ACTIONS):
+                if key.isdigit() and 1 <= int(key) <= len(actions):
                     sel = int(key) - 1
                     key = "enter"
                 if key != "enter":
                     continue
-                action = IdeOptionsModal.ACTIONS[sel][0]
+                action = actions[sel][0]
                 if action == "agent":
                     return IdeAgentModal.main(
                         [

@@ -35,6 +35,7 @@ WORKSPACE_MUTATIONS = frozenset(
         "attach-conversation",
         "clear-error",
         "create",
+        "driver-rename",
         "force-rebuild",
         "open",
         "plan-set",
@@ -55,6 +56,7 @@ WORKSPACE_MUTATIONS = frozenset(
 QUIET_SUCCESS_COMMANDS = frozenset(
     {
         "chat",
+        "driver-rename",
         "plan",
     }
 )
@@ -406,6 +408,14 @@ def cmd_current_chat(args: argparse.Namespace) -> dict[str, Any]:
         with store.mutation_lock():
             store.write("sessions", record["id"], record)
     return Frame(store, socket=_socket(store, args.tmux_socket)).current_chat(record)
+
+
+def cmd_driver_rename(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    record = _session(store, args.session_id, None)
+    return Frame(store, socket=_socket(store, args.tmux_socket)).driver_rename(
+        record, name=args.name
+    )
 
 
 def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
@@ -876,6 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
         "chat": "Focus or resume the current session's agent pane.",
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
+        "driver-rename": "Send the IDE display name into a supported live driver pane.",
         "working-dir-set": "Move a session to an existing working directory.",
         "force-rebuild": "Force replace one tmux window from its session record.",
         "relayout": "Reapply or adopt the tmux frame geometry.",
@@ -966,6 +977,12 @@ def build_parser() -> argparse.ArgumentParser:
     current_chat.add_argument("--session-id")
     current_chat.add_argument("--tmux-socket")
     current_chat.set_defaults(handler=cmd_current_chat)
+
+    driver_rename = command("driver-rename")
+    driver_rename.add_argument("--session-id", required=True)
+    driver_rename.add_argument("--name")
+    driver_rename.add_argument("--tmux-socket")
+    driver_rename.set_defaults(handler=cmd_driver_rename)
 
     plan = command("plan-set")
     plan.add_argument("--session-id", required=True)

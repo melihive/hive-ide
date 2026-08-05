@@ -547,6 +547,36 @@ class Frame:
             "opened": "terminal",
         }
 
+    def driver_rename(
+        self, record: dict[str, Any], *, name: str | None = None
+    ) -> dict[str, Any]:
+        driver = record.get("driver") or {}
+        driver_id = driver.get("id")
+        display_name = " ".join(str(name or record.get("name") or "").split())
+        if not display_name:
+            raise UsageError("A session display name is required.")
+        if driver_id not in {"claude", "codex"}:
+            raise UsageError(
+                "Interactive driver rename is currently supported only for Claude and Codex."
+            )
+        pane_id = self.role_panes(record["id"]).get("agent")
+        if not pane_id:
+            raise UsageError("The session has no live agent pane to rename.")
+        result = self.tmux(
+            ["send-keys", "-l", "-t", pane_id, f"/rename {display_name}"]
+        )
+        if result.returncode != 0:
+            raise HiveIdeError(result.stderr.strip() or "Could not send driver rename.")
+        result = self.tmux(["send-keys", "-t", pane_id, "Enter"])
+        if result.returncode != 0:
+            raise HiveIdeError(result.stderr.strip() or "Could not send driver rename.")
+        return {
+            "session_id": record["id"],
+            "driver": driver_id,
+            "name": display_name,
+            "sent": "/rename",
+        }
+
     def _clear_consumed_handoff(self, record: dict[str, Any]) -> None:
         if not isinstance(record.get("handoff"), dict):
             return

@@ -9,6 +9,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Claude driver commands now propagate the IDE session display name with
   `--name`, including new sessions, adopted conversations, driver switching,
   rename, repair, and fresh fallback launches after a stale resume.
+- The session options modal now exposes an explicit driver-name sync action for
+  Claude and Codex that sends `/rename <IDE session name>` to the live agent
+  pane when the user knows it is idle.
 
 ## [1.0.40] - 2026-08-04
 

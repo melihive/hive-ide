@@ -10,6 +10,17 @@ def test_options_modal_offers_session_info_action():
     assert not any(action == "rebuild" for action, _label, _note in IdeOptionsModal.ACTIONS)
 
 
+def test_options_modal_offers_driver_rename_for_claude_and_codex():
+    codex_actions = IdeOptionsModal._actions({"driver": {"id": "codex"}})
+    claude_actions = IdeOptionsModal._actions({"driver": {"id": "claude"}})
+    term_actions = IdeOptionsModal._actions({"driver": {"id": "term"}})
+
+    expected = ("driver-rename", "rename driver", "send /rename when agent is idle")
+    assert expected in codex_actions
+    assert expected in claude_actions
+    assert not any(action == "driver-rename" for action, _label, _note in term_actions)
+
+
 def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
     calls = []
 
@@ -27,6 +38,10 @@ def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
     assert (
         IdeOptionsModal._command(tmp_path, "session-id", "rename", name="NEW NAME")
         == (True, "")
+    )
+    assert IdeOptionsModal._command(tmp_path, "session-id", "driver-rename") == (
+        True,
+        "",
     )
 
     assert calls == [
@@ -60,6 +75,12 @@ def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
             "rename",
             "--session-id=session-id",
             "--name=NEW NAME",
+            "--tmux-socket=socket",
+        ],
+        [
+            "--quiet",
+            "driver-rename",
+            "--session-id=session-id",
             "--tmux-socket=socket",
         ],
     ]
