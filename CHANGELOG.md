@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.44] - 2026-08-06
+
 ### Fixed
 
 - Driver handoff now passes the handoff prompt into resumed Claude and Codex
