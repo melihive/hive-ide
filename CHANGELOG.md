@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.45] - 2026-08-06
+
 ### Fixed
 
 - Driver conversation references are now owned by one active IDE session per
