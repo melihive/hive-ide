@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import SCHEMA_VERSION
+from .agents import AgentResumeState
 from .drivers import DriverRegistry
 from .errors import HiveIdeError
 from .frame import Frame
@@ -57,6 +58,7 @@ class SessionRepair:
                 repaired["working_dir"] = fallback
                 self.store.write("sessions", session_id, repaired)
 
+        self._remove_duplicate_conversation_refs(repaired, actions, warnings, apply=apply)
         self.refresh_driver(repaired, actions, apply=apply)
 
         source = repaired.get("source") or {}
@@ -129,6 +131,60 @@ class SessionRepair:
             return ()
         roles = self.frame.role_panes(record["id"])
         return tuple(role for role in self.REQUIRED_PANE_ROLES if role not in roles)
+
+    def _remove_duplicate_conversation_refs(
+        self,
+        record: dict[str, Any],
+        actions: list[str],
+        warnings: list[str],
+        *,
+        apply: bool,
+    ) -> None:
+        agents_data = record.get("agents")
+        resume_ids = (
+            agents_data.get("resume_ids") if isinstance(agents_data, dict) else None
+        )
+        if not isinstance(resume_ids, dict):
+            return
+        current_driver = record.get("driver") if isinstance(record.get("driver"), dict) else {}
+        current_driver_id = current_driver.get("id")
+        current_resume = current_driver.get("resume") if isinstance(current_driver, dict) else {}
+        current_reference = (
+            current_resume.get("reference") if isinstance(current_resume, dict) else None
+        )
+        changed = False
+        for driver_id, reference in list(resume_ids.items()):
+            if not isinstance(driver_id, str) or not isinstance(reference, str):
+                continue
+            owner = self.store.find_conversation_owner(
+                driver_id=driver_id,
+                reference=reference,
+                exclude_session_id=record["id"],
+            )
+            if owner is None:
+                continue
+            AgentResumeState(record).forget(driver_id)
+            changed = True
+            actions.append(
+                "driver: removed duplicate "
+                f"{driver_id} conversation ref owned by {owner.get('name')}"
+            )
+            if current_driver_id == driver_id and current_reference == reference:
+                warnings.append(
+                    f"active {driver_id} conversation ref belonged to "
+                    f"{owner.get('name')}; next launch will start without that ref"
+                )
+                try:
+                    driver = self.registry.get(driver_id)
+                except HiveIdeError:
+                    continue
+                record["driver"] = driver.resolve(
+                    name=str(record.get("name") or ""),
+                    working_dir=str(record.get("working_dir") or self.store.workspace_key),
+                    conversation_reference=None,
+                )
+        if changed and apply:
+            self.store.write("sessions", record["id"], record)
 
     def refresh_driver(
         self, record: dict[str, Any], actions: list[str], *, apply: bool

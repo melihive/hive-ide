@@ -451,6 +451,16 @@ def cmd_attach_conversation(args: argparse.Namespace) -> dict[str, Any]:
     driver_id = args.driver or (record.get("driver") or {}).get("id")
     if not driver_id:
         raise UsageError("The session has no driver to attach.")
+    owner = store.find_conversation_owner(
+        driver_id=driver_id,
+        reference=args.reference,
+        exclude_session_id=record["id"],
+    )
+    if owner is not None:
+        raise UsageError(
+            f"Driver {driver_id!r} conversation {args.reference!r} is already "
+            f"attached to session {owner.get('name')!r} ({owner.get('id')})."
+        )
     driver = configured_registry(config).get(driver_id)
     exists = driver.conversation_exists(args.reference, record["working_dir"])
     if exists is False:
@@ -558,7 +568,17 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
     record = store.find_session(args.session_id)
     if record is not None:
         agents = AgentResumeState(record)
-        agents.remember(args.driver, args.conversation_reference)
+        owner = (
+            store.find_conversation_owner(
+                driver_id=args.driver,
+                reference=args.conversation_reference,
+                exclude_session_id=args.session_id,
+            )
+            if args.driver and args.conversation_reference
+            else None
+        )
+        if owner is None:
+            agents.remember(args.driver, args.conversation_reference)
         if (record.get("driver") or {}).get("id") == args.driver:
             agents.mark_active(args.driver)
         record["last_active"] = document["observed_at"]
@@ -662,6 +682,26 @@ def _driver_switch_working_dir(store: StateStore, record: dict[str, Any]) -> str
     return store.workspace_key
 
 
+def _available_switch_reference(
+    store: StateStore,
+    record: dict[str, Any],
+    agents: AgentResumeState,
+    driver_id: str,
+) -> str | None:
+    reference = agents.reference_for(driver_id)
+    if not reference:
+        return None
+    owner = store.find_conversation_owner(
+        driver_id=driver_id,
+        reference=reference,
+        exclude_session_id=record["id"],
+    )
+    if owner is None:
+        return reference
+    agents.forget(driver_id)
+    return None
+
+
 def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     record = _session(store, args.session_id, None)
@@ -672,7 +712,7 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageError(f"Driver {args.driver!r} is unavailable: {availability.detail}.")
     previous_driver = (record.get("driver") or {}).get("id")
     agents = AgentResumeState(record)
-    reference = agents.reference_for(args.driver)
+    reference = _available_switch_reference(store, record, agents, args.driver)
     previous_reference = (
         agents.reference_for(previous_driver)
         if isinstance(previous_driver, str)

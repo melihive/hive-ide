@@ -42,6 +42,10 @@ class AgentResumeState:
         if reference:
             self.resume_ids[driver_id] = reference
 
+    def forget(self, driver_id: str | None) -> None:
+        if driver_id:
+            self.resume_ids.pop(driver_id, None)
+
     def reference_for(self, driver_id: str) -> str | None:
         reference = self.resume_ids.get(driver_id)
         return reference if isinstance(reference, str) and reference else None

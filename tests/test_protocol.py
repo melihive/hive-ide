@@ -1064,6 +1064,55 @@ def test_hook_does_not_overwrite_existing_conversation_reference(tmp_path, monke
     ]
 
 
+def test_hook_does_not_claim_conversation_owned_by_another_session(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["codex"]
+    owner = store.create_session(
+        name="HIVE IDE PYPI",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="HIVE IDE PYPI",
+            working_dir=str(workspace),
+            conversation_reference="shared-codex",
+        ),
+    )
+    target = store.create_session(
+        name="HIVE DRIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="HIVE DRIVE", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", target["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "codex",
+            '{"thread-id":"shared-codex"}',
+        ]
+    ) == 0
+
+    status = store.read("status", target["id"])
+    assert status["conversation_reference"] == "shared-codex"
+    updated = store.find_session(target["id"])
+    assert "codex" not in updated.get("agents", {}).get("resume_ids", {})
+    assert updated["driver"]["resume"]["reference"] is None
+    assert store.find_session(owner["id"])["driver"]["resume"]["reference"] == "shared-codex"
+
+
 def test_hook_relay_uses_tmux_server_when_available(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1856,6 +1905,97 @@ def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatc
         str(workspace),
         "codex-fallback",
     ]
+
+
+def test_switch_driver_does_not_resume_another_sessions_conversation(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setattr("hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}")
+    codex = bundled_drivers()["codex"]
+    claude = bundled_drivers()["claude"]
+    owner = store.create_session(
+        name="HIVE IDE PYPI",
+        working_dir=workspace,
+        source=_source(),
+        driver=codex.resolve(
+            name="HIVE IDE PYPI",
+            working_dir=str(workspace),
+            conversation_reference="shared-codex",
+        ),
+    )
+    record = store.create_session(
+        name="HIVE DRIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=claude.resolve(
+            name="HIVE DRIVE",
+            working_dir=str(workspace),
+            conversation_reference="hive-drive-claude",
+        ),
+    )
+    record["agents"]["resume_ids"]["codex"] = "shared-codex"
+    store.write("sessions", record["id"], record)
+
+    assert main(
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+        ]
+    ) == 0
+    switched = json.loads(capsys.readouterr().out)
+    assert switched["driver"]["id"] == "codex"
+    assert switched["driver"]["resume"]["reference"] is None
+    assert switched["driver"]["launch_argv"] == ["codex"]
+    assert "codex" not in switched["agents"]["resume_ids"]
+    assert store.find_session(owner["id"])["driver"]["resume"]["reference"] == "shared-codex"
+
+
+def test_attach_conversation_rejects_reference_owned_by_another_session(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setattr("hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}")
+    codex = bundled_drivers()["codex"]
+    owner = store.create_session(
+        name="HIVE IDE PYPI",
+        working_dir=workspace,
+        source=_source(),
+        driver=codex.resolve(
+            name="HIVE IDE PYPI",
+            working_dir=str(workspace),
+            conversation_reference="shared-codex",
+        ),
+    )
+    target = store.create_session(
+        name="HIVE DRIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+
+    assert main(
+        [
+            "attach-conversation",
+            f"--session-id={target['id']}",
+            "--driver=codex",
+            "--reference=shared-codex",
+        ]
+    ) == 2
+    err = capsys.readouterr().err
+    assert "already attached to session 'HIVE IDE PYPI'" in err
+    assert store.find_session(owner["id"])["driver"]["resume"]["reference"] == "shared-codex"
 
 
 def test_switch_driver_rehomes_worktree_cwd_to_workspace_root(

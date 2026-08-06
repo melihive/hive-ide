@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Driver conversation references are now owned by one active IDE session per
+  driver. Switching agents no longer resumes another session's Claude/Codex
+  chat when a stale parked resume id points at a conversation already attached
+  elsewhere; repair removes those duplicate parked refs.
+
 ## [1.0.44] - 2026-08-06
 
 ### Fixed

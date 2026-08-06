@@ -202,6 +202,41 @@ class StateStore:
             raise StateError(f"Multiple sessions have the display name {name!r}.")
         return matches[0] if matches else None
 
+    def find_conversation_owner(
+        self,
+        *,
+        driver_id: str,
+        reference: str,
+        exclude_session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the active session that already owns a driver conversation.
+
+        Conversation IDs are driver-local identity. Two active IDE sessions
+        pointing at the same driver/ref pair means one sidebar item can resume
+        another session's chat, so callers must treat an owner as a conflict.
+        Archived sessions are excluded so users can intentionally adopt an old
+        conversation after archiving its IDE wrapper.
+        """
+        if not driver_id or not reference:
+            return None
+        for record in self.list("sessions"):
+            if record.get("id") == exclude_session_id:
+                continue
+            driver = record.get("driver") if isinstance(record, dict) else None
+            resume = driver.get("resume") if isinstance(driver, dict) else None
+            if (
+                isinstance(driver, dict)
+                and driver.get("id") == driver_id
+                and isinstance(resume, dict)
+                and resume.get("reference") == reference
+            ):
+                return record
+            agents = record.get("agents")
+            resume_ids = agents.get("resume_ids") if isinstance(agents, dict) else None
+            if isinstance(resume_ids, dict) and resume_ids.get(driver_id) == reference:
+                return record
+        return None
+
     def create_session(
         self,
         *,
