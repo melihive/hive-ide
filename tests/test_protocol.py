@@ -1970,6 +1970,51 @@ def test_switch_driver_handoff_records_context_and_reaches_pane_env(
     command = Frame._agent_command(switched)
     assert "HIVE IDE handoff" in command
     assert "You are now the active driver" in command
+    assert "Handoff prompt sent to claude" in command
+    assert "hive-ide: driver command failed" in command
+
+
+def test_switch_driver_handoff_prompt_is_passed_to_codex_resume(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setattr("hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}")
+    record = store.create_session(
+        name="HIVE DRIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="HIVE DRIVE",
+            working_dir=str(workspace),
+            conversation_reference="claude-original",
+        ),
+        plan={"path": "plans/hive-drive.md"},
+    )
+    record["agents"]["resume_ids"]["codex"] = "codex-original"
+    store.write("sessions", record["id"], record)
+
+    monkeypatch.setattr("hive_ide.cli.Frame.rebuild", lambda _self, _record: None)
+    assert main(
+        [
+            "switch-driver",
+            f"--session-id={record['id']}",
+            "--driver=codex",
+            "--handoff",
+        ]
+    ) == 0
+    switched = json.loads(capsys.readouterr().out)
+
+    argv = Frame._argv_with_handoff_prompt(switched["driver"]["launch_argv"], switched)
+    assert argv[:5] == ["codex", "resume", "-C", str(workspace), "codex-original"]
+    assert argv[-1] == switched["handoff"]["target_driver_prompt"]
+    command = Frame._agent_command(switched)
+    assert "Handoff prompt sent to codex" in command
+    assert "You are now the active driver" in command
 
 
 def test_handoff_is_consumed_after_successful_frame_build(tmp_path, monkeypatch):
@@ -2446,7 +2491,8 @@ def test_claude_agent_pane_uses_normal_resume_command(tmp_path):
 
     command = Frame._agent_command(record)
 
-    assert "claude --resume conversation-1 --name CHAT; exec" in command
+    assert "claude --resume conversation-1 --name CHAT; status=$?" in command
+    assert "hive-ide: driver command failed" in command
     assert "claude agents" not in command
     assert command.endswith('; exec "${SHELL:-/bin/sh}"')
 

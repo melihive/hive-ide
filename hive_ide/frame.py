@@ -322,6 +322,7 @@ class Frame:
     def _agent_command(cls, record: dict[str, Any]) -> str:
         driver = record.get("driver") or {}
         argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
+        argv = cls._argv_with_handoff_prompt(argv, record)
         command = shlex.join(argv)
         handoff = record.get("handoff")
         if isinstance(handoff, dict) and handoff:
@@ -337,12 +338,37 @@ class Frame:
             if handoff.get("active_task"):
                 lines.append(f"- active task: {handoff['active_task']}")
             if handoff.get("target_driver_prompt"):
-                lines.extend(["", str(handoff["target_driver_prompt"])])
+                driver_id = driver.get("id") or "driver"
+                lines.extend(
+                    [
+                        "",
+                        f"Handoff prompt sent to {driver_id}; agent should start below.",
+                    ]
+                )
             prefix = "printf %s " + shlex.quote("\n".join(lines) + "\n\n")
             command = f"{prefix}; {command}"
         return cls._interactive_command(
-            f"{command}; exec \"${{SHELL:-/bin/sh}}\""
+            f"{command}; status=$?; "
+            'if [ "$status" -ne 0 ]; then '
+            "printf '\\nhive-ide: driver command failed with exit %s\\n' \"$status\"; "
+            "fi; "
+            'exec "${SHELL:-/bin/sh}"'
         )
+
+    @classmethod
+    def _argv_with_handoff_prompt(
+        cls, argv: list[str], record: dict[str, Any]
+    ) -> list[str]:
+        handoff = record.get("handoff")
+        if not isinstance(handoff, dict):
+            return argv
+        prompt = handoff.get("target_driver_prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return argv
+        driver_id = (record.get("driver") or {}).get("id")
+        if driver_id not in {"claude", "codex"}:
+            return argv
+        return [*argv, prompt]
 
     def _plan_command(
         self, record: dict[str, Any], *, line: int | None = None

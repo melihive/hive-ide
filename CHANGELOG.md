@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Driver handoff now passes the handoff prompt into resumed Claude and Codex
+  sessions instead of only printing it before launch.
+- Agent panes now leave a visible `hive-ide` error message when the driver
+  command exits nonzero.
+
 ## [1.0.43] - 2026-08-06
 
 ### Fixed
