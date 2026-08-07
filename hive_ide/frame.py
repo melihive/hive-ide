@@ -150,6 +150,67 @@ class Frame:
             return {}
         return self._role_panes_in_window(window_id)
 
+    def pane_hive_ide_env(self, pane_id: str) -> dict[str, str]:
+        pid = self._pane_pid(pane_id)
+        if pid is None:
+            return {}
+        for candidate in reversed(self._process_tree(pid)):
+            env = self._process_env(candidate)
+            if any(key.startswith("HIVE_IDE_") for key in env):
+                return {
+                    key: value
+                    for key, value in env.items()
+                    if key.startswith("HIVE_IDE_")
+                }
+        return {}
+
+    def _pane_pid(self, pane_id: str) -> int | None:
+        result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        return int(value) if value.isdigit() else None
+
+    @staticmethod
+    def _process_tree(pid: int) -> list[int]:
+        seen: set[int] = set()
+        ordered: list[int] = []
+        stack = [pid]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            ordered.append(current)
+            children = Path(f"/proc/{current}/task/{current}/children")
+            try:
+                child_ids = [
+                    int(item)
+                    for item in children.read_text(encoding="utf-8").split()
+                    if item.isdigit()
+                ]
+            except OSError:
+                child_ids = []
+            stack.extend(child_ids)
+        return ordered
+
+    @staticmethod
+    def _process_env(pid: int) -> dict[str, str]:
+        try:
+            raw = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            return {}
+        env: dict[str, str] = {}
+        for item in raw.split(b"\0"):
+            if b"=" not in item:
+                continue
+            key, value = item.split(b"=", 1)
+            try:
+                env[key.decode("utf-8")] = value.decode("utf-8", errors="replace")
+            except UnicodeDecodeError:
+                continue
+        return env
+
     def _role_panes_in_window(self, window_id: str) -> dict[str, str]:
         result = self.tmux(
             [

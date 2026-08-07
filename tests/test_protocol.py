@@ -1603,6 +1603,67 @@ def test_repair_rebuilds_window_with_deleted_pane_cwd(tmp_path, monkeypatch):
     assert rebuilt == [record["id"]]
 
 
+def test_repair_rebuilds_window_with_stale_agent_environment(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    owner = store.create_session(
+        name="HIVE DRIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    record = store.create_session(
+        name="HIVE IDE PYPI",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "pane_hive_ide_env",
+        lambda _self, _pane_id: {"HIVE_IDE_SESSION_ID": owner["id"]},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: rebuilt for stale agent environment"]
+    assert result["warnings"] == [
+        "agent pane environment belongs to another IDE session: "
+        f"HIVE DRIVE ({owner['id']}); expected HIVE IDE PYPI ({record['id']}); "
+        "repair will rebuild the window"
+    ]
+    assert rebuilt == [record["id"]]
+
+
 def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

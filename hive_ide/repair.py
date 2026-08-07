@@ -77,6 +77,8 @@ class SessionRepair:
         warnings.extend(SessionHealth(self.store, self.frame).hook_warnings(repaired))
         pane_cwd_warnings = self._pane_cwd_warnings(repaired)
         warnings.extend(pane_cwd_warnings)
+        agent_env_warnings = self._agent_env_warnings(repaired)
+        warnings.extend(agent_env_warnings)
 
         if apply and not errors:
             try:
@@ -102,6 +104,9 @@ class SessionRepair:
                                 "window still missing panes: "
                                 + ", ".join(still_missing)
                             )
+                elif agent_env_warnings:
+                    self.frame.rebuild(repaired)
+                    actions.append("window: rebuilt for stale agent environment")
                 elif pane_cwd_warnings:
                     if self._has_deleted_pane_cwd(pane_cwd_warnings):
                         self.frame.rebuild(repaired)
@@ -264,6 +269,23 @@ class SessionRepair:
                     f"{shown_path} != {expected}; repair preserves the live pane"
                 )
         return warnings
+
+    def _agent_env_warnings(self, record: dict[str, Any]) -> list[str]:
+        pane_id = self.frame.role_panes(record["id"]).get("agent")
+        if not pane_id:
+            return []
+        env = self.frame.pane_hive_ide_env(pane_id)
+        observed = env.get("HIVE_IDE_SESSION_ID")
+        if not observed or observed == record["id"]:
+            return []
+        owner = self.store.find_session(observed)
+        owner_name = owner.get("name") if owner else None
+        owner_label = f"{owner_name} ({observed})" if owner_name else observed
+        return [
+            "agent pane environment belongs to another IDE session: "
+            f"{owner_label}; expected {record.get('name') or record['id']} "
+            f"({record['id']}); repair will rebuild the window"
+        ]
 
     def _record_error(
         self,

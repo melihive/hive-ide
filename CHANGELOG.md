@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Repair now detects a live agent pane whose process environment belongs to a
+  different IDE session and rebuilds the window, preventing hooks from updating
+  the wrong sidebar row after a stale shell snapshot restores old
+  `HIVE_IDE_*` variables.
+
 ## [1.0.45] - 2026-08-06
 
 ### Fixed
