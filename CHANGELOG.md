@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.46] - 2026-08-08
+
 ### Fixed
 
 - Repair now detects a live agent pane whose process environment belongs to a
