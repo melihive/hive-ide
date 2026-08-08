@@ -142,6 +142,29 @@ def test_merged_checkout_uses_explicit_subagent_count(tmp_path):
     assert provider.value(tmp_path, session) == "busy"
 
 
+def test_sidebar_still_reads_live_legacy_record_keys(tmp_path):
+    registry = SidebarProviderRegistry()
+    session = {
+        "id": "session-id",
+        "workspace_key": str(tmp_path / "workspace"),
+        "plan": {"path": "plans/current.md", "active_task": None},
+        "host": {
+            "hive": {
+                "legacy_record": {
+                    "plan": "plans/stale-dead-key.md",
+                    "plan_status": "merged",
+                    "subagents": {"running": 2},
+                    "worktree_merged": True,
+                }
+            }
+        },
+    }
+
+    assert registry.get("plan").value(tmp_path, session) == "done"
+    assert registry.get("subagents").value(tmp_path, session) == "count:2"
+    assert registry.get("checkout").value(tmp_path, session) == "busy"
+
+
 def test_subagent_count_renders_under_the_status_dot(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

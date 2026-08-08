@@ -121,6 +121,89 @@ def test_store_is_workspace_scoped_and_id_keyed(tmp_path):
     assert not list(first.collection("sessions").glob("*.tmp"))
 
 
+def test_store_drops_dead_legacy_plan_without_touching_live_legacy_keys(tmp_path):
+    store = StateStore(tmp_path, tmp_path / "workspace")
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "id": "session-id",
+        "name": "SESSION",
+        "workspace_key": store.workspace_key,
+        "working_dir": store.workspace_key,
+        "source": _source(),
+        "driver": _term(),
+        "plan": {"path": "plans/canonical.md", "active_task": None},
+        "host": {
+            "hive": {
+                "legacy_record": {
+                    "plan": "plans/stale.md",
+                    "plan_status": "merged",
+                    "subagents": {"running": 2},
+                    "worktree_merged": True,
+                }
+            }
+        },
+    }
+
+    store.write("sessions", record["id"], record)
+    stored = store.read("sessions", record["id"])
+
+    legacy = stored["host"]["hive"]["legacy_record"]
+    assert "plan" not in legacy
+    assert legacy["plan_status"] == "merged"
+    assert legacy["subagents"] == {"running": 2}
+    assert legacy["worktree_merged"] is True
+
+
+def test_repair_all_prunes_dead_legacy_plan_from_active_and_archive(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    active = store.create_session(
+        name="ACTIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    archived = store.create_session(
+        name="ARCHIVED",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    store.archive_session(archived["id"])
+    active["host"] = {
+        "hive": {
+            "legacy_record": {"plan": "stale-a.md", "subagents": {"running": 1}}
+        }
+    }
+    archived["host"] = {
+        "hive": {
+            "legacy_record": {"plan": "stale-b.md", "plan_status": "done"}
+        }
+    }
+    store.path("sessions", active["id"]).write_text(
+        json.dumps(active), encoding="utf-8"
+    )
+    store.path("archive", archived["id"]).write_text(
+        json.dumps(archived), encoding="utf-8"
+    )
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair_all()
+
+    assert result["ok"] is True
+    assert result["pruned_legacy_plans"] == [
+        {"collection": "sessions", "session_id": active["id"]},
+        {"collection": "archive", "session_id": archived["id"]},
+    ]
+    active_legacy = store.find_session(active["id"])["host"]["hive"]["legacy_record"]
+    archive_legacy = store.find_session(archived["id"], archived=True)["host"]["hive"]["legacy_record"]
+    assert "plan" not in active_legacy
+    assert active_legacy["subagents"] == {"running": 1}
+    assert "plan" not in archive_legacy
+    assert archive_legacy["plan_status"] == "done"
+
+
 def test_rename_archive_and_resume_keep_the_same_id_path(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1183,6 +1266,39 @@ def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
     assert updated["working_dir"] == str(workspace.resolve())
     assert updated["last_active"] == original_last_active
     assert updated["host"]["repair"]["previous_working_dir"] == str(missing.resolve())
+
+
+def test_repair_migrates_stale_legacy_plan_key(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STALE LEGACY",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    record["host"] = {
+        "hive": {
+            "legacy_record": {
+                "plan": "plans/stale.md",
+                "plan_status": "done",
+                "subagents": {"running": 1},
+                "worktree_merged": True,
+            }
+        }
+    }
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert "host: removed dead legacy_record.plan" in result["actions"]
+    legacy = store.find_session(record["id"])["host"]["hive"]["legacy_record"]
+    assert "plan" not in legacy
+    assert legacy["plan_status"] == "done"
+    assert legacy["subagents"] == {"running": 1}
+    assert legacy["worktree_merged"] is True
 
 
 def test_repair_refreshes_resume_command_after_rehoming_working_dir(

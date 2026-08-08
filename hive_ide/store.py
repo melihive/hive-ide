@@ -99,6 +99,7 @@ class StateStore:
         outgoing = dict(data)
         outgoing.setdefault("schema_version", SCHEMA_VERSION)
         outgoing.setdefault("workspace_key", self.workspace_key)
+        self._drop_dead_legacy_plan(outgoing)
         self._validate(outgoing, path)
         payload = json.dumps(outgoing, indent=2, sort_keys=True) + "\n"
         try:
@@ -129,8 +130,42 @@ class StateStore:
             raise StateError(f"Cannot write state document {path}: {exc}") from exc
         return path
 
+    @staticmethod
+    def _drop_dead_legacy_plan(record: dict[str, Any]) -> bool:
+        host = record.get("host")
+        if not isinstance(host, dict):
+            return False
+        hive = host.get("hive")
+        if not isinstance(hive, dict):
+            return False
+        legacy = hive.get("legacy_record")
+        if not isinstance(legacy, dict) or "plan" not in legacy:
+            return False
+        legacy.pop("plan", None)
+        return True
+
     def write(self, collection: str, session_id: str, data: dict[str, Any]) -> Path:
         return self.write_path(self.path(collection, session_id), data)
+
+    def prune_dead_legacy_plan(
+        self, *, collections: tuple[str, ...] = ("sessions", "archive")
+    ) -> list[dict[str, str]]:
+        pruned: list[dict[str, str]] = []
+        for collection in collections:
+            directory = self.collection(collection)
+            for path in sorted(directory.glob("*.json")):
+                record = self.read_path(path)
+                if record is None:
+                    continue
+                if self._drop_dead_legacy_plan(record):
+                    self.write_path(path, record)
+                    pruned.append(
+                        {
+                            "collection": collection,
+                            "session_id": str(record.get("id") or path.stem),
+                        }
+                    )
+        return pruned
 
     def delete(self, collection: str, session_id: str) -> bool:
         try:

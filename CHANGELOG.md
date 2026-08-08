@@ -10,6 +10,9 @@ All notable changes to `hive-ide` will be documented in this file.
   different IDE session and rebuilds the window, preventing hooks from updating
   the wrong sidebar row after a stale shell snapshot restores old
   `HIVE_IDE_*` variables.
+- Session writes and repair now remove the dead `host.hive.legacy_record.plan`
+  key while preserving the live legacy sidebar fields for plan status,
+  subagent count, and merged-worktree state.
 
 ## [1.0.45] - 2026-08-06
 

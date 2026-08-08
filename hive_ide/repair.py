@@ -38,6 +38,8 @@ class SessionRepair:
         errors: list[str] = []
         repaired = dict(record)
 
+        self._drop_legacy_record_plan(repaired, actions, apply=apply)
+
         working_dir = Path(str(repaired.get("working_dir") or "")).expanduser()
         if not working_dir.is_dir():
             previous = str(working_dir)
@@ -221,17 +223,30 @@ class SessionRepair:
             self.store.write("sessions", record["id"], record)
 
     def repair_all(self, *, apply: bool = True) -> dict[str, Any]:
+        pruned_legacy_plans = (
+            self.store.prune_dead_legacy_plan() if apply else []
+        )
         results = [
             self.repair(record, apply=apply) for record in self.store.list("sessions")
         ]
         return {
             "ok": all(result["ok"] for result in results),
             "applied": apply,
+            "pruned_legacy_plans": pruned_legacy_plans,
             "sessions": results,
         }
 
     def _has_deleted_pane_cwd(self, warnings: list[str]) -> bool:
         return any("pane cwd no longer exists:" in warning for warning in warnings)
+
+    def _drop_legacy_record_plan(
+        self, record: dict[str, Any], actions: list[str], *, apply: bool
+    ) -> None:
+        if not self.store._drop_dead_legacy_plan(record):
+            return
+        actions.append("host: removed dead legacy_record.plan")
+        if apply:
+            self.store.write("sessions", record["id"], record)
 
     def _pane_cwd_warnings(self, record: dict[str, Any]) -> list[str]:
         target = self.frame.windows().get(record["id"])
