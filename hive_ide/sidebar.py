@@ -177,7 +177,25 @@ class SidebarCommandRunner:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if window.returncode == 0 and pane.returncode == 0:
+            self.wake_sidebar(target)
         return window.returncode == 0 and pane.returncode == 0
+
+    @staticmethod
+    def wake_sidebar(window_id: str) -> None:
+        """Wake the target window's sidebar so the active row repaints immediately.
+
+        Each IDE window owns a sidebar process. When a click selects another window, tmux
+        switches the chat pane at once, but the newly visible sidebar may be blocked in
+        its idle select() wait until the next refresh tick. Sending a focus-out report to
+        that sidebar pane is harmless input: it marks the sidebar unfocused and forces a
+        prompt redraw without stealing focus from the chat pane.
+        """
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"{window_id}.0", "-l", "\x1b[O"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def focus_agent(self, session_id: str) -> None:
         target = self.window_id(session_id)

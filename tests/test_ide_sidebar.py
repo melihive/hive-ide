@@ -1002,6 +1002,7 @@ def test_sidebar_command_runner_switches_window_and_agent_pane(monkeypatch, tmp_
     assert calls == [
         ["tmux", "select-window", "-t", "@7"],
         ["tmux", "select-pane", "-t", "@7.1"],
+        ["tmux", "send-keys", "-t", "@7.0", "-l", "\x1b[O"],
     ]
 
 

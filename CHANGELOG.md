@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar session activation now wakes the target window's sidebar process
+  immediately after switching panes, so the active-row background tracks the
+  chat pane without waiting for the idle refresh tick.
+
 ## [1.0.46] - 2026-08-08
 
 ### Fixed
