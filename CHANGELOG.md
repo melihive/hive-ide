@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.47] - 2026-08-09
+
 ### Fixed
 
 - Sidebar session activation now wakes the target window's sidebar process
