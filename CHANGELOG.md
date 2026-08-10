@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.51] - 2026-08-10
+
 ### Fixed
 
 - Rebuilding an inactive session now wakes the rebuilt agent pane and restores
