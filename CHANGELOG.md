@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Terminal title normalization now stamps both the dedicated tmux server's
+  global title format and the active IDE session title format, so user tmux
+  config cannot slowly restore a path-based title after relayout.
+
 ## [1.0.49] - 2026-08-10
 
 ### Fixed

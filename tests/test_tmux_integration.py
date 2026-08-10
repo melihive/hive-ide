@@ -227,6 +227,10 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             ).stdout.strip()
             == "workspace IDE"
         )
+        assert (
+            frame.tmux(["show-option", "-gv", "set-titles-string"]).stdout.strip()
+            == "workspace IDE"
+        )
         keys = frame.tmux(["list-keys", "-T", "prefix"]).stdout
         for key in (" n ", " p ", " l ", " c ", " e ", " a ", " o ", " i ", " g ", " r ", " k "):
             assert key in keys

@@ -944,8 +944,11 @@ class Frame:
         return label[:24] or None
 
     def _normalize_terminal_title(self) -> None:
+        title = self._terminal_title()
+        self.tmux(["set-option", "-g", "set-titles", "on"])
+        self.tmux(["set-option", "-g", "set-titles-string", title])
         self.tmux(["set-option", "-t", self.target, "set-titles", "on"])
-        self.tmux(["set-option", "-t", self.target, "set-titles-string", self._terminal_title()])
+        self.tmux(["set-option", "-t", self.target, "set-titles-string", title])
 
     def _normalize_frame_environment(self) -> None:
         for name in self.INTERACTIVE_ENV_UNSET:
