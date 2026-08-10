@@ -426,13 +426,7 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
         plan = {"path": None, "active_task": None}
     else:
         if args.path is not None:
-            candidate = Path(args.path).expanduser()
-            if not candidate.is_absolute():
-                working_dir = Path(str(record.get("working_dir") or "")).expanduser()
-                base = working_dir if working_dir.is_dir() else Path(store.workspace_key)
-                candidate = base / candidate
-            if not candidate.is_file():
-                raise UsageError(f"Plan file does not exist: {candidate}")
+            Frame.resolve_plan_path(args.path, record)
             plan["path"] = args.path
         if args.active_task is not None:
             plan["active_task"] = args.active_task

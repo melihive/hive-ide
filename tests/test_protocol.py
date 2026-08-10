@@ -2579,6 +2579,132 @@ def test_plan_set_resolves_relative_plan_from_workspace_when_working_dir_is_miss
     assert updated["plan"]["path"] == "plans/root-plan.md"
 
 
+def test_plan_set_resolves_worktree_session_plan_from_workspace_first(
+    tmp_path, capsys
+):
+    workspace = tmp_path / "workspace"
+    worktree = tmp_path / "worktree" / "feature"
+    workspace.mkdir()
+    worktree.mkdir(parents=True)
+    plan = workspace / "plans" / "team" / "Simon" / "_archive" / "rolled.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Rolled Plan\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="WORKTREE",
+        working_dir=worktree,
+        source=_source(),
+        driver=_term(),
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(store.home),
+                "--workspace-key",
+                str(workspace),
+                "plan-set",
+                f"--session-id={record['id']}",
+                "--path=plans/team/Simon/_archive/rolled.md",
+            ]
+        )
+        == 0
+    )
+
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["plan"]["path"] == "plans/team/Simon/_archive/rolled.md"
+
+
+def test_plan_set_refuses_missing_relative_plan_for_worktree_session(tmp_path):
+    workspace = tmp_path / "workspace"
+    worktree = tmp_path / "worktree" / "feature"
+    workspace.mkdir()
+    worktree.mkdir(parents=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="WORKTREE",
+        working_dir=worktree,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/existing.md", "active_task": None},
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(store.home),
+                "--workspace-key",
+                str(workspace),
+                "plan-set",
+                f"--session-id={record['id']}",
+                "--path=plans/missing.md",
+            ]
+        )
+        == 2
+    )
+    assert store.find_session(record["id"])["plan"]["path"] == "plans/existing.md"
+
+
+def test_frame_plan_path_resolves_worktree_session_plan_from_workspace_first(tmp_path):
+    workspace = tmp_path / "workspace"
+    worktree = tmp_path / "worktree" / "feature"
+    workspace_plan = workspace / "plans" / "rolled.md"
+    worktree_plan = worktree / "plans" / "rolled.md"
+    workspace_plan.parent.mkdir(parents=True)
+    worktree_plan.parent.mkdir(parents=True)
+    workspace_plan.write_text("# Workspace Plan\n", encoding="utf-8")
+    worktree_plan.write_text("# Worktree Copy\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="WORKTREE",
+        working_dir=worktree,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/rolled.md", "active_task": None},
+    )
+
+    assert Frame.plan_path(record) == workspace_plan.resolve()
+
+
+def test_frame_plan_path_falls_back_to_working_dir_when_workspace_plan_missing(tmp_path):
+    workspace = tmp_path / "workspace"
+    worktree = tmp_path / "worktree" / "feature"
+    worktree_plan = worktree / "plans" / "local.md"
+    workspace.mkdir()
+    worktree_plan.parent.mkdir(parents=True)
+    worktree_plan.write_text("# Local Plan\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="WORKTREE",
+        working_dir=worktree,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/local.md", "active_task": None},
+    )
+
+    assert Frame.plan_path(record) == worktree_plan.resolve()
+
+
+def test_frame_plan_path_refuses_missing_relative_plan_for_worktree_session(tmp_path):
+    workspace = tmp_path / "workspace"
+    worktree = tmp_path / "worktree" / "feature"
+    workspace.mkdir()
+    worktree.mkdir(parents=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="WORKTREE",
+        working_dir=worktree,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/missing.md", "active_task": None},
+    )
+
+    with pytest.raises(UsageError, match="Plan file does not exist"):
+        Frame.plan_path(record)
+
+
 def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     plan = workspace / "plans" / "example.md"

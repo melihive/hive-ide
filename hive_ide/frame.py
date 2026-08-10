@@ -434,23 +434,18 @@ class Frame:
     def _plan_command(
         self, record: dict[str, Any], *, line: int | None = None
     ) -> str:
-        plan = (record.get("plan") or {}).get("path")
-        if plan:
-            path = Path(plan)
-            if not path.is_absolute():
-                path = Path(record["working_dir"]) / path
-            if path.is_file():
-                editor = self._editor_argv()
-                if (
-                    line
-                    and line > 1
-                    and Path(editor[0]).name in self.PLUS_LINE_EDITORS
-                ):
-                    editor.append(f"+{line}")
-                return self._interactive_command(
-                    f"{shlex.join([*editor, str(path)])}; "
-                    'exec "${SHELL:-/bin/sh}"'
-                )
+        try:
+            path = self.plan_path(record)
+        except UsageError:
+            path = None
+        if path is not None:
+            editor = self._editor_argv()
+            if line and line > 1 and Path(editor[0]).name in self.PLUS_LINE_EDITORS:
+                editor.append(f"+{line}")
+            return self._interactive_command(
+                f"{shlex.join([*editor, str(path)])}; "
+                'exec "${SHELL:-/bin/sh}"'
+            )
         return self._interactive_command(
             'printf "\\n  No plan linked.\\n"; exec "${SHELL:-/bin/sh}"'
         )
@@ -462,19 +457,32 @@ class Frame:
         return self.store.workspace_key
 
     @staticmethod
+    def resolve_plan_path(reference: str | Path, record: dict[str, Any]) -> Path:
+        path = Path(reference).expanduser()
+        if path.is_absolute():
+            candidates = [path]
+        else:
+            workspace = record.get("workspace_key")
+            if not workspace:
+                raise UsageError("Session workspace key is missing; cannot resolve plan path.")
+            candidates = [Path(str(workspace)).expanduser() / path]
+            working_dir = Path(str(record.get("working_dir") or "")).expanduser()
+            if working_dir.is_dir():
+                candidates.append(working_dir / path)
+
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved.is_file():
+                return resolved
+        checked = ", ".join(str(candidate.resolve()) for candidate in candidates)
+        raise UsageError(f"Plan file does not exist: {checked}")
+
+    @staticmethod
     def plan_path(record: dict[str, Any]) -> Path:
         reference = (record.get("plan") or {}).get("path")
         if not reference:
             raise UsageError("No plan is linked to this session.")
-        path = Path(reference).expanduser()
-        if not path.is_absolute():
-            working_dir = Path(str(record.get("working_dir") or "")).expanduser()
-            base = working_dir if working_dir.is_dir() else Path(record["workspace_key"])
-            path = base / path
-        path = path.resolve()
-        if not path.is_file():
-            raise UsageError(f"Plan file does not exist: {path}")
-        return path
+        return Frame.resolve_plan_path(reference, record)
 
     def _editor_argv(self) -> list[str]:
         configured = (self.settings.get("editor") or {}).get("argv")

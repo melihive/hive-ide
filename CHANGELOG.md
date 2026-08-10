@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Relative plan links now resolve against the workspace root before a session
+  worktree, so plan volume rolls can relink and respawn worktree-attached IDE
+  sessions whose authoritative plan file exists only in the main checkout.
+
 ## [1.0.51] - 2026-08-10
 
 ### Fixed
