@@ -856,6 +856,9 @@ class Frame:
         existing = self.windows().get(record["id"])
         previous_index = None
         selected = False
+        active_before = self.tmux(
+            ["display-message", "-p", "-t", self.target, "#{window_id}.#{pane_index}"]
+        ).stdout.strip()
         if existing:
             previous_index = self.tmux(
                 ["display-message", "-p", "-t", existing, "#{window_index}"]
@@ -892,6 +895,12 @@ class Frame:
         if selected and replacement:
             self.tmux(["select-window", "-t", replacement])
             self.tmux(["select-pane", "-t", f"{replacement}.1"])
+        elif replacement:
+            self.tmux(["select-window", "-t", replacement])
+            self.tmux(["select-pane", "-t", f"{replacement}.1"])
+            self.tmux(["send-keys", "-t", f"{replacement}.1", "C-l"])
+            if active_before:
+                self.tmux(["select-pane", "-t", active_before])
 
     def close(self, session_id: str) -> bool:
         window_id = self.windows().get(session_id)

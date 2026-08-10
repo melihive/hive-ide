@@ -3067,6 +3067,49 @@ def test_rebuild_keeps_existing_window_when_replacement_build_fails(tmp_path, mo
     assert ["kill-window", "-t", "@7"] not in calls
 
 
+def test_rebuild_wakes_inactive_agent_pane_and_restores_focus(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="TARGET",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "windows", lambda: {record["id"]: "@7"})
+    monkeypatch.setattr(frame, "build", lambda _record: "@9")
+
+    def fake_tmux(args, **_kwargs):
+        calls.append(args)
+        if args == [
+            "display-message",
+            "-p",
+            "-t",
+            frame.target,
+            "#{window_id}.#{pane_index}",
+        ]:
+            return SimpleNamespace(returncode=0, stdout="@5.1\n", stderr="")
+        if args == ["display-message", "-p", "-t", "@7", "#{window_index}"]:
+            return SimpleNamespace(returncode=0, stdout="2\n", stderr="")
+        if args == ["display-message", "-p", "-t", "@7", "#{window_active}"]:
+            return SimpleNamespace(returncode=0, stdout="0\n", stderr="")
+        if args == ["display-message", "-p", "-t", "@9", "#{window_index}"]:
+            return SimpleNamespace(returncode=0, stdout="2\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    frame.rebuild(record)
+
+    assert ["select-window", "-t", "@9"] in calls
+    assert ["select-pane", "-t", "@9.1"] in calls
+    assert ["send-keys", "-t", "@9.1", "C-l"] in calls
+    assert calls[-1] == ["select-pane", "-t", "@5.1"]
+
+
 def test_stable_source_patch_upgrade_refreshes_session_record(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

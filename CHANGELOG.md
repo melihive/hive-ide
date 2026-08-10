@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Rebuilding an inactive session now wakes the rebuilt agent pane and restores
+  the previously selected pane, preventing Codex panes from staying visually
+  blank until the session is manually selected.
+
 ## [1.0.50] - 2026-08-10
 
 ### Fixed
