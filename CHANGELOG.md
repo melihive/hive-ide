@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Terminal titles now append the SSH client name when the IDE is opened from a
+  different machine, e.g. `workspace IDE laptop`, without changing tmux session
+  or window labels.
+
 ## [1.0.47] - 2026-08-09
 
 ### Fixed

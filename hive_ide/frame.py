@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import ipaddress
 import re
 import shlex
 import shutil
@@ -917,7 +918,94 @@ class Frame:
 
     def _terminal_title(self) -> str:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
+        client = self._ssh_client_title_suffix()
+        if client:
+            return f"{workspace} IDE {client}"
         return f"{workspace} IDE"
+
+    @classmethod
+    def _ssh_client_title_suffix(cls) -> str | None:
+        override = cls._clean_title_label(
+            os.environ.get("HIVE_IDE_CLIENT_NAME")
+            or os.environ.get("HIVE_IDE_REMOTE_NAME")
+        )
+        if override:
+            return override
+        host = cls._ssh_client_host()
+        if not host:
+            return None
+        if cls._is_local_host(host):
+            return None
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return cls._clean_title_label(host)
+        resolved = cls._reverse_lookup_host(host)
+        if not resolved or cls._is_local_host(resolved):
+            return None
+        return cls._clean_title_label(resolved)
+
+    @staticmethod
+    def _ssh_client_host() -> str | None:
+        connection = os.environ.get("SSH_CONNECTION", "").split()
+        if connection:
+            return connection[0]
+        client = os.environ.get("SSH_CLIENT", "").split()
+        if client:
+            return client[0]
+        return None
+
+    @staticmethod
+    def _reverse_lookup_host(address: str) -> str | None:
+        getent = shutil.which("getent")
+        if not getent:
+            return None
+        try:
+            result = subprocess.run(
+                [getent, "hosts", address],
+                capture_output=True,
+                text=True,
+                timeout=0.25,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        tokens = result.stdout.split()
+        for token in tokens[1:]:
+            try:
+                ipaddress.ip_address(token)
+            except ValueError:
+                return token
+        return None
+
+    @staticmethod
+    def _is_local_host(host: str) -> bool:
+        normalized = host.strip().strip("[]").lower().rstrip(".")
+        if normalized in {"", "localhost"}:
+            return True
+        try:
+            address = ipaddress.ip_address(normalized)
+        except ValueError:
+            local_names = {
+                name.lower().rstrip(".")
+                for name in {
+                    os.environ.get("HOSTNAME", ""),
+                    os.uname().nodename,
+                }
+                if name
+            }
+            return normalized in local_names
+        return address.is_loopback
+
+    @staticmethod
+    def _clean_title_label(value: str | None) -> str | None:
+        if not value:
+            return None
+        label = value.strip().strip("[]").split(".", 1)[0]
+        label = re.sub(r"[^A-Za-z0-9_-]+", "-", label).strip("-_")
+        return label[:24] or None
 
     def _normalize_terminal_title(self) -> None:
         self.tmux(["set-option", "-t", self.target, "set-titles", "on"])
