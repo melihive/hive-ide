@@ -4,13 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- SSH-opened terminal titles now append the IDE host name, not the SSH client
+  name, so a `gpd` terminal connected to `vivo` shows `workspace IDE vivo`.
+
 ## [1.0.48] - 2026-08-10
 
 ### Fixed
 
-- Terminal titles now append the SSH client name when the IDE is opened from a
-  different machine, e.g. `workspace IDE laptop`, without changing tmux session
-  or window labels.
+- Terminal titles append an SSH context label when the IDE is opened from a
+  different machine, without changing tmux session or window labels.
 
 ## [1.0.47] - 2026-08-09
 

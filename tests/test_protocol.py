@@ -47,10 +47,10 @@ def _term() -> dict:
 
 
 def test_terminal_title_uses_workspace_name_without_ssh_suffix(tmp_path, monkeypatch):
-    monkeypatch.delenv("HIVE_IDE_CLIENT_NAME", raising=False)
-    monkeypatch.delenv("HIVE_IDE_REMOTE_NAME", raising=False)
+    monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_CLIENT", raising=False)
+    monkeypatch.setenv("HOSTNAME", "vivo")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -59,31 +59,27 @@ def test_terminal_title_uses_workspace_name_without_ssh_suffix(tmp_path, monkeyp
     assert frame._terminal_title() == "workspace IDE"
 
 
-def test_terminal_title_appends_configured_ssh_client_name(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_IDE_CLIENT_NAME", "mobilebox.tailnet.example")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    frame = Frame(StateStore(tmp_path / "state", workspace))
-
-    assert frame._terminal_title() == "workspace IDE mobilebox"
-
-
-def test_terminal_title_appends_resolved_ssh_client_name(tmp_path, monkeypatch):
-    monkeypatch.delenv("HIVE_IDE_CLIENT_NAME", raising=False)
-    monkeypatch.delenv("HIVE_IDE_REMOTE_NAME", raising=False)
+def test_terminal_title_appends_configured_ssh_host_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_IDE_HOST_NAME", "vivo.tailnet.example")
     monkeypatch.setenv("SSH_CONNECTION", "100.64.12.34 51322 100.64.1.10 22")
-    monkeypatch.setattr(
-        Frame,
-        "_reverse_lookup_host",
-        staticmethod(lambda _address: "mobilebox.tailnet.example"),
-    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE mobilebox"
+    assert frame._terminal_title() == "workspace IDE vivo"
+
+
+def test_terminal_title_appends_local_host_name_for_ssh_session(tmp_path, monkeypatch):
+    monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
+    monkeypatch.setenv("SSH_CONNECTION", "100.64.12.34 51322 100.64.1.10 22")
+    monkeypatch.setenv("HOSTNAME", "vivo")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+
+    assert frame._terminal_title() == "workspace IDE vivo"
 
 
 def test_workspace_map_lists_known_workspaces_and_missing_dirs(tmp_path, capsys):
