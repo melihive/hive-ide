@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.49] - 2026-08-10
+
 ### Fixed
 
 - SSH-opened terminal titles now append the IDE host name, not the SSH client
