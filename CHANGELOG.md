@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.50] - 2026-08-10
+
 ### Fixed
 
 - Terminal title normalization now stamps both the dedicated tmux server's
