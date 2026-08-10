@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.52] - 2026-08-10
+
 ### Fixed
 
 - Relative plan links now resolve against the workspace root before a session
