@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.53] - 2026-08-11
+
 ### Fixed
 
 - Each sidebar now treats its own session window as the current row instead of
