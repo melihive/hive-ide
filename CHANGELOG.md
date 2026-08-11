@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Each sidebar now treats its own session window as the current row instead of
+  polling tmux for a global active session, eliminating delayed or wrong active
+  highlights after switching sessions.
+
 ## [1.0.52] - 2026-08-10
 
 ### Fixed

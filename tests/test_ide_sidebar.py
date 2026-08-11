@@ -364,7 +364,7 @@ def test_sidebar_cursor_follows_session_id_across_reorder():
     assert (cursor, selected) == (2, "b")
 
 
-def test_sidebar_unfocused_cursor_tracks_current_session():
+def test_sidebar_unfocused_cursor_tracks_local_session():
     assert IdeSidebar._reconcile_cursor(
         ["c", "a", "b"],
         2,
@@ -409,14 +409,53 @@ def test_sidebar_cursor_activation_drops_sidebar_focus_but_keeps_session_id():
     )
 
 
-def test_sidebar_reads_active_session_id_from_tmux(monkeypatch):
+def test_sidebar_has_no_global_active_session_lookup():
+    assert not hasattr(IdeSidebar, "_active_session_id")
+    assert not hasattr(SidebarCommandRunner(Path("."), "repo"), "active_session_id")
+
+
+def test_sidebar_current_session_id_is_process_local(monkeypatch):
     def fake_run(argv, **_kwargs):
-        assert argv == ["tmux", "display-message", "-p", "#{@hive_ide_session_id}"]
-        return subprocess.CompletedProcess(argv, 0, "active-session\n", "")
+        raise AssertionError(f"unexpected tmux active-session lookup: {argv}")
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert IdeSidebar._active_session_id("fallback") == "active-session"
+    assert IdeSidebar._current_session_id("local-session") == "local-session"
+
+
+def test_sidebar_current_row_is_local_session(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_home = tmp_path / "state"
+    first = {"id": "first", "name": "FIRST", "driver": {"id": "term"}}
+    second = {"id": "second", "name": "SECOND", "driver": {"id": "term"}}
+
+    lines = IdeSidebar.render_lines(
+        state_home,
+        [first, second],
+        str(workspace),
+        "second",
+        0,
+        42,
+        focused=False,
+    )
+
+    first_line = next(line for line in lines if "FIRST" in line)
+    second_line = next(line for line in lines if "SECOND" in line)
+    assert IdeSidebar.CUR_BG not in first_line
+    assert IdeSidebar.CUR_BG in second_line
+
+
+def test_sidebar_unfocused_cursor_uses_supplied_current_session():
+    assert IdeSidebar._reconcile_cursor(
+        ["c", "local", "b"],
+        2,
+        focused=False,
+        free=False,
+        archive_mode=False,
+        current_session_id="local",
+        cursor_session_id="b",
+    ) == (1, "local")
 
 
 def test_sidebar_pane_active_reads_tmux_pane_state(monkeypatch):
@@ -438,15 +477,6 @@ def test_sidebar_pane_active_reads_tmux_pane_state(monkeypatch):
         "%12",
         "#{pane_active}",
     ]
-
-
-def test_sidebar_active_session_id_falls_back_on_tmux_error(monkeypatch):
-    def fake_run(argv, **_kwargs):
-        return subprocess.CompletedProcess(argv, 1, "", "no session")
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    assert IdeSidebar._active_session_id("fallback") == "fallback"
 
 
 def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):

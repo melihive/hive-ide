@@ -142,19 +142,6 @@ class SidebarCommandRunner:
             None,
         )
 
-    def active_session_id(self, fallback: str) -> str:
-        try:
-            result = subprocess.run(
-                ["tmux", "display-message", "-p", "#{@hive_ide_session_id}"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return fallback
-        active = result.stdout.strip() if result.returncode == 0 else ""
-        return active or fallback
-
     def switch(self, session_id: str) -> bool:
         """Select a session window and focus its agent/chat pane."""
         target = self.window_id(session_id)
@@ -623,10 +610,9 @@ class IdeSidebar:
         )
 
     @staticmethod
-    def _active_session_id(fallback: str) -> str:
-        return SidebarCommandRunner(Path("."), IdeSidebar._repo_hint).active_session_id(
-            fallback
-        )
+    def _current_session_id(this_session_id: str) -> str:
+        """The current row is process-local: every IDE window owns its sidebar."""
+        return this_session_id
 
     @staticmethod
     def _focus_agent(session_id: str) -> None:
@@ -1204,7 +1190,11 @@ class IdeSidebar:
                     sessions = IdeSidebar._filter(StateIO.list_sessions(skill_dir, repo), query)
                 names = [s.get("name") or "?" for s in sessions]
                 session_ids = [s.get("id") or "" for s in sessions]
-                active_session_id = IdeSidebar._active_session_id(this_session_id)
+                # This sidebar belongs to exactly one IDE session window. That window's
+                # session is the current row immediately; querying tmux for a global
+                # active session makes per-window sidebars lag and briefly highlight the
+                # previously selected session after every switch.
+                active_session_id = IdeSidebar._current_session_id(this_session_id)
                 # In archive mode / on a below-list spot, the cursor is the user's; don't
                 # snap it back to this_window (which isn't in the archive list anyway).
                 free = on_filter or on_archive or archive_mode
