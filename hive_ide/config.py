@@ -38,6 +38,7 @@ DEFAULT_KEYS = {
         "sidebar": "l",
         "chat": "c",
         "plan": "e",
+        "scratchpad": "s",
         "agent": "a",
         "card": "i",
         "options": "o",

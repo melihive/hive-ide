@@ -30,14 +30,32 @@ class IdeOptionsModal:
     MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([mM])")
     ACTION_ROW = 4
 
-    ACTIONS = [
-        ("chat", "current chat", "focus the agent pane"),
-        ("plan", "current plan", "open or focus the plan pane"),
-        ("agent", "change agent", "open the agent picker"),
-        ("rename", "rename", "change the display label"),
-        ("repair", "repair", "heal session state and redraw"),
-        ("archive", "archive", "close and move to archive"),
-        ("card", "session info", "show the info modal"),
+    GROUPS = [
+        (
+            "Open",
+            [
+                ("chat", "chat", "focus the agent pane"),
+                ("plan", "plan pane", "open or focus the plan pane"),
+                ("plan-modal", "plan modal", "open the plan in a popup"),
+                ("tasks-modal", "tasks modal", "open tasks at first unfinished"),
+                ("scratchpad", "scratchpad", "open notes in a plan popup"),
+            ],
+        ),
+        (
+            "Session",
+            [
+                ("card", "session info", "show the info modal"),
+                ("agent", "change agent", "open the agent picker"),
+                ("rename", "rename", "change the display label"),
+            ],
+        ),
+        (
+            "Maintenance",
+            [
+                ("repair", "repair", "heal session state and redraw"),
+                ("archive", "archive", "close and move to archive"),
+            ],
+        ),
     ]
     DRIVER_RENAME_ACTIONS = [
         ("driver-rename", "rename driver", "send /rename when agent is idle"),
@@ -45,10 +63,22 @@ class IdeOptionsModal:
 
     @staticmethod
     def _actions(record: dict) -> list[tuple[str, str, str]]:
-        actions = list(IdeOptionsModal.ACTIONS)
+        actions = [
+            action
+            for _group, group_actions in IdeOptionsModal.GROUPS
+            for action in group_actions
+        ]
         driver = (record.get("driver") or {}).get("id")
         if driver in {"claude", "codex"}:
-            actions[4:4] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
+            rename_index = next(
+                (
+                    index
+                    for index, (action, _label, _note) in enumerate(actions)
+                    if action == "rename"
+                ),
+                len(actions),
+            )
+            actions[rename_index + 1:rename_index + 1] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
         return actions
 
     @staticmethod
@@ -79,6 +109,33 @@ class IdeOptionsModal:
                     *socket_args,
                     "--focus",
                 ],
+            )
+        if action == "plan-modal":
+            return IdeOptionsModal._background_cli(
+                skill_dir,
+                [
+                    "--quiet",
+                    "plan-popup",
+                    "--mode=plan",
+                    f"--session-id={session_id}",
+                    *socket_args,
+                ],
+            )
+        if action == "tasks-modal":
+            return IdeOptionsModal._background_cli(
+                skill_dir,
+                [
+                    "--quiet",
+                    "plan-popup",
+                    "--mode=tasks",
+                    f"--session-id={session_id}",
+                    *socket_args,
+                ],
+            )
+        if action == "scratchpad":
+            return IdeOptionsModal._background_cli(
+                skill_dir,
+                ["--quiet", "scratchpad", f"--session-id={session_id}", *socket_args],
             )
         if action == "repair":
             return IdeNewModal._cli(
@@ -114,6 +171,33 @@ class IdeOptionsModal:
                 ],
             )
         return False, f"Unsupported action: {action}"
+
+    @staticmethod
+    def _background_cli(skill_dir: Path, args: list[str]) -> tuple[bool, str]:
+        """Run a popup-opening CLI after this options popup has returned."""
+        try:
+            command = PythonCommand.module_command(
+                "cli",
+                [
+                    "--state-home",
+                    str(skill_dir),
+                    "--workspace-key",
+                    IdeNewModal._workspace_key,
+                    *args,
+                ],
+                python=sys.executable,
+            )
+            tmux = ["tmux"]
+            if IdeNewModal._tmux_socket:
+                tmux.extend(["-L", IdeNewModal._tmux_socket])
+            p = subprocess.run(
+                [*tmux, "run-shell", "-b", f"sleep 0.05; {command}"],
+                capture_output=True,
+                text=True,
+            )
+            return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+        except OSError as exc:
+            return False, str(exc)
 
     @staticmethod
     def _popup(skill_dir: Path, repo: str, session_id: str, kind: str) -> int:
@@ -167,17 +251,23 @@ class IdeOptionsModal:
         M = IdeNewModal
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
+        groups = IdeOptionsModal._grouped_actions(record)
         o = [M.CLR, f"  {M.BOLD}Session options{M.RST}\n"]
         o.append(
             f"  {M.NAME}{record.get('name') or '?'}{M.RST}"
             f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}\n\n"
         )
-        for i, (_action, label, note) in enumerate(actions):
-            arrow = "▸" if i == sel else " "
-            if i == sel:
-                o.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}\n")
-            else:
-                o.append(f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}\n")
+        offset = 0
+        for group, group_actions in groups:
+            o.append(f"  {M.DIM}{group}{M.RST}{M.EL}\n")
+            for action, label, note in group_actions:
+                i = actions.index((action, label, note), offset)
+                arrow = "▸" if i == sel else " "
+                if i == sel:
+                    o.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}\n")
+                else:
+                    o.append(f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}\n")
+            offset += len(group_actions)
         if rename_value:
             o.append(f"\n  {M.DIM}new name:{M.RST} {M.NAME}{rename_value}{M.RST}{M.EL}")
         o.append(
@@ -188,7 +278,37 @@ class IdeOptionsModal:
         sys.stdout.flush()
 
     @staticmethod
-    def _mouse_selection(data: bytes, count: int) -> int | None:
+    def _grouped_actions(record: dict) -> list[tuple[str, list[tuple[str, str, str]]]]:
+        groups = [(name, list(actions)) for name, actions in IdeOptionsModal.GROUPS]
+        driver = (record.get("driver") or {}).get("id")
+        if driver in {"claude", "codex"}:
+            session_actions = groups[1][1]
+            rename_index = next(
+                (
+                    index
+                    for index, (action, _label, _note) in enumerate(session_actions)
+                    if action == "rename"
+                ),
+                len(session_actions),
+            )
+            session_actions[rename_index + 1:rename_index + 1] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
+        return groups
+
+    @staticmethod
+    def _action_rows(record: dict) -> dict[int, int]:
+        row = IdeOptionsModal.ACTION_ROW
+        index = 0
+        rows: dict[int, int] = {}
+        for _group, actions in IdeOptionsModal._grouped_actions(record):
+            row += 1
+            for _action in actions:
+                rows[row] = index
+                row += 1
+                index += 1
+        return rows
+
+    @staticmethod
+    def _mouse_selection(data: bytes, rows: dict[int, int]) -> int | None:
         match = IdeOptionsModal.MOUSE_RE.fullmatch(data)
         if not match or match.group(4) != b"M":
             return None
@@ -196,11 +316,10 @@ class IdeOptionsModal:
         if button != 0:
             return None
         row = int(match.group(3))
-        index = row - IdeOptionsModal.ACTION_ROW
-        return index if 0 <= index < count else None
+        return rows.get(row)
 
     @staticmethod
-    def _getkey(fd: int, *, action_count: int | None = None) -> str:
+    def _getkey(fd: int, *, mouse_rows: dict[int, int] | None = None) -> str:
         data = os.read(fd, 1)
         if not data or data == b"\x03":
             return "esc"
@@ -227,9 +346,7 @@ class IdeOptionsModal:
                     report += chunk
                     if chunk in (b"M", b"m"):
                         break
-                picked = IdeOptionsModal._mouse_selection(
-                    bytes(report), action_count or len(IdeOptionsModal.ACTIONS)
-                )
+                picked = IdeOptionsModal._mouse_selection(bytes(report), mouse_rows or {})
                 return f"mouse:{picked}" if picked is not None else "other"
             return {
                 b"A": "up",
@@ -307,7 +424,9 @@ class IdeOptionsModal:
                 actions = IdeOptionsModal._actions(record)
                 if sel >= len(actions):
                     sel = len(actions) - 1
-                key = IdeOptionsModal._getkey(fd, action_count=len(actions))
+                key = IdeOptionsModal._getkey(
+                    fd, mouse_rows=IdeOptionsModal._action_rows(record)
+                )
                 if key == "esc":
                     return 0
                 if key in ("up", "k"):

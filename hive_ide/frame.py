@@ -530,6 +530,124 @@ class Frame:
         )
         return tasks + 1 if tasks is not None else 1
 
+    @staticmethod
+    def ensure_scratchpad(path: Path) -> int:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise HiveIdeError(f"Could not read plan {path}: {exc}") from exc
+        lines = text.splitlines()
+        scratchpad = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line.strip().lower() == "## scratchpad"
+            ),
+            None,
+        )
+        if scratchpad is not None:
+            return scratchpad + 1
+        insert_at = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line.strip() == "## Tasks"
+            ),
+            None,
+        )
+        if insert_at is None:
+            insert_at = next(
+                (
+                    index
+                    for index, line in enumerate(lines)
+                    if line.strip().lower() in {"## status log", "## status"}
+                ),
+                None,
+            )
+        if insert_at is None:
+            insert_at = len(lines)
+        insert = ["## Scratchpad", ""]
+        if insert_at > 0 and lines[insert_at - 1].strip():
+            insert.insert(0, "")
+        new_lines = [*lines[:insert_at], *insert, *lines[insert_at:]]
+        try:
+            path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise HiveIdeError(f"Could not update plan {path}: {exc}") from exc
+        return insert_at + (2 if insert[0] == "" else 1)
+
+    @staticmethod
+    def tasks_line(path: Path) -> int | None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise HiveIdeError(f"Could not read plan {path}: {exc}") from exc
+        lines = text.splitlines()
+        if not any(line.strip() == "## Tasks" for line in lines):
+            return None
+        return Frame.plan_focus_line(path)
+
+    def scratchpad_editor_argv(self) -> list[str]:
+        if shutil.which("micro"):
+            return ["micro"]
+        return self._editor_argv()
+
+    def popup_size(self, *, width: str, height: str) -> tuple[str, str]:
+        result = self.tmux(["display-message", "-p", "#{client_width}"])
+        if result.returncode != 0:
+            return width, height
+        raw = result.stdout.strip()
+        if raw.isdigit() and int(raw) < self.SIDEBAR_ZOOM_MAX:
+            return "96%", "92%"
+        return width, height
+
+    def plan_popup(
+        self, record: dict[str, Any], *, mode: str = "scratchpad"
+    ) -> dict[str, Any]:
+        path = self.plan_path(record)
+        if mode == "scratchpad":
+            line = self.ensure_scratchpad(path)
+        elif mode == "tasks":
+            line = self.tasks_line(path)
+            if line is None:
+                return {
+                    "ok": False,
+                    "reason": "no_tasks",
+                    "session_id": record["id"],
+                    "plan": str(path),
+                }
+        elif mode == "plan":
+            line = 1
+        else:
+            raise UsageError(f"Unknown plan popup mode {mode!r}.")
+        editor = self.scratchpad_editor_argv()
+        if line > 1 and Path(editor[0]).name in self.PLUS_LINE_EDITORS:
+            editor.append(f"+{line}")
+        command = shlex.join([*editor, str(path)])
+        width, height = self.popup_size(width="72%", height="70%")
+        result = self.tmux(
+            [
+                "display-popup",
+                "-E",
+                "-w",
+                width,
+                "-h",
+                height,
+                command,
+            ]
+        )
+        if result.returncode != 0:
+            raise HiveIdeError(result.stderr.strip() or "Could not open Scratchpad.")
+        return {
+            "session_id": record["id"],
+            "plan": str(path),
+            "line": line,
+            "opened": f"{mode}-popup",
+        }
+
+    def scratchpad(self, record: dict[str, Any]) -> dict[str, Any]:
+        return self.plan_popup(record, mode="scratchpad")
+
     def current_plan(
         self, record: dict[str, Any], *, focus: bool = False
     ) -> dict[str, Any]:
@@ -1083,6 +1201,25 @@ class Frame:
                 ],
             )
             self.tmux(["bind-key", key, "run-shell", "-b", f"{focus} >/dev/null 2>&1"])
+        if key := keys.get("scratchpad"):
+            scratchpad = self._module(
+                "cli",
+                [
+                    "--state-home",
+                    str(self.store.home),
+                    "--workspace-key",
+                    self.store.workspace_key,
+                    "--quiet",
+                    "scratchpad",
+                    "--session-id",
+                    "#{@hive_ide_session_id}",
+                    "--tmux-socket",
+                    self.socket,
+                ],
+            )
+            self.tmux(
+                ["bind-key", key, "run-shell", "-b", f"{scratchpad} >/dev/null 2>&1"]
+            )
         for action, direction in (("next", "next"), ("previous", "prev")):
             key = keys.get(action)
             if not key:

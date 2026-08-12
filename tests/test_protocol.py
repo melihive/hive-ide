@@ -565,6 +565,37 @@ def test_cli_current_plan_repairs_missing_working_dir_before_open(
     assert store.find_session(record["id"])["working_dir"] == str(workspace.resolve())
 
 
+def test_cli_scratchpad_noops_without_linked_plan(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="NOPLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": None, "active_task": None},
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--workspace-key",
+                str(workspace),
+                "scratchpad",
+                "--session-id",
+                record["id"],
+            ]
+        )
+        == 0
+    )
+
+    assert capsys.readouterr().out == ""
+
+
 def test_cli_current_chat_is_quiet_on_success(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2773,6 +2804,211 @@ def test_plan_focus_line_targets_last_finished_checkbox_when_all_done(tmp_path):
     )
 
     assert Frame.plan_focus_line(plan) == 6
+
+
+def test_scratchpad_is_inserted_before_tasks(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "\n".join(
+            [
+                "# Plan",
+                "",
+                "## Why",
+                "",
+                "Context.",
+                "",
+                "## Tasks",
+                "",
+                "- [ ] Do it",
+                "",
+                "## Status Log",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    line = Frame.ensure_scratchpad(plan)
+
+    text = plan.read_text(encoding="utf-8")
+    assert line == 7
+    assert text.index("## Scratchpad") < text.index("## Tasks")
+    assert text.count("## Scratchpad") == 1
+
+
+def test_scratchpad_is_inserted_before_status_log_when_tasks_missing(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n\n## Why\n\nContext.\n\n## Status Log\n", encoding="utf-8")
+
+    line = Frame.ensure_scratchpad(plan)
+
+    text = plan.read_text(encoding="utf-8")
+    assert line == 7
+    assert text.index("## Scratchpad") < text.index("## Status Log")
+
+
+def test_scratchpad_reuses_existing_section(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "\n".join(
+            [
+                "# Plan",
+                "",
+                "## Scratchpad",
+                "",
+                "Human note.",
+                "",
+                "## Tasks",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert Frame.ensure_scratchpad(plan) == 3
+    assert plan.read_text(encoding="utf-8").count("## Scratchpad") == 1
+
+
+def test_scratchpad_appends_when_plan_has_no_tasks_or_log(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n\n## Why\n", encoding="utf-8")
+
+    line = Frame.ensure_scratchpad(plan)
+
+    assert line == 5
+    assert plan.read_text(encoding="utf-8").endswith("\n## Scratchpad\n\n")
+
+
+def test_scratchpad_popup_uses_micro_at_scratchpad_line(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n\n## Tasks\n\n- [ ] Task\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setattr("hive_ide.frame.shutil.which", lambda command: "/usr/bin/micro")
+    calls = []
+
+    def fake_tmux(argv):
+        calls.append(argv)
+        if argv == ["display-message", "-p", "#{client_width}"]:
+            return SimpleNamespace(returncode=0, stdout="160", stderr="")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    result = frame.scratchpad(record)
+
+    assert result["opened"] == "scratchpad-popup"
+    assert "## Scratchpad" in plan.read_text(encoding="utf-8")
+    assert calls == [
+        ["display-message", "-p", "#{client_width}"],
+        [
+            "display-popup",
+            "-E",
+            "-w",
+            "72%",
+            "-h",
+            "70%",
+            shlex.join(["micro", "+3", str(plan)]),
+        ]
+    ]
+
+
+def test_plan_popup_opens_plan_at_top(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n\n## Tasks\n\n- [ ] Task\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setattr("hive_ide.frame.shutil.which", lambda command: "/usr/bin/micro")
+    calls = []
+
+    def fake_tmux(argv):
+        calls.append(argv)
+        if argv == ["display-message", "-p", "#{client_width}"]:
+            return SimpleNamespace(returncode=0, stdout="160", stderr="")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    result = frame.plan_popup(record, mode="plan")
+
+    assert result["opened"] == "plan-popup"
+    assert result["line"] == 1
+    assert calls[-1][-1] == shlex.join(["micro", str(plan)])
+
+
+def test_tasks_popup_opens_first_unfinished_task(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(
+        "# Example\n\n## Tasks\n\n- [x] Done\n- [ ] Next\n",
+        encoding="utf-8",
+    )
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setattr("hive_ide.frame.shutil.which", lambda command: "/usr/bin/micro")
+    calls = []
+
+    def fake_tmux(argv):
+        calls.append(argv)
+        if argv == ["display-message", "-p", "#{client_width}"]:
+            return SimpleNamespace(returncode=0, stdout="160", stderr="")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    result = frame.plan_popup(record, mode="tasks")
+
+    assert result["opened"] == "tasks-popup"
+    assert result["line"] == 6
+    assert calls[-1][-1] == shlex.join(["micro", "+6", str(plan)])
+
+
+def test_tasks_popup_noops_without_tasks_section(tmp_path):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n\n## Why\n\nContext.\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+
+    assert Frame(store).plan_popup(record, mode="tasks") == {
+        "ok": False,
+        "reason": "no_tasks",
+        "session_id": record["id"],
+        "plan": str(plan),
+    }
 
 
 def test_current_chat_uses_recorded_resume_command_outside_frame(

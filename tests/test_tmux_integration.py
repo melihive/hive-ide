@@ -173,6 +173,10 @@ def test_linked_checkout_status_reaches_the_live_sidebar(tmp_path, monkeypatch):
 
 def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatch):
     monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+    monkeypatch.delenv("HOSTNAME", raising=False)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)

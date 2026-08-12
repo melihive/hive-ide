@@ -135,6 +135,7 @@ def _keys(snapshot: dict) -> list[str]:
         "sidebar": "focus sidebar",
         "chat": "focus chat",
         "plan": "focus plan",
+        "scratchpad": "open plan scratchpad",
         "agent": "change agent",
         "options": "session options",
         "card": "session card",

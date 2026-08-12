@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added `hive-ide scratchpad` and the default `<prefix> s` shortcut to open a
+  plan Scratchpad popup in `micro`, creating `## Scratchpad` before `## Tasks`
+  when needed.
+- Added plan and tasks popup actions to the session options modal; tasks opens
+  at the first unfinished task when a `## Tasks` section exists.
+- Grouped the session options modal into Open, Session, and Maintenance actions.
+
 ## [1.0.53] - 2026-08-11
 
 ### Fixed

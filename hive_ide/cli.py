@@ -58,6 +58,8 @@ QUIET_SUCCESS_COMMANDS = frozenset(
         "chat",
         "driver-rename",
         "plan",
+        "plan-popup",
+        "scratchpad",
     }
 )
 
@@ -385,6 +387,22 @@ def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
         )
     record = store.find_session(record["id"]) or record
     return frame.current_plan(record, focus=args.focus)
+
+
+def cmd_scratchpad(args: argparse.Namespace) -> dict[str, Any]:
+    store, record = _current_record(args)
+    if not (record.get("plan") or {}).get("path"):
+        return {"ok": False, "reason": "no_plan", "session_id": record["id"]}
+    return Frame(store, socket=_socket(store, args.tmux_socket)).scratchpad(record)
+
+
+def cmd_plan_popup(args: argparse.Namespace) -> dict[str, Any]:
+    store, record = _current_record(args)
+    if not (record.get("plan") or {}).get("path"):
+        return {"ok": False, "reason": "no_plan", "session_id": record["id"]}
+    return Frame(store, socket=_socket(store, args.tmux_socket)).plan_popup(
+        record, mode=args.mode
+    )
 
 
 def cmd_current_chat(args: argparse.Namespace) -> dict[str, Any]:
@@ -928,6 +946,8 @@ def build_parser() -> argparse.ArgumentParser:
         "rename": "Rename a session without changing its immutable ID.",
         "current": "Show the current session selected by ID or environment.",
         "plan": "Open the current session's plan pane.",
+        "plan-popup": "Open a popup editor on the current plan or its task area.",
+        "scratchpad": "Open the current plan's human-owned Scratchpad popup.",
         "chat": "Focus or resume the current session's agent pane.",
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
@@ -1017,6 +1037,17 @@ def build_parser() -> argparse.ArgumentParser:
     current_plan.add_argument("--tmux-socket")
     current_plan.add_argument("--focus", action="store_true")
     current_plan.set_defaults(handler=cmd_current_plan)
+
+    plan_popup = command("plan-popup")
+    plan_popup.add_argument("--session-id")
+    plan_popup.add_argument("--tmux-socket")
+    plan_popup.add_argument("--mode", choices=("plan", "tasks"), required=True)
+    plan_popup.set_defaults(handler=cmd_plan_popup)
+
+    scratchpad = command("scratchpad")
+    scratchpad.add_argument("--session-id")
+    scratchpad.add_argument("--tmux-socket")
+    scratchpad.set_defaults(handler=cmd_scratchpad)
 
     current_chat = command("chat")
     current_chat.add_argument("--session-id")
