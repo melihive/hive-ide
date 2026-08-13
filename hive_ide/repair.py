@@ -11,6 +11,7 @@ from .drivers import DriverRegistry
 from .errors import HiveIdeError
 from .frame import Frame
 from .health import SessionHealth
+from .source import inspect_interpreter
 from .store import StateStore, utc_now
 
 
@@ -65,8 +66,14 @@ class SessionRepair:
 
         source = repaired.get("source") or {}
         interpreter = source.get("interpreter")
-        if isinstance(interpreter, str) and interpreter and not Path(interpreter).exists():
-            errors.append(f"source interpreter missing: {interpreter}")
+        if isinstance(interpreter, str) and interpreter:
+            if not Path(interpreter).exists():
+                errors.append(f"source interpreter missing: {interpreter}")
+            else:
+                try:
+                    inspect_interpreter(interpreter)
+                except HiveIdeError as exc:
+                    errors.append(f"source interpreter invalid: {exc}")
 
         plan = (repaired.get("plan") or {}).get("path")
         if isinstance(plan, str) and plan:

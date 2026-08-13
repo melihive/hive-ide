@@ -1368,6 +1368,55 @@ def test_repair_migrates_stale_legacy_plan_key(tmp_path, monkeypatch):
     assert legacy["worktree_merged"] is True
 
 
+def test_repair_reports_source_interpreter_that_cannot_import_package(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    broken_python = tmp_path / "broken-python"
+    broken_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    broken_python.chmod(0o755)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="BROKEN SOURCE",
+        working_dir=workspace,
+        source={"kind": "dev", "interpreter": str(broken_python), "version": "old"},
+        driver=_term(),
+    )
+    ensured = []
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: ensured.append(True))
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is False
+    assert ensured == []
+    assert result["errors"] == [
+        "source interpreter invalid: "
+        f"Interpreter {broken_python.resolve()} cannot import hive_ide. "
+        "Install the package into that environment."
+    ]
+    stored_error = store.read("errors", record["id"])
+    assert "source interpreter invalid" in stored_error["detail"]
+
+
+def test_repair_accepts_importable_source_interpreter(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="GOOD SOURCE",
+        working_dir=workspace,
+        source={"kind": "dev", "interpreter": sys.executable, "version": "test"},
+        driver=_term(),
+    )
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+
+
 def test_repair_refreshes_resume_command_after_rehoming_working_dir(
     tmp_path, monkeypatch
 ):

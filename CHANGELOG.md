@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Repair now validates that a session's pinned source interpreter can import
+  `hive_ide`, so a broken dev environment is reported as a repair error instead
+  of leaving the sidebar keepalive loop to print command fragments into the pane.
+
 ## [1.0.54] - 2026-08-13
 
 ### Added
