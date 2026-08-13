@@ -229,6 +229,7 @@ class IdeSidebar:
 
     TICK_SECONDS = 1.5
     NO_WRAP, HOME, EL, CLEAR_BELOW, RESET = "\x1b[?7l", "\x1b[H", "\x1b[K", "\x1b[J", "\x1b[0m"
+    CLEAR_SCREEN = "\x1b[2J"
     # Selection uses a REAL background colour, not reverse-video (SGR 7): erase-to-EOL
     # fills with the background colour, and reverse is only an attribute — so a
     # reverse-video bar stops at the text instead of reaching the pane edge.
@@ -538,6 +539,25 @@ class IdeSidebar:
         right-flush presence icon or status dot just never appeared.
         """
         return f"{base}{IdeSidebar.EL}{content}{IdeSidebar.RESET}"
+
+    @staticmethod
+    def _paint(lines: list[str]) -> str:
+        """Full-pane repaint for sidebar loops.
+
+        Sidebar panes are long-running processes that survive resizes, source reloads, and
+        occasional failed draws. Clearing only below the last rendered row can leave stale
+        rows visible when the previous frame had more rows or when terminal scrollback text
+        landed in the pane. A full visible-screen clear before each draw is cheap for a
+        narrow sidebar and keeps old paths/error text from being mistaken for sessions.
+        """
+        return (
+            IdeSidebar.NO_WRAP
+            + IdeSidebar.HOME
+            + IdeSidebar.CLEAR_SCREEN
+            + IdeSidebar.HOME
+            + "\n".join(lines)
+            + IdeSidebar.CLEAR_BELOW
+        )
 
     @staticmethod
     def _initial_focus() -> bool:
@@ -1234,9 +1254,9 @@ class IdeSidebar:
                     provider_registry,
                     IdeSidebar._tmux_alerts(),
                 )[:height]
-                # Each line carries its own erase-to-EOL (see _row).
-                sys.stdout.write(IdeSidebar.NO_WRAP + IdeSidebar.HOME
-                                 + "\n".join(lines) + IdeSidebar.CLEAR_BELOW)
+                # Each line carries its own erase-to-EOL (see _row), and the frame paint
+                # clears the pane first so stale rows from prior layouts cannot survive.
+                sys.stdout.write(IdeSidebar._paint(lines))
                 # Park the terminal cursor on the input row (filter/name) when focused, so
                 # the block sits where you'd type instead of at the end of the last line
                 # drawn (Phase 15). `render_lines` set `_cursor_rc` for this draw.

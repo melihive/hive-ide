@@ -13,6 +13,11 @@ All notable changes to `hive-ide` will be documented in this file.
   at the first unfinished task when a `## Tasks` section exists.
 - Grouped the session options modal into Open, Session, and Maintenance actions.
 
+### Fixed
+
+- Sidebar redraws now clear the visible pane before repainting, preventing stale
+  path or header rows from surviving after resize, relayout, or a failed draw.
+
 ## [1.0.53] - 2026-08-11
 
 ### Fixed
