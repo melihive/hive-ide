@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.54] - 2026-08-13
+
 ### Added
 
 - Added `hive-ide scratchpad` and the default `<prefix> s` shortcut to open a
