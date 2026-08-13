@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.55] - 2026-08-13
+
 ### Fixed
 
 - Repair now validates that a session's pinned source interpreter can import
