@@ -858,6 +858,27 @@ class Frame:
                 self.tmux(["select-pane", "-T", title, "-t", pane])
                 self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_title", title])
 
+    def retitle_panes(self, record: dict[str, Any]) -> bool:
+        target = self.windows().get(record["id"])
+        if not target:
+            return False
+        titles = self._pane_titles(record)
+        roles = self._order_role_panes(target)
+        changed = False
+        for role, title in titles.items():
+            pane = roles.get(role)
+            if not pane:
+                continue
+            current = self.tmux(
+                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"]
+            ).stdout.strip()
+            if current != title:
+                changed = True
+                break
+        if changed:
+            self._retitle_panes(target, record)
+        return changed
+
     def _pane_titles(self, record: dict[str, Any]) -> dict[str, str]:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
         return {

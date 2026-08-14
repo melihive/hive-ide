@@ -126,6 +126,8 @@ class SessionRepair:
                         actions.append("window: rebuilt for deleted pane cwd")
                     else:
                         actions.append("window: pane cwd differs; live panes preserved")
+                if self.frame.retitle_panes(repaired):
+                    actions.append("window: retitled panes")
                 self._clear_repair_error(session_id)
             except HiveIdeError as exc:
                 errors.append(str(exc))

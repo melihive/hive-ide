@@ -4,6 +4,11 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Repair now refreshes stale live pane titles for existing windows, so updated
+  titlebar/chrome settings do not leave panes untitled after a package upgrade.
+
 ## [1.0.56] - 2026-08-14
 
 ### Fixed

@@ -1793,6 +1793,45 @@ def test_repair_restores_missing_plan_without_rebuilding_live_agent(
     assert rebuilt == []
 
 
+def test_repair_retitles_healthy_existing_window(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    retitled = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "pane_hive_ide_env", lambda _self, _pane_id: {})
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: None)
+    monkeypatch.setattr(
+        Frame,
+        "retitle_panes",
+        lambda _self, repaired: retitled.append(repaired["id"]) or True,
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: retitled panes"]
+    assert retitled == [record["id"]]
+
+
 def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
