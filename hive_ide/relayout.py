@@ -542,7 +542,7 @@ class IdeRelayout:
         forced_geometry: tuple[int, int] | None = None
         if len(argv) > 11 and argv[10].isdigit() and argv[11].isdigit():
             forced_geometry = (int(argv[10]), int(argv[11]))
-        if mode == "snap" and IdeRelayout._coalesced_by_newer_snap(state_path):
+        if mode == "snap" and forced_geometry and IdeRelayout._coalesced_by_newer_snap(state_path):
             IdeRelayout._debug_write(
                 state_path,
                 {
