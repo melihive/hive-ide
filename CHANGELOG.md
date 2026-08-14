@@ -4,6 +4,18 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.57] - 2026-08-14
+
+### Fixed
+
+- Sidebar and tmux pane chrome now keep workspace/session/plan labels in pane
+  titlebars, keep the filter/archive/create footer visible at the bottom, and
+  avoid one-row chat truncation by sizing windows from client height after tmux
+  status rows are accounted for.
+- Repair now treats a non-terminal agent pane that has fallen back to
+  `sh`/`bash`/`fish`/`zsh` as an exited driver pane and respawns only that
+  agent pane, while leaving real terminal sessions untouched.
+
 ## [1.0.55] - 2026-08-13
 
 ### Fixed
