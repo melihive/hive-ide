@@ -204,8 +204,8 @@ def test_subagent_count_renders_under_the_status_dot(tmp_path):
         providers=registry,
     )
 
-    assert _plain(lines[2]).rstrip().endswith("▶")
-    assert _plain(lines[3]).rstrip().endswith("3")
+    assert _plain(lines[0]).rstrip().endswith("▶")
+    assert _plain(lines[1]).rstrip().endswith("3")
 
 
 def test_tmux_bell_alert_renders_in_sidebar_right_status(tmp_path):
@@ -235,7 +235,7 @@ def test_tmux_bell_alert_renders_in_sidebar_right_status(tmp_path):
         tmux_alerts={session["id"]: "🔔"},
     )
 
-    assert _plain(lines[3]).rstrip().endswith("🔔")
+    assert _plain(lines[1]).rstrip().endswith("🔔")
 
 
 def test_subagent_count_takes_priority_over_tmux_bell_alert(tmp_path):
@@ -277,8 +277,8 @@ def test_subagent_count_takes_priority_over_tmux_bell_alert(tmp_path):
         tmux_alerts={session["id"]: "🔔"},
     )
 
-    assert _plain(lines[3]).rstrip().endswith("2")
-    assert "🔔" not in _plain(lines[3])
+    assert _plain(lines[1]).rstrip().endswith("2")
+    assert "🔔" not in _plain(lines[1])
 
 
 def test_current_waiting_session_still_renders_status_dot(tmp_path):
@@ -318,7 +318,7 @@ def test_current_waiting_session_still_renders_status_dot(tmp_path):
         providers=registry,
     )
 
-    assert "●" in _plain(lines[2])
+    assert "●" in _plain(lines[0])
 
 
 def test_subagent_provider_ignores_visible_agent_pane_text(tmp_path):
@@ -516,7 +516,7 @@ def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):
         providers=SidebarProviderRegistry(),
     )
 
-    assert _plain(lines[3]).rstrip().endswith("2")
+    assert _plain(lines[1]).rstrip().endswith("2")
 
 
 def test_subagent_count_renders_for_selected_current_row(tmp_path):
@@ -556,7 +556,7 @@ def test_subagent_count_renders_for_selected_current_row(tmp_path):
         providers=SidebarProviderRegistry(),
     )
 
-    assert _plain(lines[3]).rstrip().endswith("2")
+    assert _plain(lines[1]).rstrip().endswith("2")
 
 
 def test_subagent_count_renders_for_selected_current_dense_row(tmp_path):
@@ -597,7 +597,7 @@ def test_subagent_count_renders_for_selected_current_dense_row(tmp_path):
         providers=SidebarProviderRegistry(),
     )
 
-    assert _plain(lines[2]).rstrip().endswith("2")
+    assert _plain(lines[0]).rstrip().endswith("2")
 
 
 def test_selected_current_row_keeps_status_glyph_visible(tmp_path):
@@ -635,7 +635,7 @@ def test_selected_current_row_keeps_status_glyph_visible(tmp_path):
         providers=SidebarProviderRegistry(),
     )
 
-    assert "▶" in _plain(lines[2])
+    assert "▶" in _plain(lines[0])
 
 
 def test_subagent_count_renders_when_metadata_row_collapses(tmp_path):
@@ -676,7 +676,7 @@ def test_subagent_count_renders_when_metadata_row_collapses(tmp_path):
         providers=SidebarProviderRegistry(),
     )
 
-    assert _plain(lines[2]).rstrip().endswith("1")
+    assert _plain(lines[0]).rstrip().endswith("1")
 
 
 def test_subagent_provider_reads_explicit_status_count(tmp_path):
@@ -747,15 +747,15 @@ def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
         sidebar=sidebar,
         providers=registry,
     )
-    assert _plain(lines[2]).startswith("🧠 COMPACT")
-    assert "💻" not in _plain(lines[2])
+    assert _plain(lines[0]).startswith("🧠 COMPACT")
+    assert "💻" not in _plain(lines[0])
 
 
 def _plain(line: str) -> str:
     return IdeSidebar._strip_ansi(line)
 
 
-def test_sidebar_header_uses_only_the_workspace_folder_name(tmp_path, monkeypatch):
+def test_sidebar_body_hides_workspace_folder_name(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "hive_ide.sidebar_plugins.inspect_linked_checkout",
         lambda _path: SimpleNamespace(state="live"),
@@ -779,9 +779,30 @@ def test_sidebar_header_uses_only_the_workspace_folder_name(tmp_path, monkeypatc
         20,
         focused=False,
     )
-    assert _plain(lines[0]).startswith("example-feature")
+    assert "example-feature" not in "\n".join(_plain(line) for line in lines[:2])
     assert "/home/" not in _plain(lines[0])
-    assert _plain(lines[3]) == "   📝 🔀 14h"
+    assert _plain(lines[1]) == "   📝 🔀 14h"
+
+
+def test_sidebar_footer_groups_archive_and_create(tmp_path):
+    lines = IdeSidebar.render_lines(
+        tmp_path,
+        [],
+        "/workspace/project",
+        "none",
+        0,
+        20,
+        focused=False,
+    )
+
+    assert "filter" in _plain(lines[-3])
+    footer = _plain(lines[-2])
+    assert "show archive" in footer
+    assert footer.rstrip().endswith("+")
+    assert footer.index("+") == 18
+    assert _plain(lines[-1]).strip() == ""
+    assert IdeSidebar._footer_create_col(20) == 18
+    assert _plain(lines[0]).strip() == "(no ide sessions)"
 
 
 def test_sidebar_grid_reflows_metadata_by_terminal_cell_width():
@@ -892,7 +913,7 @@ def test_sidebar_provider_configuration_is_ordered_and_swappable():
         sidebar=sidebar,
         providers=pane_registry,
     )
-    assert "P" in _plain(lines[3])
+    assert "P" in _plain(lines[1])
 
 
 def test_pane_registry_rehydrates_snapshot_without_plugin_discovery(monkeypatch):
@@ -952,15 +973,15 @@ def test_one_and_two_cell_driver_icons_keep_names_aligned(tmp_path):
         sidebar=sidebar,
         providers=registry,
     )
-    one, two = _plain(lines[2]), _plain(lines[5])
+    one, two = _plain(lines[0]), _plain(lines[3])
     assert SidebarGrid.cell_width(one[: one.index("ONE")]) == 3
     assert SidebarGrid.cell_width(two[: two.index("TWO")]) == 3
 
 
 def test_sidebar_grid_uses_the_shared_height_density_ladder():
-    assert SidebarGrid.for_view(20, 17, 4).entry_rows == 3
-    assert SidebarGrid.for_view(20, 16, 4).entry_rows == 2
-    assert SidebarGrid.for_view(20, 12, 4).entry_rows == 1
+    assert SidebarGrid.for_view(20, 15, 4).entry_rows == 3
+    assert SidebarGrid.for_view(20, 14, 4).entry_rows == 2
+    assert SidebarGrid.for_view(20, 10, 4).entry_rows == 1
 
 
 def test_selected_rows_use_the_legacy_green_and_teal_palette():
@@ -1074,46 +1095,56 @@ def test_normalized_driver_id_selects_the_legacy_icon(tmp_path):
 def test_entry_rows_compacts_as_the_pane_shrinks():
     """Full 3-row layout when it fits; drop the spacer, then the sub-line — never below 1.
     Losing decoration beats losing sessions off the bottom of the pane."""
-    # 4 sessions, tall pane (2 header + 3 footer + 12 = 17) → full layout
+    # 4 sessions, tall pane (3 footer + 12 = 15) → full layout
     assert IdeSidebar._entry_rows(4, 40) == 3
     # exactly enough for 3 rows each
-    assert IdeSidebar._entry_rows(4, 2 + 3 + 4 * 3) == 3
+    assert IdeSidebar._entry_rows(4, 3 + 4 * 3) == 3
     # one row short → drop the spacer
-    assert IdeSidebar._entry_rows(4, 2 + 3 + 4 * 3 - 1) == 2
+    assert IdeSidebar._entry_rows(4, 3 + 4 * 3 - 1) == 2
     # too short for 2 rows each → name-only
-    assert IdeSidebar._entry_rows(4, 2 + 3 + 4 * 2 - 1) == 1
+    assert IdeSidebar._entry_rows(4, 3 + 4 * 2 - 1) == 1
     # pathologically short still returns a usable 1
     assert IdeSidebar._entry_rows(40, 6) == 1
     # archive mode has a smaller footer, so it fits sooner
     assert IdeSidebar._entry_rows(4, 2 + 2 + 4 * 3, archive_mode=True) == 3
 
 
-def _report(button: int, row_1based: int) -> "re.Match[bytes]":
+def _report(button: int, row_1based: int, col_1based: int = 3) -> "re.Match[bytes]":
     import re as _re
     return IdeSidebar.MOUSE_RE.search(
-        f"\x1b[<{button};3;{row_1based}M".encode())
+        f"\x1b[<{button};{col_1based};{row_1based}M".encode())
 
 
 def test_click_index_uses_the_row_count_that_was_rendered():
     """The wrong-session bug: hit-testing must divide by the SAME entry_rows the draw
     used. With a compacted 2-row layout, dividing by 3 selects the wrong session."""
     # 2-row layout: rel 0,1 → session0; rel 2,3 → session1
-    assert IdeSidebar._click_index(_report(0, 3), 2) == 0     # rel 0
-    assert IdeSidebar._click_index(_report(0, 5), 2) == 1     # rel 2
+    assert IdeSidebar._click_index(_report(0, 1), 2) == 0     # rel 0
+    assert IdeSidebar._click_index(_report(0, 3), 2) == 1     # rel 2
     # THE BUG: that same physical row, hit-tested with the full 3-row assumption, is read
     # as the blank spacer instead of session 1 — a click that selects the wrong thing (or
     # nothing). This is why render and hit-test must share one entry_rows.
-    assert IdeSidebar._click_index(_report(0, 5), 3) is None
+    assert IdeSidebar._click_index(_report(0, 3), 3) is None
     # 3-row layout: rel 0,1 → session0, rel 2 = spacer, rel 3 → session1
-    assert IdeSidebar._click_index(_report(0, 3), 3) == 0
-    assert IdeSidebar._click_index(_report(0, 6), 3) == 1
+    assert IdeSidebar._click_index(_report(0, 1), 3) == 0
+    assert IdeSidebar._click_index(_report(0, 4), 3) == 1
     # 1-row layout: every row is its own session
-    assert IdeSidebar._click_index(_report(0, 3), 1) == 0
-    assert IdeSidebar._click_index(_report(0, 4), 1) == 1
-    # header row is always the `+` button, whatever the density
-    assert IdeSidebar._click_index(_report(0, 1), 2) == IdeSidebar.PLUS_HIT
-    assert IdeSidebar._click_index(_report(0, 1), 1) == IdeSidebar.PLUS_HIT
-    right_click = IdeSidebar._click_index(_report(2, 6), 3)
+    assert IdeSidebar._click_index(_report(0, 1), 1) == 0
+    assert IdeSidebar._click_index(_report(0, 2), 1) == 1
+    # The footer action row owns both `show archive` and the `+` button.
+    assert IdeSidebar._click_index(
+        _report(0, 12, 19), 2, archive_row=11, create_col=18
+    ) == IdeSidebar.CREATE_FOOTER_HIT
+    assert IdeSidebar._click_index(
+        _report(0, 12, 20), 2, archive_row=11, create_col=18
+    ) == IdeSidebar.CREATE_FOOTER_HIT
+    assert IdeSidebar._click_index(
+        _report(0, 12, 1), 2, archive_row=11, create_col=18
+    ) == IdeSidebar.ARCHIVE_HIT
+    assert IdeSidebar._click_index(
+        _report(0, 11, 1), 2, filter_row=10, archive_row=11, create_col=18
+    ) == IdeSidebar.FILTER_HIT
+    right_click = IdeSidebar._click_index(_report(2, 4), 3)
     assert right_click == IdeSidebar.OPTIONS_HIT_BASE - 1
     assert IdeSidebar._options_index(right_click) == 1
     # active footer row is a real clickable control, not part of the session list
@@ -1151,6 +1182,32 @@ def test_drain_maps_archive_footer_click():
         archive_row=11,
     )
     assert click == IdeSidebar.ARCHIVE_HIT
+    assert wheel == 0
+    assert keys == b""
+    assert tail == b""
+
+
+def test_drain_maps_create_click_on_archive_footer_row():
+    click, wheel, keys, tail = IdeSidebar._drain(
+        b"\x1b[<0;19;12M",
+        2,
+        archive_row=11,
+        create_col=18,
+    )
+    assert click == IdeSidebar.CREATE_FOOTER_HIT
+    assert wheel == 0
+    assert keys == b""
+    assert tail == b""
+
+
+def test_drain_maps_filter_footer_click():
+    click, wheel, keys, tail = IdeSidebar._drain(
+        b"\x1b[<0;3;11M",
+        2,
+        filter_row=10,
+        archive_row=11,
+    )
+    assert click == IdeSidebar.FILTER_HIT
     assert wheel == 0
     assert keys == b""
     assert tail == b""
@@ -1223,8 +1280,35 @@ def test_crowded_sidebar_viewport_keeps_render_inside_pane(tmp_path):
 
     assert len(lines) <= height
     assert start <= cursor < start + len(visible)
-    assert any("example" in line for line in lines[:2])
+    assert all("example" not in line for line in lines[:2])
     assert any("S20" in line for line in lines)
+
+
+def test_crowded_sidebar_keeps_filter_and_actions_visible(tmp_path):
+    height = 14
+    sessions = _sessions(30)
+    cursor = 20
+    entry_rows = IdeSidebar._entry_rows(len(sessions), height)
+    visible, visible_cursor, _start = IdeSidebar._viewport(
+        sessions, cursor, height, entry_rows
+    )
+    lines = IdeSidebar.render_lines(
+        tmp_path,
+        visible,
+        "/workspace/example",
+        "id-20",
+        visible_cursor,
+        20,
+        entry_rows=entry_rows,
+    )
+    lines = IdeSidebar._pin_footer(lines, height, IdeSidebar.FOOTER_ROWS)[:height]
+
+    assert len(lines) == height
+    assert "filter" in _plain(lines[-3])
+    footer = _plain(lines[-2])
+    assert "show archive" in footer
+    assert footer.rstrip().endswith("+")
+    assert _plain(lines[-1]).strip() == ""
 
 
 def test_sidebar_paint_clears_visible_pane_before_redraw():

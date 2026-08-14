@@ -48,9 +48,10 @@ class IdeLayout:
     AGENT_PREF = 90
 
     # ---- sidebar rows ----
-    HEADER_ROWS = 2                     # repo/`+` header, then a blank
+    HEADER_ROWS = 0                     # active list starts at row 0; repo lives in pane title
+    HEADER_ROWS_ARCHIVE = 2             # archive banner, then a blank
     ENTRY_ROWS = 3                      # FULL entry: name · sub-line · blank spacer
-    FOOTER_ROWS = 3                     # filter + blank + `show archive`
+    FOOTER_ROWS = 3                     # filter + `show archive` + blank safety row
     FOOTER_ROWS_ARCHIVE = 2             # filter + esc hint
     SPACER_OFFSET = 2                   # index of the blank row within a full entry
 
@@ -105,7 +106,8 @@ class IdeLayout:
         session — that is bug (1) above.
         """
         footer = cls.FOOTER_ROWS_ARCHIVE if archive_mode else cls.FOOTER_ROWS
-        budget = height - cls.HEADER_ROWS - footer
+        header = cls.HEADER_ROWS_ARCHIVE if archive_mode else cls.HEADER_ROWS
+        budget = height - header - footer
         for rows in (cls.ENTRY_ROWS, 2, 1):
             if n_sessions * rows <= budget:
                 return rows
@@ -117,23 +119,30 @@ class IdeLayout:
     ) -> int:
         """Maximum visible session rows for a pane at the chosen density."""
         footer = cls.FOOTER_ROWS_ARCHIVE if archive_mode else cls.FOOTER_ROWS
-        budget = height - cls.HEADER_ROWS - footer
+        header = cls.HEADER_ROWS_ARCHIVE if archive_mode else cls.HEADER_ROWS
+        budget = height - header - footer
         return max(0, budget // max(1, entry_rows))
 
     @classmethod
-    def session_row(cls, index: int, entry_rows: int) -> int:
+    def session_row(
+        cls, index: int, entry_rows: int, archive_mode: bool = False
+    ) -> int:
         """The 0-based screen row where session `index` draws its NAME line."""
-        return cls.HEADER_ROWS + index * entry_rows
+        header = cls.HEADER_ROWS_ARCHIVE if archive_mode else cls.HEADER_ROWS
+        return header + index * entry_rows
 
     @classmethod
-    def session_at_row(cls, row0: int, entry_rows: int) -> int | None:
+    def session_at_row(
+        cls, row0: int, entry_rows: int, archive_mode: bool = False
+    ) -> int | None:
         """Inverse of `session_row`: which session a 0-based screen row belongs to.
 
         None for the header, above the list, or the blank spacer inside a full entry.
         Keeping both directions here is what makes render and hit-testing provably
         agree — they are literally the same arithmetic.
         """
-        rel = row0 - cls.HEADER_ROWS
+        header = cls.HEADER_ROWS_ARCHIVE if archive_mode else cls.HEADER_ROWS
+        rel = row0 - header
         if rel < 0:
             return None
         if entry_rows >= cls.ENTRY_ROWS and rel % entry_rows == cls.SPACER_OFFSET:

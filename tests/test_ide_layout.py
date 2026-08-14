@@ -21,7 +21,8 @@ SKILL_DIR = LIB.parent / "ide"
 # Names that may be DEFINED only in ide_layout.py. Elsewhere they may be aliased
 # (`X = IdeLayout.X`) but never assigned a literal.
 OWNED = ("SIDEBAR_W", "PLAN_W", "AGENT_MIN", "PLAN_MIN", "AGENT_PREF",
-         "HEADER_ROWS", "ENTRY_ROWS", "FOOTER_ROWS", "FOOTER_ROWS_ARCHIVE")
+         "HEADER_ROWS", "HEADER_ROWS_ARCHIVE", "ENTRY_ROWS", "FOOTER_ROWS",
+         "FOOTER_ROWS_ARCHIVE")
 
 
 def test_no_geometry_defined_outside_the_owner():
@@ -75,8 +76,9 @@ def test_row_math_round_trips_at_every_density():
 
 
 def test_spacer_and_header_rows_map_to_no_session():
-    assert IdeLayout.session_at_row(0, 3) is None               # header
-    assert IdeLayout.session_at_row(1, 3) is None               # header blank
+    assert IdeLayout.session_at_row(0, 3) == 0                  # active: no header
+    assert IdeLayout.session_at_row(0, 3, archive_mode=True) is None
+    assert IdeLayout.session_at_row(1, 3, archive_mode=True) is None
     spacer = IdeLayout.HEADER_ROWS + IdeLayout.SPACER_OFFSET    # blank inside entry 0
     assert IdeLayout.session_at_row(spacer, 3) is None
     # compacted layouts have no spacer, so that same row IS a session
@@ -85,15 +87,15 @@ def test_spacer_and_header_rows_map_to_no_session():
 
 def test_entry_rows_degrades_and_never_returns_zero():
     assert IdeLayout.entry_rows(4, 40) == IdeLayout.ENTRY_ROWS
-    assert IdeLayout.entry_rows(4, 16) == 2
-    assert IdeLayout.entry_rows(4, 11) == 1
+    assert IdeLayout.entry_rows(4, 14) == 2
+    assert IdeLayout.entry_rows(4, 10) == 1
     assert IdeLayout.entry_rows(50, 5) == 1                     # pathological still usable
 
 
 def test_session_capacity_accounts_for_header_and_footer():
-    assert IdeLayout.session_capacity(40, 3) == 11
-    assert IdeLayout.session_capacity(12, 1) == 7
-    assert IdeLayout.session_capacity(4, 1) == 0
+    assert IdeLayout.session_capacity(40, 3) == 12
+    assert IdeLayout.session_capacity(12, 1) == 9
+    assert IdeLayout.session_capacity(4, 1) == 1
     assert IdeLayout.session_capacity(7, 1, archive_mode=True) == 3
 
 
@@ -107,8 +109,11 @@ def test_consumers_alias_rather_than_redefine():
     assert (Frame.SIDEBAR_W, Frame.PLAN_W) == (IdeLayout.SIDEBAR_W, IdeLayout.PLAN_W)
     assert Frame.AGENT_PREF == IdeLayout.AGENT_PREF
     assert Frame.SIDEBAR_ZOOM_MAX == IdeLayout.mobile_threshold()
-    assert (IdeSidebar.HEADER_ROWS, IdeSidebar.ENTRY_ROWS) == (
-        IdeLayout.HEADER_ROWS, IdeLayout.ENTRY_ROWS)
+    assert (
+        IdeSidebar.HEADER_ROWS,
+        IdeSidebar.HEADER_ROWS_ARCHIVE,
+        IdeSidebar.ENTRY_ROWS,
+    ) == (IdeLayout.HEADER_ROWS, IdeLayout.HEADER_ROWS_ARCHIVE, IdeLayout.ENTRY_ROWS)
 
 
 # ---- verify's duplicate-tmux-option check (the mouse off/on that hid for a session) ----

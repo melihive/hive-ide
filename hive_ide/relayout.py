@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -216,6 +217,37 @@ class IdeRelayout:
                 }
             )
         return clients
+
+    @staticmethod
+    def _status_rows(socket: str) -> int:
+        """Rows tmux reserves for its status area in this IDE server.
+
+        Hook payloads pass client geometry. `resize-window` expects pane-area geometry.
+        When the IDE statusline is enabled, using raw client height makes panes one row
+        too tall, so fullscreen TUIs draw their last line underneath the statusline.
+        """
+        status = IdeRelayout._tmux(socket, ["show-options", "-gv", "status"])
+        if not status or status in {"off", "0"}:
+            return 0
+        if status.isdigit():
+            return max(0, int(status))
+        rows = 1
+        formats = IdeRelayout._tmux(socket, ["show-options", "-g", "status-format"])
+        for line in formats.splitlines():
+            name = line.partition(" ")[0]
+            match = re.fullmatch(r"status-format\[(\d+)\]", name)
+            if match:
+                rows = max(rows, int(match.group(1)) + 1)
+        return rows
+
+    @staticmethod
+    def _client_to_window_geometry(
+        socket: str, geometry: tuple[int, int] | None
+    ) -> tuple[int, int] | None:
+        if geometry is None:
+            return None
+        width, height = geometry
+        return width, max(1, height - IdeRelayout._status_rows(socket))
 
     @staticmethod
     def _pane_geometries(socket: str, win: str) -> list[dict]:
@@ -563,8 +595,14 @@ class IdeRelayout:
             and active_geometry[1].isdigit()
             else None
         )
-        latest_geometry = IdeRelayout._latest_client_geometry(sock)
-        canonical = latest_geometry or forced_geometry or active_tuple
+        latest_client_geometry = IdeRelayout._latest_client_geometry(sock)
+        latest_geometry = IdeRelayout._client_to_window_geometry(
+            sock, latest_client_geometry
+        )
+        forced_window_geometry = IdeRelayout._client_to_window_geometry(
+            sock, forced_geometry
+        )
+        canonical = latest_geometry or forced_window_geometry or active_tuple
         debug_enabled = IdeRelayout._debug_enabled(state_path)
         debug_options = IdeRelayout._tmux_options(sock) if debug_enabled else {}
         debug_windows = []
@@ -668,10 +706,16 @@ class IdeRelayout:
                     "socket": sock,
                     "mode": mode,
                     "forced_geometry": list(forced_geometry) if forced_geometry else None,
+                    "forced_window_geometry": (
+                        list(forced_window_geometry) if forced_window_geometry else None
+                    ),
                     "active_geometry": list(active_tuple) if active_tuple else None,
                     "latest_geometry": list(latest_geometry) if latest_geometry else None,
+                    "latest_client_geometry": (
+                        list(latest_client_geometry) if latest_client_geometry else None
+                    ),
                     "geometry_source": IdeRelayout._geometry_source(
-                        latest_geometry, forced_geometry, active_tuple
+                        latest_geometry, forced_window_geometry, active_tuple
                     ),
                     "tmux_options": debug_options,
                     "clients": IdeRelayout._client_geometries(sock),

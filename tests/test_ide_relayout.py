@@ -258,6 +258,59 @@ def test_snap_prefers_latest_client_size_over_stale_invoker(tmp_path, monkeypatc
     ] in calls
 
 
+def test_snap_converts_statusline_client_height_to_window_height(tmp_path, monkeypatch):
+    state = tmp_path / "layout.json"
+    calls: list[list[str]] = []
+
+    def fake_tmux(_socket, args):
+        calls.append(args)
+        if args[:2] == ["show-options", "-gv"] and args[-1] == "status":
+            return "on"
+        if args[:2] == ["show-options", "-g"] and args[-1] == "status-format":
+            return "status-format[0] default"
+        if args[:2] == ["list-windows", "-a"]:
+            return "@0"
+        if args[-1] == "#{window_width}\t#{window_height}":
+            return "220\t65"
+        if args[-1] == "#{window_width}":
+            return "220"
+        if args[-1] == "#{window_zoomed_flag}":
+            return "0"
+        if args[-1] == "#{window_id}":
+            return "@0"
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fake_tmux)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "snap",
+            str(state),
+            "220",
+            "65",
+        ]
+    ) == 0
+
+    assert [
+        "resize-window",
+        "-t",
+        "@0",
+        "-x",
+        "220",
+        "-y",
+        "64",
+    ] in calls
+
+
 def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
     state = tmp_path / "layout.json"
     (tmp_path / "layout.json.debug.enable").write_text("1", encoding="utf-8")
@@ -320,12 +373,13 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
     assert event["event"] == "relayout"
     assert event["geometry_source"] == "latest-client"
     assert event["forced_geometry"] == [254, 67]
-    assert event["latest_geometry"] == [58, 24]
+    assert event["latest_geometry"] == [58, 23]
+    assert event["latest_client_geometry"] == [58, 24]
     assert event["clients"][1]["tty"] == "/dev/pts/2"
     assert event["clients"][1]["session"] == "hive-ide"
     assert event["tmux_options"]["server.status"] == "on"
     assert event["tmux_options"]["window.window-size"] == "latest"
-    assert event["windows"][0]["resized_to"] == [58, 24]
+    assert event["windows"][0]["resized_to"] == [58, 23]
     assert event["windows"][0]["panes_before"][0]["role"] == "sidebar"
 
 

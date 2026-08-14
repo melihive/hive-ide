@@ -683,6 +683,7 @@ class Frame:
             )
             if result.returncode != 0:
                 raise HiveIdeError(result.stderr.strip() or "Could not reopen the plan pane.")
+            self.tmux(["select-pane", "-T", self._plan_title(record), "-t", pane_id])
             self.tmux(["select-pane", "-t", pane_id])
             return {
                 "session_id": record["id"],
@@ -809,7 +810,12 @@ class Frame:
             self.store.write("sessions", record["id"], fresh)
         record.pop("handoff", None)
 
-    def _tag(self, target: str, record: dict[str, Any]) -> None:
+    def _tag(
+        self,
+        target: str,
+        record: dict[str, Any],
+        role_panes: dict[str, str] | None = None,
+    ) -> None:
         self.tmux(["set-option", "-w", "-t", target, "automatic-rename", "off"])
         self.tmux(["set-option", "-w", "-t", target, "allow-rename", "off"])
         self.tmux(["rename-window", "-t", target, record["name"]])
@@ -819,8 +825,51 @@ class Frame:
             ("@hive_ide_workspace_key", self.store.workspace_key),
         ):
             self.tmux(["set-option", "-w", "-t", target, key, value])
-        for index, role in enumerate(self.PANE_ROLES):
-            self.tmux(["set-option", "-p", "-t", f"{target}.{index}", "@hive_ide_pane", role])
+        if role_panes is None:
+            role_panes = {
+                role: f"{target}.{index}"
+                for index, role in enumerate(self.PANE_ROLES)
+            }
+        for role, pane in role_panes.items():
+            self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_pane", role])
+        self._retitle_panes(target, record)
+
+    def _retitle_panes(self, target: str, record: dict[str, Any]) -> None:
+        titles = self._pane_titles(record)
+        roles = self._order_role_panes(target)
+        for role, title in titles.items():
+            pane = roles.get(role)
+            if pane:
+                self.tmux(["select-pane", "-T", title, "-t", pane])
+                self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_title", title])
+
+    def _pane_titles(self, record: dict[str, Any]) -> dict[str, str]:
+        workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
+        return {
+            "sidebar": workspace,
+            "agent": str(record.get("name") or "chat"),
+            "plan": self._plan_title(record),
+        }
+
+    def _plan_title(self, record: dict[str, Any]) -> str:
+        try:
+            path = self.plan_path(record)
+        except UsageError:
+            return "No plan"
+        title = self._plan_internal_title(path)
+        return title or path.stem.replace("-", " ").replace("_", " ").title()
+
+    @staticmethod
+    def _plan_internal_title(path: Path) -> str | None:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                text = line.strip()
+                if text.startswith("# "):
+                    value = text[2:].strip()
+                    return value or None
+        except OSError:
+            return None
+        return None
 
     def _apply_columns(self, target: str) -> None:
         roles = self._order_role_panes(target)
@@ -964,6 +1013,7 @@ class Frame:
                 self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", role])
             restored.append(role)
         if restored:
+            self._retitle_panes(target, record)
             self._apply_columns(target)
         return tuple(restored)
 
@@ -1097,6 +1147,19 @@ class Frame:
             if re.fullmatch(r"status-format\[(?!0\])\d+\]", name):
                 self.tmux(["set-option", "-g", "-u", name])
 
+    def _normalize_pane_titlebars(self) -> None:
+        self.tmux(["set-option", "-g", "pane-border-status", "top"])
+        self.tmux(["set-option", "-g", "pane-active-border-style", "fg=colour51"])
+        self.tmux(["set-option", "-g", "pane-border-style", "fg=colour238"])
+        self.tmux(
+            [
+                "set-option",
+                "-g",
+                "pane-border-format",
+                "#{?pane_active,#[fg=colour16;bg=colour51;bold],#[fg=colour244]} #{@hive_ide_title} #[default]",
+            ]
+        )
+
     def _normalize_resize_behavior(self) -> None:
         """Follow the latest attached client so mobile SSH cannot pin desktop geometry."""
         self.tmux(["set-option", "-g", "window-size", "latest"])
@@ -1105,6 +1168,7 @@ class Frame:
         self._normalize_frame_environment()
         self._normalize_status_rows()
         self._normalize_terminal_title()
+        self._normalize_pane_titlebars()
         self._normalize_resize_behavior()
         keys = self._key_bindings()
         prefix = (self.settings.get("keys") or {}).get("prefix")
@@ -1374,8 +1438,11 @@ class Frame:
                 f"run-shell -b {shlex.quote(relayout_client)}",
             ]
         )
-        mobile = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
-        focus_relayout = f"run-shell -b {shlex.quote(relayout_client)}"
+        focus_relayout = (
+            f"if-shell -F '#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}' "
+            f"{shlex.quote(f'run-shell -b {shlex.quote(relayout_client)}')} "
+            "'true'"
+        )
         self.tmux(
             [
                 "set-hook",

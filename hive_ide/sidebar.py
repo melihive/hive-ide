@@ -273,19 +273,22 @@ class IdeSidebar:
     # whose own Up/Down bindings ate the keys before the sidebar ever saw them. Claiming
     # the wheel (see _wheel_delta) is what actually keeps the pane out of copy-mode.
     PARTIAL_SECONDS = 0.4         # was 0.05 — too short for network latency
-    # Row layout, must match render_lines: header + blank, then ENTRY_ROWS per entry
-    # (name, relative-time, blank). ENTRY_ROWS is the FULL layout and a MAXIMUM, not a
+    # Row layout, must match render_lines: ENTRY_ROWS per entry in active mode; archive
+    # mode has its own banner rows. ENTRY_ROWS is the FULL layout and a MAXIMUM, not a
     # constant: `_entry_rows` drops the spacer (→2) and then the sub-line (→1) when the
     # list would outgrow the pane. Whatever it returns MUST be used by both `render_lines`
     # and `_click_index` — if they disagree, clicks land on the wrong session.
     # Aliases of the single owner — NOT independent definitions. See ide_layout.py.
-    HEADER_ROWS, ENTRY_ROWS = IdeLayout.HEADER_ROWS, IdeLayout.ENTRY_ROWS
+    HEADER_ROWS, HEADER_ROWS_ARCHIVE = IdeLayout.HEADER_ROWS, IdeLayout.HEADER_ROWS_ARCHIVE
+    ENTRY_ROWS = IdeLayout.ENTRY_ROWS
     FOOTER_ROWS, FOOTER_ROWS_ARCHIVE = IdeLayout.FOOTER_ROWS, IdeLayout.FOOTER_ROWS_ARCHIVE
     WHEEL_UP, WHEEL_DOWN = 64, 65             # SGR mouse buttons for the scroll wheel
-    # Sentinel for "the click landed on the header `+`". A negative int can never collide
+    # Sentinel for "the click landed on create". A negative int can never collide
     # with a real session index, so `_click_index` keeps one return type.
     PLUS_HIT = -1
     ARCHIVE_HIT = -2
+    CREATE_FOOTER_HIT = -3
+    FILTER_HIT = -4
     OPTIONS_HIT_BASE = -10000
     HEADER = "\x1b[1;38;5;250m"   # bold light grey
     ACTIVE = "\x1b[1;38;5;51m"    # bold bright cyan — the current window
@@ -301,7 +304,7 @@ class IdeSidebar:
                   "working": ("●", "\x1b[38;5;220m"),
                   "error": ("!", "\x1b[1;38;5;203m")}
     STALE_WORKING_SECONDS = 900   # a crashed agent must not sit on "working" forever
-    PLUS = "+"                    # header button — click to create an ide session
+    PLUS = "+"                    # footer button — click to create an ide session
     # Green, deliberately NOT the cyan of ACTIVE/SEL_CUR: cyan means "the current
     # window" everywhere else in this list, so a cyan `+` read as a status rather than
     # a button. Green is unused here and says "create".
@@ -541,7 +544,7 @@ class IdeSidebar:
         return f"{base}{IdeSidebar.EL}{content}{IdeSidebar.RESET}"
 
     @staticmethod
-    def _paint(lines: list[str]) -> str:
+    def _paint(lines: list[str], height: int | None = None) -> str:
         """Full-pane repaint for sidebar loops.
 
         Sidebar panes are long-running processes that survive resizes, source reloads, and
@@ -550,6 +553,8 @@ class IdeSidebar:
         landed in the pane. A full visible-screen clear before each draw is cheap for a
         narrow sidebar and keeps old paths/error text from being mistaken for sessions.
         """
+        if height is not None and len(lines) < height:
+            lines = [*lines, *(IdeSidebar._row("") for _ in range(height - len(lines)))]
         return (
             IdeSidebar.NO_WRAP
             + IdeSidebar.HOME
@@ -558,6 +563,36 @@ class IdeSidebar:
             + "\n".join(lines)
             + IdeSidebar.CLEAR_BELOW
         )
+
+    @staticmethod
+    def _pin_footer(lines: list[str], height: int, footer_rows: int) -> list[str]:
+        """Keep footer controls at the bottom when the session list is shorter than pane."""
+        if footer_rows <= 0 or len(lines) >= height:
+            return lines
+        split = max(0, len(lines) - footer_rows)
+        pad = max(0, height - len(lines))
+        if IdeSidebar._cursor_rc is not None and IdeSidebar._cursor_rc[0] > split:
+            row, col = IdeSidebar._cursor_rc
+            IdeSidebar._cursor_rc = (row + pad, col)
+        return [*lines[:split], *(IdeSidebar._row("") for _ in range(pad)), *lines[split:]]
+
+    @staticmethod
+    def _footer_create_col(width: int, sidebar_settings: dict | None = None) -> int:
+        """0-based column where the footer create hitbox starts.
+
+        The footer `+` is drawn inside the same right status track as dots/triangles.
+        Click math must reserve that whole track, not just the glyph width, or a click on
+        the visible plus can be interpreted as `show archive`.
+        """
+        settings = sidebar_settings or _DEFAULT_SIDEBAR
+        icons = settings.get("icons") or {}
+        controls = icons.get("controls") or {}
+        status_icons = icons.get("status") or {}
+        create_width = SidebarGrid.cell_width(controls.get("create", IdeSidebar.PLUS))
+        status_width = max(
+            [2, create_width, *(SidebarGrid.cell_width(str(v)) for v in status_icons.values())]
+        )
+        return max(0, width - status_width)
 
     @staticmethod
     def _initial_focus() -> bool:
@@ -596,6 +631,8 @@ class IdeSidebar:
             return "down"
         if data in (b"\x1b[C", b"\x1bOC"):
             return "right"
+        if data in (b"\x1b[D", b"\x1bOD"):
+            return "left"
         if data in (b"\r", b"\n"):
             return "enter"
         if data in (b"\x7f", b"\b"):
@@ -684,44 +721,52 @@ class IdeSidebar:
         m: re.Match[bytes],
         entry_rows: int = ENTRY_ROWS,
         *,
+        filter_row: int | None = None,
         archive_row: int | None = None,
+        create_col: int | None = None,
+        archive_mode: bool = False,
     ) -> int | None:
-        """What one SGR mouse report hit: a session index, PLUS_HIT, or None.
+        """What one SGR mouse report hit: a session index, footer action, or None.
 
         `entry_rows` MUST be the value the current draw used (`_entry_rows`), or clicks
         map to the wrong session on a pane too short for the full 3-row layout.
 
-        None unless it's a left-click or right-click. Row 0 is the header, which carries the `+`
-        button — a click anywhere on that row opens the new-session prompt (the whole
-        row is the target, not just the glyph cell: a 1-cell hitbox is unusable).
+        None unless it's a left-click or right-click. The active list has no body
+        header; archive mode reserves its banner rows.
         A right-click on a session row returns an encoded options hit for that index.
         """
         button, kind = int(m.group(1)), m.group(4)
         if button not in {0, 2} or kind != b"M":   # press only (ignore wheel/drag/release)
             return None
         row = int(m.group(3)) - 1                              # 1-based row → 0-based
+        col = int(m.group(2)) - 1                              # 1-based col → 0-based
         if button == 2:
-            index = IdeLayout.session_at_row(row, entry_rows)
+            index = IdeLayout.session_at_row(row, entry_rows, archive_mode=archive_mode)
             return (
                 IdeSidebar.OPTIONS_HIT_BASE - index
                 if index is not None
                 else None
             )
-        if row == 0:
-            return IdeSidebar.PLUS_HIT
+        if filter_row is not None and row == filter_row:
+            return IdeSidebar.FILTER_HIT
         if archive_row is not None and row == archive_row:
+            if create_col is not None and col >= create_col:
+                return IdeSidebar.CREATE_FOOTER_HIT
             return IdeSidebar.ARCHIVE_HIT
         # Delegated to the geometry owner, which also computes the row the renderer
         # DRAWS each session on. Same arithmetic, both directions, one place — so the
         # wrong-session bug cannot come back by the two drifting apart.
-        return IdeLayout.session_at_row(row, entry_rows)
+        return IdeLayout.session_at_row(row, entry_rows, archive_mode=archive_mode)
 
     @staticmethod
     def _drain(
         buf: bytes,
         entry_rows: int = ENTRY_ROWS,
         *,
+        filter_row: int | None = None,
         archive_row: int | None = None,
+        create_col: int | None = None,
+        archive_mode: bool = False,
     ) -> tuple[int | None, int, bytes, bytes]:
         """Split an input buffer into (last left-click, net wheel delta, key bytes, tail).
 
@@ -737,7 +782,14 @@ class IdeSidebar:
         for m in IdeSidebar.MOUSE_RE.finditer(buf):
             keys += buf[end:m.start()]
             end = m.end()
-            idx = IdeSidebar._click_index(m, entry_rows, archive_row=archive_row)
+            idx = IdeSidebar._click_index(
+                m,
+                entry_rows,
+                filter_row=filter_row,
+                archive_row=archive_row,
+                create_col=create_col,
+                archive_mode=archive_mode,
+            )
             if idx is not None:
                 click = idx
             else:
@@ -888,32 +940,16 @@ class IdeSidebar:
             status_cells=status_width,
             slot_cells=slot_widths,
         )
-        workspace_label = Path(repo).name or repo
         if archive_mode:
             # Archive VIEW header: no `+`, an unmistakable "you're browsing the archive"
             # banner. ESC leaves it (footer hint).
+            workspace_label = Path(repo).name or repo
             banner = grid.fit(f"{workspace_label} · archived", width)
             lines = [row(f"{IdeSidebar.ARCHIVE_HEADER}{banner}{IdeSidebar.RESET}"), row("")]
         else:
-            # Header: repo name left, `+` right — a TUI button (see _click_index). The repo
-            # is fitted to leave the button its cell, so a long repo name truncates rather
-            # than pushing `+` off the edge.
-            create_icon = controls.get("create", IdeSidebar.PLUS)
-            plus_w = grid.cell_width(create_icon)
-            repo_text = grid.fit(
-                workspace_label,
-                max(1, width - plus_w - 1),
-            )
-            gap = " " * max(
-                1,
-                width - grid.cell_width(repo_text) - plus_w,
-            )
-            # The `+` inverts to a filled bar when keyboard-focused, so its focus is as
-            # visible as a selected row.
-            plus_active = on_plus and focused
-            plus = (f"{IdeSidebar.SEL_CUR}{create_icon}{IdeSidebar.RESET}" if plus_active
-                    else f"{IdeSidebar.PLUS_COLOR}{create_icon}{IdeSidebar.RESET}")
-            lines = [row(f"{IdeSidebar.HEADER}{repo_text}{IdeSidebar.RESET}{gap}{plus}"), row("")]
+            # The workspace name now lives in the tmux pane title; the active list starts
+            # immediately at the first row.
+            lines = []
         if not sessions:
             msg = ("(no match)" if query else
                    "(no archived sessions)" if archive_mode else "(no ide sessions)")
@@ -1076,25 +1112,36 @@ class IdeSidebar:
                              f"{IdeSidebar.RESET}"))
             IdeSidebar._cursor_rc = (filter_row + 1, (len('filter: ') + len(query) + 1) if query else 1)
         else:
-            # Active view footer: the filter line (a real focus stop), a BLANK gap, then the
-            # hidden `show archive` affordance — both invert when arrow-focused. The gap
-            # keeps `show archive` from reading as part of the filter block.
+            # Active view footer: filter, then action row, then one blank safety row.
+            # Some terminal/tmux status combinations visually steal the last content row;
+            # leaving it blank keeps both controls visible and preserves the expected
+            # order: filter ABOVE `show archive`.
             fsel = (on_filter and focused)
             ftext = (query or "filter…")
+            asel = (on_archive and focused)
+            archive_icon = controls.get("archive", "▾")
+            create_icon = controls.get("create", IdeSidebar.PLUS)
+            label_text = f"{archive_icon} show archive"
+            create_width = grid.cell_width(create_icon)
+            create_track = max(grid.status_cells, create_width)
+            label = grid.fit(label_text, max(1, width - create_track - 1))
+            gap = " " * max(1, width - grid.cell_width(label) - create_track)
+            create = (
+                f"{IdeSidebar.SEL_CUR}{grid.pad(create_icon, create_track)}{IdeSidebar.RESET}"
+                if on_plus and focused
+                else f"{IdeSidebar.PLUS_COLOR}{grid.pad(create_icon, create_track)}{IdeSidebar.RESET}"
+            )
             filter_row = len(lines)
             if fsel:
                 lines.append(row(f"{IdeSidebar._fit(ftext, width)}", True, IdeSidebar.SEL_ALT))
             else:
                 lines.append(row(f"{IdeSidebar.ACTIVE if query else IdeSidebar.DIM}"
                                  f"{IdeSidebar._fit(ftext, width)}{IdeSidebar.RESET}"))
-            lines.append(row(""))   # one blank line ABOVE `show archive` (Phase 15 bug)
-            asel = (on_archive and focused)
-            archive_icon = controls.get("archive", "▾")
-            alabel = IdeSidebar._fit(f"{archive_icon} show archive", width)
             if asel:
-                lines.append(row(alabel, True, IdeSidebar.SEL_ALT))
+                lines.append(row(f"{IdeSidebar.SEL_ALT}{label}{gap}{IdeSidebar.RESET}{create}"))
             else:
-                lines.append(row(f"{IdeSidebar.DIM}{alabel}{IdeSidebar.RESET}"))
+                lines.append(row(f"{IdeSidebar.DIM}{label}{IdeSidebar.RESET}{gap}{create}"))
+            lines.append(row(""))
             # Park the cursor in the filter field (after any typed query), NOT at the end of
             # the `show archive` line — so the block sits where you'd type (Phase 15 bug).
             IdeSidebar._cursor_rc = (filter_row + 1, (len(query) + 1) if query else 1)
@@ -1253,10 +1300,16 @@ class IdeSidebar:
                     sidebar_settings,
                     provider_registry,
                     IdeSidebar._tmux_alerts(),
-                )[:height]
+                )
+                footer_rows = (
+                    IdeSidebar.FOOTER_ROWS_ARCHIVE
+                    if archive_mode
+                    else IdeSidebar.FOOTER_ROWS
+                )
+                lines = IdeSidebar._pin_footer(lines, height, footer_rows)[:height]
                 # Each line carries its own erase-to-EOL (see _row), and the frame paint
                 # clears the pane first so stale rows from prior layouts cannot survive.
-                sys.stdout.write(IdeSidebar._paint(lines))
+                sys.stdout.write(IdeSidebar._paint(lines, height))
                 # Park the terminal cursor on the input row (filter/name) when focused, so
                 # the block sits where you'd type instead of at the end of the last line
                 # drawn (Phase 15). `render_lines` set `_cursor_rc` for this draw.
@@ -1275,11 +1328,19 @@ class IdeSidebar:
                         else IdeSidebar.PARTIAL_SECONDS)
                 ready, _, _ = select.select([fd], [], [], wait)
                 if ready:
-                    archive_row = None if archive_mode else len(lines) - 1
+                    filter_row = None if archive_mode else max(0, len(lines) - 3)
+                    archive_row = None if archive_mode else max(0, len(lines) - 2)
                     click, wheel, data, buf = IdeSidebar._drain(
                         buf + os.read(fd, 64),
                         entry_rows,
+                        filter_row=filter_row,
                         archive_row=archive_row,
+                        create_col=(
+                            IdeSidebar._footer_create_col(width, sidebar_settings)
+                            if archive_row is not None and not archive_mode
+                            else None
+                        ),
+                        archive_mode=archive_mode,
                     )
                     if wheel:
                         # The sidebar OWNS the wheel: move the browse cursor. Handling it
@@ -1323,7 +1384,7 @@ class IdeSidebar:
                         ):
                             archive_mode, query, cursor = False, "", 0   # resumed → back to active
                             cursor_session_id = ""
-                    elif click == IdeSidebar.PLUS_HIT:
+                    elif click in {IdeSidebar.PLUS_HIT, IdeSidebar.CREATE_FOOTER_HIT}:
                         # Same action as Enter/Space on the focused `+` and as <prefix>+:
                         # the guided modal. This branch used to open the OLD inline name
                         # prompt — the modal commit rewired the keyboard paths and the key
@@ -1334,6 +1395,8 @@ class IdeSidebar:
                     elif click == IdeSidebar.ARCHIVE_HIT:
                         archive_mode, on_archive, on_filter, query, cursor = True, False, False, "", 0
                         cursor_session_id = ""
+                    elif click == IdeSidebar.FILTER_HIT:
+                        on_plus, on_filter, on_archive = False, True, False
                     elif 0 <= click < len(visible_session_ids):
                         cursor = visible_start + click
                         on_plus, on_filter, on_archive, query = False, False, False, ""
@@ -1355,24 +1418,25 @@ class IdeSidebar:
                 elif key == "focus_out":
                     focused = False
                 elif key == "up":
-                    # Vertical chain (active mode): + · sessions · [filter] · [show archive].
+                    # Vertical chain (active mode): sessions · [filter] · [show archive].
+                    # The footer `+` is a horizontal action on the archive row.
                     # In archive mode it's just the archived list.
                     if archive_mode:
                         cursor = max(0, cursor - 1)
+                    elif on_plus:
+                        on_plus, on_archive = False, True
                     elif on_archive:
                         on_archive, on_filter = False, True
                     elif on_filter:
                         on_filter = False
                         cursor = len(names) - 1 if names else 0
-                        on_plus = not names
                     else:
-                        on_plus = cursor <= 0
                         cursor = max(0, cursor - 1)
                 elif key == "down":
                     if archive_mode:
                         cursor = min(len(names) - 1, cursor + 1) if names else 0
                     elif on_plus:
-                        on_plus, cursor = False, 0
+                        on_plus, on_archive = False, True
                     elif on_filter:
                         on_filter, on_archive = False, True
                     elif on_archive:
@@ -1382,8 +1446,17 @@ class IdeSidebar:
                     else:
                         cursor += 1
                 elif key == "right":
+                    if on_archive:
+                        on_archive, on_plus = False, True
+                        continue
+                    if on_plus:
+                        on_plus, on_archive = False, True
+                        continue
                     # Leave the browse cursor alone — Right is "back to chat", not a pick.
                     IdeSidebar._focus_agent(active_session_id)
+                elif key == "left":
+                    if on_plus:
+                        on_plus, on_archive = False, True
                 elif key == "backspace":
                     query, cursor = query[:-1], 0
                 elif key in ("clear", "escape"):

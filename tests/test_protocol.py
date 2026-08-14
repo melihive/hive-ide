@@ -82,6 +82,101 @@ def test_terminal_title_appends_local_host_name_for_ssh_session(tmp_path, monkey
     assert frame._terminal_title() == "workspace IDE vivo"
 
 
+def test_pane_titles_use_workspace_session_and_plan_heading(tmp_path):
+    workspace = tmp_path / "sample-project"
+    workspace.mkdir()
+    plan = workspace / "plans" / "team" / "Simon" / "plans" / "hive" / "feat" / "hive-ide-pkg.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Hive IDE Package\n\n## Why\n\n## Tasks\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="HIVE IDE PYPI",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": str(plan.relative_to(workspace)), "active_task": None},
+    )
+
+    assert Frame(store)._pane_titles(record) == {
+        "sidebar": "sample-project",
+        "agent": "HIVE IDE PYPI",
+        "plan": "Hive IDE Package",
+    }
+
+
+def test_pane_titlebars_highlight_only_the_active_title(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+    calls: list[list[str]] = []
+
+    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    frame._normalize_pane_titlebars()
+
+    assert ["set-option", "-g", "pane-border-status", "top"] in calls
+    assert ["set-option", "-g", "pane-active-border-style", "fg=colour51"] in calls
+    assert ["set-option", "-g", "pane-border-style", "fg=colour238"] in calls
+    assert any(
+        call[:3] == ["set-option", "-g", "pane-border-format"]
+        and "#{?pane_active,#[fg=colour16;bg=colour51;bold],#[fg=colour244]}" in call[3]
+        and "#{@hive_ide_title}" in call[3]
+        and "#{pane_title}" not in call[3]
+        and " > " not in call[3]
+        for call in calls
+    )
+
+
+def test_pane_titlebar_format_keeps_title_in_active_branch(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+    calls: list[list[str]] = []
+
+    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    frame._normalize_pane_titlebars()
+    fmt = next(call[3] for call in calls if call[:3] == ["set-option", "-g", "pane-border-format"])
+    active_branch = fmt.split(",", 1)[0]
+
+    assert "#{@hive_ide_title}" not in active_branch
+    assert "#{@hive_ide_title}" in fmt
+    assert fmt.count("#{@hive_ide_title}") == 1
+    assert "#[fg=colour16,bg=colour51,bold]" not in fmt
+    assert "#[fg=colour16;bg=colour51;bold]" in fmt
+
+
+def test_pane_titlebar_format_does_not_use_shell_mutable_title(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+    calls: list[list[str]] = []
+
+    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    frame._normalize_pane_titlebars()
+
+    assert any(
+        call[:3] == ["set-option", "-g", "pane-border-format"]
+        and "#[fg=colour244]" in call[3]
+        and "#{@hive_ide_title}" in call[3]
+        and "#{pane_title}" not in call[3]
+        for call in calls
+    )
+
+
 def test_workspace_map_lists_known_workspaces_and_missing_dirs(tmp_path, capsys):
     first = tmp_path / "repos" / "one"
     second = tmp_path / "repos" / "two"
