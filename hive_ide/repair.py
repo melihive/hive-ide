@@ -89,6 +89,7 @@ class SessionRepair:
         warnings.extend(pane_cwd_warnings)
         agent_env_warnings = self._agent_env_warnings(repaired)
         warnings.extend(agent_env_warnings)
+        live_shell_agent = self._has_live_shell_agent(repaired)
         shell_agent = self._shell_agent_pane(repaired)
 
         if apply and not errors:
@@ -116,8 +117,13 @@ class SessionRepair:
                                 + ", ".join(still_missing)
                             )
                 elif agent_env_warnings:
-                    self.frame.rebuild(repaired)
-                    actions.append("window: rebuilt for stale agent environment")
+                    if live_shell_agent:
+                        actions.append(
+                            "agent: stale environment observed; live driver preserved"
+                        )
+                    else:
+                        self.frame.rebuild(repaired)
+                        actions.append("window: rebuilt for stale agent environment")
                 elif shell_agent:
                     self.frame.respawn_agent(repaired, shell_agent)
                     actions.append("agent: respawned exited driver pane")
@@ -265,6 +271,14 @@ class SessionRepair:
         if self._shell_agent_has_live_driver_child(record):
             return None
         return pane_id
+
+    def _has_live_shell_agent(self, record: dict[str, Any]) -> bool:
+        command = self.frame.agent_pane_command(record)
+        if not command:
+            return False
+        if not self.frame.is_shell_agent_pane(record, command):
+            return False
+        return self._shell_agent_has_live_driver_child(record)
 
     def _shell_agent_has_live_driver_child(self, record: dict[str, Any]) -> bool:
         pane_pid = self.frame.agent_pane_pid(record)

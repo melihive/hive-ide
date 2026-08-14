@@ -2012,6 +2012,90 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     assert respawned == []
 
 
+def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    owner = store.create_session(
+        name="OWNER",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["source"] = {}
+    rebuilt = []
+    respawned = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "sh")
+    monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
+    monkeypatch.setattr(
+        Frame,
+        "pane_hive_ide_env",
+        lambda _self, _pane_id: {"HIVE_IDE_SESSION_ID": owner["id"]},
+    )
+    monkeypatch.setattr(
+        "hive_ide.repair.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="456 node /home/test/.npm/bin/codex resume conversation-1\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "respawn_agent",
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == [
+        "agent: stale environment observed; live driver preserved"
+    ]
+    assert any("repair will rebuild the window" in warning for warning in result["warnings"])
+    assert rebuilt == []
+    assert respawned == []
+
+
 def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Repair now preserves live shell-wrapped agent panes even when their IDE
+  environment marker is stale, so repairing one session cannot interrupt an
+  active Codex/Claude driver that is still running under the pane.
+
 ## [1.0.57] - 2026-08-14
 
 ### Fixed
