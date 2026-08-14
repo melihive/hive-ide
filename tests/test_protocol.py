@@ -1848,6 +1848,111 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
     assert rebuilt == []
 
 
+def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CLAUDE",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="CLAUDE",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    respawned = []
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "fish")
+    monkeypatch.setattr(
+        Frame,
+        "respawn_agent",
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["agent: respawned exited driver pane"]
+    assert respawned == [(record["id"], "%2")]
+    assert rebuilt == []
+
+
+def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="TERM",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    respawned = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "bash")
+    monkeypatch.setattr(
+        Frame,
+        "respawn_agent",
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert "agent: respawned exited driver pane" not in result["actions"]
+    assert respawned == []
+
+
 def test_repair_dry_run_reports_deleted_sidebar_cwd(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

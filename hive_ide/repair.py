@@ -88,6 +88,7 @@ class SessionRepair:
         warnings.extend(pane_cwd_warnings)
         agent_env_warnings = self._agent_env_warnings(repaired)
         warnings.extend(agent_env_warnings)
+        shell_agent = self._shell_agent_pane(repaired)
 
         if apply and not errors:
             try:
@@ -116,6 +117,9 @@ class SessionRepair:
                 elif agent_env_warnings:
                     self.frame.rebuild(repaired)
                     actions.append("window: rebuilt for stale agent environment")
+                elif shell_agent:
+                    self.frame.respawn_agent(repaired, shell_agent)
+                    actions.append("agent: respawned exited driver pane")
                 elif pane_cwd_warnings:
                     if self._has_deleted_pane_cwd(pane_cwd_warnings):
                         self.frame.rebuild(repaired)
@@ -245,6 +249,15 @@ class SessionRepair:
 
     def _has_deleted_pane_cwd(self, warnings: list[str]) -> bool:
         return any("pane cwd no longer exists:" in warning for warning in warnings)
+
+    def _shell_agent_pane(self, record: dict[str, Any]) -> str | None:
+        pane_id = self.frame.role_panes(record["id"]).get("agent")
+        if not pane_id:
+            return None
+        command = self.frame.agent_pane_command(record)
+        if not command:
+            return None
+        return pane_id if self.frame.is_shell_agent_pane(record, command) else None
 
     def _drop_legacy_record_plan(
         self, record: dict[str, Any], actions: list[str], *, apply: bool

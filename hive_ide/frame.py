@@ -41,6 +41,7 @@ class Frame:
         "emacsclient",
     }
     INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
+    SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
 
     def __init__(self, store: StateStore, *, socket: str | None = None):
         self.store = store
@@ -714,29 +715,8 @@ class Frame:
             current = self.tmux(
                 ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
             ).stdout.strip()
-            if driver.get("id") != "term" and Path(current).name in {
-                "sh",
-                "bash",
-                "fish",
-                "zsh",
-            }:
-                result = self.tmux(
-                    [
-                        "respawn-pane",
-                        "-k",
-                        "-t",
-                        pane_id,
-                        "-c",
-                        record["working_dir"],
-                        "sh",
-                        "-c",
-                        self._agent_command(record),
-                    ]
-                )
-                if result.returncode != 0:
-                    raise HiveIdeError(
-                        result.stderr.strip() or "Could not reopen the agent pane."
-                    )
+            if self.is_shell_agent_pane(record, current):
+                self.respawn_agent(record, pane_id)
                 self._clear_consumed_handoff(record)
                 self.tmux(["select-pane", "-t", pane_id])
                 return {
@@ -770,6 +750,41 @@ class Frame:
             "driver": driver.get("id"),
             "opened": "terminal",
         }
+
+    @classmethod
+    def is_shell_agent_pane(
+        cls, record: dict[str, Any], current_command: str
+    ) -> bool:
+        driver = record.get("driver") or {}
+        return driver.get("id") != "term" and Path(current_command).name in cls.SHELL_COMMANDS
+
+    def agent_pane_command(self, record: dict[str, Any]) -> str | None:
+        pane_id = self.role_panes(record["id"]).get("agent")
+        if not pane_id:
+            return None
+        result = self.tmux(
+            ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def respawn_agent(self, record: dict[str, Any], pane_id: str) -> None:
+        result = self.tmux(
+            [
+                "respawn-pane",
+                "-k",
+                "-t",
+                pane_id,
+                "-c",
+                self.safe_working_dir(record),
+                "sh",
+                "-c",
+                self._agent_command(record),
+            ]
+        )
+        if result.returncode != 0:
+            raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
 
     def driver_rename(
         self, record: dict[str, Any], *, name: str | None = None
