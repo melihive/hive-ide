@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.58] - 2026-08-14
+
 ### Fixed
 
 - Repair now preserves live shell-wrapped agent panes even when their IDE
