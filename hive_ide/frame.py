@@ -769,6 +769,16 @@ class Frame:
             return None
         return result.stdout.strip()
 
+    def agent_pane_pid(self, record: dict[str, Any]) -> int | None:
+        pane_id = self.role_panes(record["id"]).get("agent")
+        if not pane_id:
+            return None
+        result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        return int(raw) if raw.isdigit() else None
+
     def respawn_agent(self, record: dict[str, Any], pane_id: str) -> None:
         result = self.tmux(
             [

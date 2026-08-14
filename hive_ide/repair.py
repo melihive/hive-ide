@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -259,7 +260,39 @@ class SessionRepair:
         command = self.frame.agent_pane_command(record)
         if not command:
             return None
-        return pane_id if self.frame.is_shell_agent_pane(record, command) else None
+        if not self.frame.is_shell_agent_pane(record, command):
+            return None
+        if self._shell_agent_has_live_driver_child(record):
+            return None
+        return pane_id
+
+    def _shell_agent_has_live_driver_child(self, record: dict[str, Any]) -> bool:
+        pane_pid = self.frame.agent_pane_pid(record)
+        if pane_pid is None:
+            return True
+        driver = record.get("driver") or {}
+        driver_id = str(driver.get("id") or "")
+        launch = [str(part) for part in driver.get("launch_argv") or []]
+        markers = {driver_id, *(Path(part).name for part in launch[:1])}
+        markers.discard("")
+        try:
+            result = subprocess.run(
+                ["pgrep", "-P", str(pane_pid), "-fl"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return True
+        if result.returncode == 1:
+            return False
+        if result.returncode != 0:
+            return True
+        for line in result.stdout.splitlines():
+            lowered = line.lower()
+            if any(marker.lower() in lowered for marker in markers):
+                return True
+        return False
 
     def _drop_legacy_record_plan(
         self, record: dict[str, Any], actions: list[str], *, apply: bool

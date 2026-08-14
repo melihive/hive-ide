@@ -1903,6 +1903,7 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
             conversation_reference="conversation-1",
         ),
     )
+    record["source"] = {}
     respawned = []
     rebuilt = []
 
@@ -1914,6 +1915,11 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
         lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
     )
     monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "fish")
+    monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
+    monkeypatch.setattr(
+        "hive_ide.repair.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
@@ -1944,6 +1950,66 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
     assert result["actions"] == ["agent: respawned exited driver pane"]
     assert respawned == [(record["id"], "%2")]
     assert rebuilt == []
+
+
+def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["source"] = {}
+    respawned = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "sh")
+    monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
+    monkeypatch.setattr(
+        "hive_ide.repair.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="456 node /home/test/.npm/bin/codex resume conversation-1\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "respawn_agent",
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert "agent: respawned exited driver pane" not in result["actions"]
+    assert respawned == []
 
 
 def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypatch):

@@ -10,6 +10,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 - Repair now refreshes stale live pane titles for existing windows, so updated
   titlebar/chrome settings do not leave panes untitled after a package upgrade.
+- Repair now preserves agent panes whose shell wrapper still has a live driver
+  child process, avoiding accidental Codex/Claude interruption.
 
 ## [1.0.56] - 2026-08-14
 
