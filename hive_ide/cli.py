@@ -641,7 +641,6 @@ def cmd_repair(args: argparse.Namespace) -> dict[str, Any]:
             session_id = os.environ.get("HIVE_IDE_SESSION_ID")
         record = _session(store, session_id, name)
         result = repair.repair(record, apply=not args.dry_run)
-    frame.bind_keys()
     return result
 
 

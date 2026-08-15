@@ -1720,6 +1720,49 @@ def test_cli_repair_name_overrides_ambient_session_id(tmp_path, monkeypatch, cap
     assert repaired == [(target["id"], False)]
 
 
+def test_cli_repair_does_not_rebind_frame_keys(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+
+    monkeypatch.setattr(
+        SessionRepair,
+        "repair",
+        lambda _self, rec, *, apply=True: {
+            "ok": True,
+            "session_id": rec["id"],
+            "name": rec["name"],
+            "applied": apply,
+        },
+    )
+    monkeypatch.setattr(
+        Frame,
+        "bind_keys",
+        lambda _self: pytest.fail("repair must not rebind frame keys"),
+    )
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            str(workspace),
+            "repair",
+            "--session-id",
+            record["id"],
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == record["id"]
+    assert payload["applied"] is True
+
+
 def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

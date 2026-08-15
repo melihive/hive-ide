@@ -13,6 +13,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - Repair now scans the full descendant process tree before treating a shell-wrapped
   agent pane as exited, preventing live Codex/Claude chats from being respawned when
   the driver is nested below an intermediate wrapper.
+- Repair no longer rebinds frame keys and hooks as a side effect of checking or healing
+  one session, so a healthy repair leaves the active chat pane alone.
 
 ## [1.0.58] - 2026-08-14
 
