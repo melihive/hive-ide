@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.59] - 2026-08-15
+
 ### Fixed
 
 - Plan panes now open known editors in read-only mode by default (`micro -readonly true`,
