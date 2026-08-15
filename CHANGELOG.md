@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.60] - 2026-08-15
+
+### Fixed
+
+- Current-plan handling now detects shell-wrapped live `micro` plan panes from
+  the descendant process tree, so opening or repairing a plan can set read-only
+  state in place without respawning the pane or interrupting adjacent chats.
+- Hive IDE relayout now syncs the Micro `repopath.maxwidth` option from tmux
+  pane geometry with `setlocal`, keeping responsive breadcrumbs pane-local and
+  preventing statusline width updates from dirtying `settings.json`.
+
 ## [1.0.59] - 2026-08-15
 
 ### Fixed
