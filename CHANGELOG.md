@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.61] - 2026-08-15
+
+### Fixed
+
+- Relayout now removes redundant desktop `client-active` and `client-focus-in`
+  snap hooks, leaving resize snaps on real client resizes and mobile-only focus
+  snaps on narrow frames.
+- Snap relayout now skips duplicate same-geometry events before entering the
+  all-window tmux resize loop, and skipped debug trace entries no longer query
+  tmux for expensive per-window state.
+
 ## [1.0.60] - 2026-08-15
 
 ### Fixed
