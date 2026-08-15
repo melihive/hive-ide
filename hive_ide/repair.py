@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -289,24 +288,31 @@ class SessionRepair:
         launch = [str(part) for part in driver.get("launch_argv") or []]
         markers = {driver_id, *(Path(part).name for part in launch[:1])}
         markers.discard("")
-        try:
-            result = subprocess.run(
-                ["pgrep", "-P", str(pane_pid), "-fl"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except OSError:
+        if not markers:
             return True
-        if result.returncode == 1:
-            return False
-        if result.returncode != 0:
-            return True
-        for line in result.stdout.splitlines():
+        pids = Frame._process_tree(pane_pid)
+        inspected = False
+        for pid in pids:
+            if pid == pane_pid:
+                continue
+            line = SessionRepair._process_cmdline(pid)
+            if line is None:
+                continue
+            inspected = True
             lowered = line.lower()
             if any(marker.lower() in lowered for marker in markers):
                 return True
+        if len(pids) > 1 and not inspected:
+            return True
         return False
+
+    @staticmethod
+    def _process_cmdline(pid: int) -> str | None:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        return raw.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
 
     def _drop_legacy_record_plan(
         self, record: dict[str, Any], actions: list[str], *, apply: bool

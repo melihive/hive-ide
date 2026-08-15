@@ -1917,8 +1917,14 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
     monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "fish")
     monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
     monkeypatch.setattr(
-        "hive_ide.repair.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        Frame,
+        "_process_tree",
+        lambda _pid: [123],
+    )
+    monkeypatch.setattr(
+        SessionRepair,
+        "_process_cmdline",
+        lambda _pid: None,
     )
     monkeypatch.setattr(
         Frame,
@@ -1979,12 +1985,77 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "sh")
     monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
     monkeypatch.setattr(
-        "hive_ide.repair.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
+        Frame,
+        "_process_tree",
+        lambda _pid: [123, 456],
+    )
+    monkeypatch.setattr(
+        SessionRepair,
+        "_process_cmdline",
+        lambda _pid: "node /home/test/.npm/bin/codex resume conversation-1",
+    )
+    monkeypatch.setattr(
+        Frame,
+        "respawn_agent",
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
             returncode=0,
-            stdout="456 node /home/test/.npm/bin/codex resume conversation-1\n",
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
             stderr="",
         ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert "agent: respawned exited driver pane" not in result["actions"]
+    assert respawned == []
+
+
+def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["source"] = {}
+    respawned = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "sh")
+    monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
+    monkeypatch.setattr(Frame, "_process_tree", lambda _pid: [123, 456, 789])
+    monkeypatch.setattr(
+        SessionRepair,
+        "_process_cmdline",
+        lambda pid: {
+            456: "python3 wrapper.py",
+            789: "node /home/test/.npm/bin/codex resume conversation-1",
+        }.get(pid),
     )
     monkeypatch.setattr(
         Frame,
@@ -2054,12 +2125,14 @@ def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
         lambda _self, _pane_id: {"HIVE_IDE_SESSION_ID": owner["id"]},
     )
     monkeypatch.setattr(
-        "hive_ide.repair.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout="456 node /home/test/.npm/bin/codex resume conversation-1\n",
-            stderr="",
-        ),
+        Frame,
+        "_process_tree",
+        lambda _pid: [123, 456],
+    )
+    monkeypatch.setattr(
+        SessionRepair,
+        "_process_cmdline",
+        lambda _pid: "node /home/test/.npm/bin/codex resume conversation-1",
     )
     monkeypatch.setattr(
         Frame,

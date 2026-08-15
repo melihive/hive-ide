@@ -683,7 +683,7 @@ class Frame:
                 self._send_micro_command(pane_id, "set readonly true")
                 if focus:
                     self._send_micro_command(pane_id, f"goto {line}")
-                self.tmux(["select-pane", "-t", pane_id])
+                    self.tmux(["select-pane", "-t", pane_id])
                 return {
                     "session_id": record["id"],
                     "plan": str(path),
@@ -706,7 +706,8 @@ class Frame:
             if result.returncode != 0:
                 raise HiveIdeError(result.stderr.strip() or "Could not reopen the plan pane.")
             self.tmux(["select-pane", "-T", self._plan_title(record), "-t", pane_id])
-            self.tmux(["select-pane", "-t", pane_id])
+            if focus:
+                self.tmux(["select-pane", "-t", pane_id])
             return {
                 "session_id": record["id"],
                 "plan": str(path),

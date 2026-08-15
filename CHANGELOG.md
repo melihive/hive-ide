@@ -10,6 +10,9 @@ All notable changes to `hive-ide` will be documented in this file.
   `vim`/`nvim`/`vi`/`gvim -R`) so long-lived monitoring buffers cannot overwrite newer
   plan content. Existing live `micro` plan panes are switched to read-only in place
   instead of being respawned. Plan, task, and scratchpad popups remain editable.
+- Repair now scans the full descendant process tree before treating a shell-wrapped
+  agent pane as exited, preventing live Codex/Claude chats from being respawned when
+  the driver is nested below an intermediate wrapper.
 
 ## [1.0.58] - 2026-08-14
 
