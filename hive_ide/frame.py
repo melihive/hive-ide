@@ -1529,24 +1529,8 @@ class Frame:
                 f"run-shell -b {shlex.quote(relayout_client)}",
             ]
         )
-        self.tmux(
-            [
-                "set-hook",
-                "-t",
-                self.target,
-                "client-active",
-                f"run-shell -b {shlex.quote(relayout_client)}",
-            ]
-        )
-        self.tmux(
-            [
-                "set-hook",
-                "-t",
-                self.target,
-                "client-focus-in",
-                f"run-shell -b {shlex.quote(relayout_client)}",
-            ]
-        )
+        for redundant_hook in ("client-active", "client-focus-in"):
+            self.tmux(["set-hook", "-t", self.target, "-u", redundant_hook])
         focus_relayout = (
             f"if-shell -F '#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}' "
             f"{shlex.quote(f'run-shell -b {shlex.quote(relayout_client)}')} "

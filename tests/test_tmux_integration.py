@@ -212,8 +212,8 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         hooks = frame.tmux(["show-hooks", "-t", frame.target]).stdout
         assert "client-resized" in hooks
         assert "client-attached" in hooks
-        assert "client-active" in hooks
-        assert "client-focus-in" in hooks
+        assert "client-active" not in hooks
+        assert "client-focus-in" not in hooks
         assert "after-select-pane" in hooks
         assert "session-window-changed" in hooks
         assert "run-shell -b" in hooks

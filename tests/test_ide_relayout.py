@@ -489,6 +489,75 @@ def test_snap_coalescer_skips_an_event_superseded_during_debounce(tmp_path):
     )
 
 
+def test_superseded_snap_skip_does_not_query_tmux_for_debug(tmp_path, monkeypatch):
+    state = str(tmp_path / "layout.json")
+    (tmp_path / "layout.json.debug.enable").write_text("1", encoding="utf-8")
+
+    def fail_tmux(_socket, args):
+        raise AssertionError(f"superseded snap should not query tmux: {args}")
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fail_tmux)
+    monkeypatch.setattr(IdeRelayout, "_coalesced_by_newer_snap", lambda _path: True)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "snap",
+            state,
+            "203",
+            "70",
+        ]
+    ) == 0
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "layout.json.debug.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert events[-1]["reason"] == "newer-snap"
+    assert "clients" not in events[-1]
+    assert "tmux_options" not in events[-1]
+
+
+def test_duplicate_snap_skip_avoids_the_tmux_resize_loop(tmp_path, monkeypatch):
+    state = str(tmp_path / "layout.json")
+    IdeRelayout._record_snap(state, (203, 70))
+    calls: list[list[str]] = []
+
+    def fake_tmux(_socket, args):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", fake_tmux)
+    monkeypatch.setattr(IdeRelayout, "_breaker_tripped", lambda _path: False)
+    assert IdeRelayout.main(
+        [
+            "relayout",
+            "test-socket",
+            str(SW),
+            str(PW),
+            "4",
+            str(AMIN),
+            str(PMIN),
+            str(APREF),
+            "snap",
+            state,
+            "203",
+            "70",
+        ]
+    ) == 0
+
+    assert calls == []
+
+
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
 
 def test_breaker_ledger_prunes_to_the_window():

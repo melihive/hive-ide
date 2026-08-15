@@ -368,6 +368,7 @@ class IdeRelayout:
     BREAKER_WINDOW = 30.0     # seconds — long on purpose; see above
     BREAKER_KEEP = 512        # ledger cap, so the file can't grow without bound
     SNAP_DEBOUNCE_SECONDS = 0.08
+    SNAP_DUPLICATE_SECONDS = 0.75
 
     @staticmethod
     def _coalesced_by_newer_snap(
@@ -396,6 +397,50 @@ class IdeRelayout:
                 return fh.read() != token
         except OSError:
             return False
+
+    @staticmethod
+    def _duplicate_recent_snap(
+        path: str,
+        geometry: tuple[int, int] | None,
+        now: float | None = None,
+    ) -> bool:
+        """True when this exact hook geometry was just applied.
+
+        A single user-visible resize can fire several hooks with the same client
+        dimensions (`client-resized`, focus/active transitions, attach redraws).
+        Once one snap has applied that geometry, repeating the full all-window tmux
+        command loop immediately afterwards only burns the tmux server.
+        """
+        if not path or geometry is None:
+            return False
+        now = time.time() if now is None else now
+        try:
+            with open(path + ".last-snap", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return False
+        seen = data.get("geometry") if isinstance(data, dict) else None
+        ts = data.get("ts") if isinstance(data, dict) else None
+        return (
+            seen == list(geometry)
+            and isinstance(ts, (int, float))
+            and 0 <= now - ts < IdeRelayout.SNAP_DUPLICATE_SECONDS
+        )
+
+    @staticmethod
+    def _record_snap(
+        path: str,
+        geometry: tuple[int, int] | None,
+        now: float | None = None,
+    ) -> None:
+        if not path or geometry is None:
+            return
+        now = time.time() if now is None else now
+        try:
+            with open(path + ".last-snap", "w", encoding="utf-8") as fh:
+                json.dump({"ts": now, "geometry": list(geometry)}, fh)
+        except OSError:
+            pass
 
     @staticmethod
     def _breaker_hits(prev: list, now: float, window: float) -> list:
@@ -551,8 +596,18 @@ class IdeRelayout:
                     "socket": sock,
                     "mode": mode,
                     "forced_geometry": list(forced_geometry) if forced_geometry else None,
-                    "clients": IdeRelayout._client_geometries(sock),
-                    "tmux_options": IdeRelayout._tmux_options(sock),
+                },
+            )
+            return 0
+        if mode == "snap" and IdeRelayout._duplicate_recent_snap(state_path, forced_geometry):
+            IdeRelayout._debug_write(
+                state_path,
+                {
+                    "event": "relayout-skipped",
+                    "reason": "duplicate-snap",
+                    "socket": sock,
+                    "mode": mode,
+                    "forced_geometry": list(forced_geometry) if forced_geometry else None,
                 },
             )
             return 0
@@ -731,6 +786,8 @@ class IdeRelayout:
                 IdeRelayout._write_state(state_path, {"win": cur, "side": sw,
                                                       "plan": pw if mode == "snap"
                                                       else remembered_plan})
+        if mode == "snap":
+            IdeRelayout._record_snap(state_path, forced_geometry)
         return 0
 
 
