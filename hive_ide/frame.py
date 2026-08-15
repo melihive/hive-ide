@@ -515,6 +515,47 @@ class Frame:
         self.tmux(["send-keys", "-t", pane_id, "C-e"])
         self.tmux(["send-keys", "-t", pane_id, command, "Enter"])
 
+    def _pane_has_micro(self, pane_id: str) -> bool:
+        current = self.tmux(
+            ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
+        ).stdout.strip()
+        if current == "micro":
+            return True
+        pid = self._pane_pid(pane_id)
+        if pid is None:
+            return False
+        return any(
+            self._process_command_name(candidate) == "micro"
+            for candidate in self._process_tree(pid)
+        )
+
+    @staticmethod
+    def _process_command_name(pid: int) -> str | None:
+        try:
+            name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            name = ""
+        if name:
+            return name
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
+        except OSError:
+            return None
+        if not raw:
+            return None
+        return Path(raw.decode("utf-8", errors="replace")).name
+
+    def _sync_micro_repopath_width(self, pane_id: str) -> None:
+        if not self._pane_has_micro(pane_id):
+            return
+        raw = self.tmux(
+            ["display-message", "-p", "-t", pane_id, "#{pane_width}"]
+        ).stdout.strip()
+        if not raw.isdigit():
+            return
+        width = max(0, int(raw) - 16)
+        self._send_micro_command(pane_id, f"set repopath.maxwidth {width}")
+
     @staticmethod
     def plan_focus_line(path: Path) -> int:
         try:
@@ -676,11 +717,9 @@ class Frame:
         line = self.plan_focus_line(path) if focus else None
         pane_id = self.role_panes(record["id"]).get("plan")
         if pane_id and os.environ.get("TMUX_PANE") != pane_id:
-            current = self.tmux(
-                ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
-            ).stdout.strip()
-            if current == "micro":
+            if self._pane_has_micro(pane_id):
                 self._send_micro_command(pane_id, "set readonly true")
+                self._sync_micro_repopath_width(pane_id)
                 if focus:
                     self._send_micro_command(pane_id, f"goto {line}")
                     self.tmux(["select-pane", "-t", pane_id])
@@ -706,6 +745,7 @@ class Frame:
             if result.returncode != 0:
                 raise HiveIdeError(result.stderr.strip() or "Could not reopen the plan pane.")
             self.tmux(["select-pane", "-T", self._plan_title(record), "-t", pane_id])
+            self._sync_micro_repopath_width(pane_id)
             if focus:
                 self.tmux(["select-pane", "-t", pane_id])
             return {
@@ -958,6 +998,7 @@ class Frame:
         sidebar, _, plan = columns
         self.tmux(["resize-pane", "-t", sidebar_pane, "-x", str(sidebar)])
         self.tmux(["resize-pane", "-t", plan_pane, "-x", str(plan)])
+        self._sync_micro_repopath_width(plan_pane)
 
     def build(self, record: dict[str, Any]) -> str:
         working_dir = record["working_dir"]

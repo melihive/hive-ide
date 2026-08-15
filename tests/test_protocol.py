@@ -3408,6 +3408,8 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
         calls.append(argv)
         if argv == ["display-message", "-p", "-t", "%3", "#{pane_current_command}"]:
             return SimpleNamespace(returncode=0, stdout="micro\n", stderr="")
+        if argv == ["display-message", "-p", "-t", "%3", "#{pane_width}"]:
+            return SimpleNamespace(returncode=0, stdout="86\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(frame, "tmux", fake_tmux)
@@ -3417,7 +3419,53 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "C-e"] in calls
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
+    assert ["send-keys", "-t", "%3", "set repopath.maxwidth 70", "Enter"] in calls
     assert ["send-keys", "-t", "%3", "goto 3", "Enter"] in calls
+    assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
+
+
+def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plans_root = tmp_path / "external-drive-plans"
+    plan = plans_root / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": str(plan), "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"plan": "%3"})
+    monkeypatch.setenv("TMUX_PANE", "%2")
+    calls = []
+
+    def fake_tmux(argv):
+        calls.append(argv)
+        if argv == ["display-message", "-p", "-t", "%3", "#{pane_current_command}"]:
+            return SimpleNamespace(returncode=0, stdout="sh\n", stderr="")
+        if argv == ["display-message", "-p", "-t", "%3", "#{pane_pid}"]:
+            return SimpleNamespace(returncode=0, stdout="123\n", stderr="")
+        if argv == ["display-message", "-p", "-t", "%3", "#{pane_width}"]:
+            return SimpleNamespace(returncode=0, stdout="64\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+    monkeypatch.setattr(frame, "_process_tree", lambda pid: [pid, 456])
+    monkeypatch.setattr(
+        frame,
+        "_process_command_name",
+        lambda pid: "micro" if pid == 456 else "sh",
+    )
+
+    result = frame.current_plan(record)
+
+    assert result["opened"] == "plan-pane"
+    assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
+    assert ["send-keys", "-t", "%3", "set repopath.maxwidth 48", "Enter"] in calls
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 
