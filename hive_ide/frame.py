@@ -554,7 +554,7 @@ class Frame:
         if not raw.isdigit():
             return
         width = max(0, int(raw) - 16)
-        self._send_micro_command(pane_id, f"set repopath.maxwidth {width}")
+        self._send_micro_command(pane_id, f"setlocal repopath.maxwidth {width}")
 
     @staticmethod
     def plan_focus_line(path: Path) -> int:
