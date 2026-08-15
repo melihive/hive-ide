@@ -3268,6 +3268,43 @@ def test_plan_pane_leaves_unknown_editor_argv_unchanged(tmp_path, monkeypatch):
     assert " -R " not in command
 
 
+def test_current_plan_marks_live_micro_readonly_without_respawning(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n\n- [ ] Task\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"plan": "%3"})
+    monkeypatch.setenv("TMUX_PANE", "%2")
+    calls = []
+
+    def fake_tmux(argv):
+        calls.append(argv)
+        if argv == ["display-message", "-p", "-t", "%3", "#{pane_current_command}"]:
+            return SimpleNamespace(returncode=0, stdout="micro\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    result = frame.current_plan(record, focus=True)
+
+    assert result["opened"] == "plan-pane"
+    assert ["send-keys", "-t", "%3", "C-e"] in calls
+    assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
+    assert ["send-keys", "-t", "%3", "goto 3", "Enter"] in calls
+    assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
+
+
 def test_plan_focus_line_targets_first_unfinished_checkbox(tmp_path):
     plan = tmp_path / "plan.md"
     plan.write_text(

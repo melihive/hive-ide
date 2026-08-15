@@ -511,6 +511,10 @@ class Frame:
             return list(editor)
         return [editor[0], *flags, *editor[1:]]
 
+    def _send_micro_command(self, pane_id: str, command: str) -> None:
+        self.tmux(["send-keys", "-t", pane_id, "C-e"])
+        self.tmux(["send-keys", "-t", pane_id, command, "Enter"])
+
     @staticmethod
     def plan_focus_line(path: Path) -> int:
         try:
@@ -675,9 +679,10 @@ class Frame:
             current = self.tmux(
                 ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
             ).stdout.strip()
-            if focus and current == "micro":
-                self.tmux(["send-keys", "-t", pane_id, "C-e"])
-                self.tmux(["send-keys", "-t", pane_id, f"goto {line}", "Enter"])
+            if current == "micro":
+                self._send_micro_command(pane_id, "set readonly true")
+                if focus:
+                    self._send_micro_command(pane_id, f"goto {line}")
                 self.tmux(["select-pane", "-t", pane_id])
                 return {
                     "session_id": record["id"],
