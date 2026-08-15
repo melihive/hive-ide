@@ -54,3 +54,9 @@ should be listed or changed. Do not guess a session ID when a command reports am
 Use the new-session modal's `new` / `adopt existing` toggle to visually adopt
 Claude Code or Codex conversations for the current directory. The CLI `adopt`
 command is mainly for automation or agent-driven maintenance.
+
+The right-side plan pane is read-only by default for known editors: `micro` uses
+`-readonly true`, and `vim`/`nvim`/`vi`/`gvim` use `-R`. Unknown editors are launched
+unchanged. Plan/task/scratchpad popups are intentional edit surfaces and stay editable.
+To edit from a long-lived `micro` plan pane, press `Ctrl-e`, run `reload`, then press
+`Ctrl-e` again and run `set readonly false`.

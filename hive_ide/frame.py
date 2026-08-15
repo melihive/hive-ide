@@ -40,6 +40,13 @@ class Frame:
         "emacs",
         "emacsclient",
     }
+    PLAN_PANE_READONLY_FLAGS = {
+        "micro": ["-readonly", "true"],
+        "vim": ["-R"],
+        "nvim": ["-R"],
+        "vi": ["-R"],
+        "gvim": ["-R"],
+    }
     INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
 
@@ -440,7 +447,7 @@ class Frame:
         except UsageError:
             path = None
         if path is not None:
-            editor = self._editor_argv()
+            editor = self._plan_pane_editor_argv(self._editor_argv())
             if line and line > 1 and Path(editor[0]).name in self.PLUS_LINE_EDITORS:
                 editor.append(f"+{line}")
             return self._interactive_command(
@@ -494,6 +501,15 @@ class Frame:
         ):
             return list(configured)
         return resolve_editor_argv({})
+
+    @classmethod
+    def _plan_pane_editor_argv(cls, editor: list[str]) -> list[str]:
+        if not editor:
+            return editor
+        flags = cls.PLAN_PANE_READONLY_FLAGS.get(Path(editor[0]).name)
+        if not flags:
+            return list(editor)
+        return [editor[0], *flags, *editor[1:]]
 
     @staticmethod
     def plan_focus_line(path: Path) -> int:

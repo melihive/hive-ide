@@ -109,6 +109,15 @@ editor, `HIVE_IDE_EDITOR`, `micro` when installed, then `less`:
 }
 ```
 
+The right-side plan pane is a monitor by default. When the editor is `micro`, the pane
+opens as `micro -readonly true <path>`; for `vim`/`nvim`/`vi`/`gvim` it opens with `-R`;
+unknown editors are launched without extra flags. Plan, task, and scratchpad popups remain
+editable because they are deliberate edit actions.
+
+To edit from a long-lived `micro` plan pane, reload before changing anything: press `Ctrl-e`,
+run `reload`, then press `Ctrl-e` again and run `set readonly false`. This keeps edits based
+on the current file instead of a stale monitoring buffer.
+
 Sidebar symbols may occupy one or two terminal cells. `state` selects one mutually
 exclusive provider; `slots` is an ordered list and may contain any number of columns.
 Additional field providers can be declared in config. Python entry points in

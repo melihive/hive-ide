@@ -3203,6 +3203,71 @@ def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch)
     assert calls == [(["editor", "--wait", str(plan)], {})]
 
 
+def test_plan_pane_opens_micro_readonly_by_default(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setenv("HIVE_IDE_EDITOR", "micro")
+
+    command = frame._plan_command(record)
+
+    assert shlex.join(["micro", "-readonly", "true", str(plan)]) in command
+
+
+def test_plan_pane_uses_vim_readonly_flag(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setenv("HIVE_IDE_EDITOR", "nvim --clean")
+
+    command = frame._plan_command(record, line=9)
+
+    assert shlex.join(["nvim", "-R", "--clean", "+9", str(plan)]) in command
+
+
+def test_plan_pane_leaves_unknown_editor_argv_unchanged(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    plan = workspace / "plans" / "example.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Example\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PLAN",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": "plans/example.md", "active_task": None},
+    )
+    frame = Frame(store)
+    monkeypatch.setenv("HIVE_IDE_EDITOR", "code --wait")
+
+    command = frame._plan_command(record)
+
+    assert shlex.join(["code", "--wait", str(plan)]) in command
+    assert "-readonly" not in command
+    assert " -R " not in command
+
+
 def test_plan_focus_line_targets_first_unfinished_checkbox(tmp_path):
     plan = tmp_path / "plan.md"
     plan.write_text(

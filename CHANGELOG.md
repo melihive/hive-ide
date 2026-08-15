@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Plan panes now open known editors in read-only mode by default (`micro -readonly true`,
+  `vim`/`nvim`/`vi`/`gvim -R`) so long-lived monitoring buffers cannot overwrite newer
+  plan content. Plan, task, and scratchpad popups remain editable.
+
 ## [1.0.58] - 2026-08-14
 
 ### Fixed
