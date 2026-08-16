@@ -216,6 +216,13 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert "client-focus-in" not in hooks
         assert "after-select-pane" in hooks
         assert "session-window-changed" in hooks
+        client_resized = next(
+            line for line in hooks.splitlines() if line.startswith("client-resized")
+        )
+        assert "resize-pane -t :.0 -x 20" in client_resized
+        assert "resize-pane -t :.2 -x 86" in client_resized
+        assert "-m hive_ide.relayout" not in client_resized
+        assert "run-shell -b" not in client_resized
         assert "run-shell -b" in hooks
         assert "--client-width" in hooks
         assert "#{window_width}" in hooks

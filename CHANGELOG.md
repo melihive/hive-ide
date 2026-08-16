@@ -11,8 +11,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Removed IDE-managed Micro `repopath.maxwidth` updates; the Micro plugin owns
   statusline fitting again, independent of tmux hooks and relayout.
 - Restored tmux pane titlebars with the IDE-owned `#{@hive_ide_title}` format.
-- Restored the bounded `client-resized` snap hook so sidebar and plan columns
-  return to the layout ladder after terminal resizes.
+- Replaced the Python `client-resized` relayout hook with a tmux-only active
+  window snap, so resize storms keep sidebar/plan columns aligned without
+  spawning package helpers.
 
 ## [1.0.63] - 2026-08-16
 
