@@ -545,17 +545,6 @@ class Frame:
             return None
         return Path(raw.decode("utf-8", errors="replace")).name
 
-    def _sync_micro_repopath_width(self, pane_id: str) -> None:
-        if not self._pane_has_micro(pane_id):
-            return
-        raw = self.tmux(
-            ["display-message", "-p", "-t", pane_id, "#{pane_width}"]
-        ).stdout.strip()
-        if not raw.isdigit():
-            return
-        width = max(0, int(raw) - 16)
-        self._send_micro_command(pane_id, f"setlocal repopath.maxwidth {width}")
-
     @staticmethod
     def plan_focus_line(path: Path) -> int:
         try:
@@ -719,7 +708,6 @@ class Frame:
         if pane_id and os.environ.get("TMUX_PANE") != pane_id:
             if self._pane_has_micro(pane_id):
                 self._send_micro_command(pane_id, "set readonly true")
-                self._sync_micro_repopath_width(pane_id)
                 if focus:
                     self._send_micro_command(pane_id, f"goto {line}")
                     self.tmux(["select-pane", "-t", pane_id])
@@ -745,7 +733,6 @@ class Frame:
             if result.returncode != 0:
                 raise HiveIdeError(result.stderr.strip() or "Could not reopen the plan pane.")
             self.tmux(["select-pane", "-T", self._plan_title(record), "-t", pane_id])
-            self._sync_micro_repopath_width(pane_id)
             if focus:
                 self.tmux(["select-pane", "-t", pane_id])
             return {
@@ -998,7 +985,6 @@ class Frame:
         sidebar, _, plan = columns
         self.tmux(["resize-pane", "-t", sidebar_pane, "-x", str(sidebar)])
         self.tmux(["resize-pane", "-t", plan_pane, "-x", str(plan)])
-        self._sync_micro_repopath_width(plan_pane)
 
     def build(self, record: dict[str, Any]) -> str:
         working_dir = record["working_dir"]
@@ -1257,9 +1243,18 @@ class Frame:
                 self.tmux(["set-option", "-g", "-u", name])
 
     def _normalize_pane_titlebars(self) -> None:
-        self.tmux(["set-option", "-g", "pane-border-status", "off"])
+        self.tmux(["set-option", "-g", "pane-border-status", "top"])
         self.tmux(["set-option", "-g", "pane-active-border-style", "fg=colour51"])
         self.tmux(["set-option", "-g", "pane-border-style", "fg=colour238"])
+        self.tmux(
+            [
+                "set-option",
+                "-g",
+                "pane-border-format",
+                "#{?pane_active,#[fg=colour16;bg=colour51;bold],#[fg=colour244]} "
+                "#{@hive_ide_title} #[default]",
+            ]
+        )
 
     def _normalize_resize_behavior(self) -> None:
         """Follow the latest attached client so mobile SSH cannot pin desktop geometry."""
@@ -1505,7 +1500,15 @@ class Frame:
                 f"run-shell -b {shlex.quote(adopt)}",
             ]
         )
-        self.tmux(["set-hook", "-t", self.target, "-u", "client-resized"])
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-resized",
+                f"run-shell -b {shlex.quote(relayout_window)}",
+            ]
+        )
         self.tmux(
             [
                 "set-hook",

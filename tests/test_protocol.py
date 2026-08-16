@@ -104,7 +104,7 @@ def test_pane_titles_use_workspace_session_and_plan_heading(tmp_path):
     }
 
 
-def test_pane_titlebars_are_disabled_for_resize_resilience(tmp_path, monkeypatch):
+def test_pane_titlebars_use_hive_ide_titles(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     frame = Frame(StateStore(tmp_path / "state", workspace))
@@ -118,10 +118,14 @@ def test_pane_titlebars_are_disabled_for_resize_resilience(tmp_path, monkeypatch
 
     frame._normalize_pane_titlebars()
 
-    assert ["set-option", "-g", "pane-border-status", "off"] in calls
+    assert ["set-option", "-g", "pane-border-status", "top"] in calls
     assert ["set-option", "-g", "pane-active-border-style", "fg=colour51"] in calls
     assert ["set-option", "-g", "pane-border-style", "fg=colour238"] in calls
-    assert not any(call[:3] == ["set-option", "-g", "pane-border-format"] for call in calls)
+    assert any(
+        call[:3] == ["set-option", "-g", "pane-border-format"]
+        and "#{@hive_ide_title}" in call[3]
+        for call in calls
+    )
 
 
 def test_pane_titles_still_use_package_metadata_not_shell_mutable_title(tmp_path, monkeypatch):
@@ -3430,8 +3434,6 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
         calls.append(argv)
         if argv == ["display-message", "-p", "-t", "%3", "#{pane_current_command}"]:
             return SimpleNamespace(returncode=0, stdout="micro\n", stderr="")
-        if argv == ["display-message", "-p", "-t", "%3", "#{pane_width}"]:
-            return SimpleNamespace(returncode=0, stdout="86\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(frame, "tmux", fake_tmux)
@@ -3441,8 +3443,8 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "C-e"] in calls
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
-    assert ["send-keys", "-t", "%3", "setlocal repopath.maxwidth 70", "Enter"] in calls
     assert ["send-keys", "-t", "%3", "goto 3", "Enter"] in calls
+    assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 
@@ -3471,8 +3473,6 @@ def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
             return SimpleNamespace(returncode=0, stdout="sh\n", stderr="")
         if argv == ["display-message", "-p", "-t", "%3", "#{pane_pid}"]:
             return SimpleNamespace(returncode=0, stdout="123\n", stderr="")
-        if argv == ["display-message", "-p", "-t", "%3", "#{pane_width}"]:
-            return SimpleNamespace(returncode=0, stdout="64\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(frame, "tmux", fake_tmux)
@@ -3487,7 +3487,7 @@ def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
 
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
-    assert ["send-keys", "-t", "%3", "setlocal repopath.maxwidth 48", "Enter"] in calls
+    assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 
