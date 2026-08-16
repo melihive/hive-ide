@@ -104,7 +104,7 @@ def test_pane_titles_use_workspace_session_and_plan_heading(tmp_path):
     }
 
 
-def test_pane_titlebars_highlight_only_the_active_title(tmp_path, monkeypatch):
+def test_pane_titlebars_are_disabled_for_resize_resilience(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     frame = Frame(StateStore(tmp_path / "state", workspace))
@@ -118,43 +118,13 @@ def test_pane_titlebars_highlight_only_the_active_title(tmp_path, monkeypatch):
 
     frame._normalize_pane_titlebars()
 
-    assert ["set-option", "-g", "pane-border-status", "top"] in calls
+    assert ["set-option", "-g", "pane-border-status", "off"] in calls
     assert ["set-option", "-g", "pane-active-border-style", "fg=colour51"] in calls
     assert ["set-option", "-g", "pane-border-style", "fg=colour238"] in calls
-    assert any(
-        call[:3] == ["set-option", "-g", "pane-border-format"]
-        and "#{?pane_active,#[fg=colour16;bg=colour51;bold],#[fg=colour244]}" in call[3]
-        and "#{@hive_ide_title}" in call[3]
-        and "#{pane_title}" not in call[3]
-        and " > " not in call[3]
-        for call in calls
-    )
+    assert not any(call[:3] == ["set-option", "-g", "pane-border-format"] for call in calls)
 
 
-def test_pane_titlebar_format_keeps_title_in_active_branch(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    frame = Frame(StateStore(tmp_path / "state", workspace))
-    calls: list[list[str]] = []
-
-    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "", "")
-
-    monkeypatch.setattr(frame, "tmux", fake_tmux)
-
-    frame._normalize_pane_titlebars()
-    fmt = next(call[3] for call in calls if call[:3] == ["set-option", "-g", "pane-border-format"])
-    active_branch = fmt.split(",", 1)[0]
-
-    assert "#{@hive_ide_title}" not in active_branch
-    assert "#{@hive_ide_title}" in fmt
-    assert fmt.count("#{@hive_ide_title}") == 1
-    assert "#[fg=colour16,bg=colour51,bold]" not in fmt
-    assert "#[fg=colour16;bg=colour51;bold]" in fmt
-
-
-def test_pane_titlebar_format_does_not_use_shell_mutable_title(tmp_path, monkeypatch):
+def test_pane_titles_still_use_package_metadata_not_shell_mutable_title(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     frame = Frame(StateStore(tmp_path / "state", workspace))
@@ -168,11 +138,9 @@ def test_pane_titlebar_format_does_not_use_shell_mutable_title(tmp_path, monkeyp
 
     frame._normalize_pane_titlebars()
 
-    assert any(
+    assert not any(
         call[:3] == ["set-option", "-g", "pane-border-format"]
-        and "#[fg=colour244]" in call[3]
-        and "#{@hive_ide_title}" in call[3]
-        and "#{pane_title}" not in call[3]
+        and "#{pane_title}" in call[3]
         for call in calls
     )
 
@@ -759,6 +727,60 @@ def test_open_bootstraps_empty_workspace(tmp_path, capsys, monkeypatch):
     assert sessions[0]["name"] == "workspace"
     assert sessions[0]["working_dir"] == str(workspace)
     assert sessions[0]["driver"]["id"] == "term"
+
+
+def test_open_preserves_saved_tmux_socket(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    store = StateStore(state, workspace)
+    store.create_session(
+        name="EXISTING",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    store.write_path(
+        store.config_snapshot_path(),
+        {
+            "tmux": {
+                "socket": "hive-ide-next-existing",
+                "sidebar_width": 20,
+                "plan_width": 86,
+            }
+        },
+    )
+    opened_sockets: list[str] = []
+    repair_sockets: list[str] = []
+
+    def fake_open(self, *, no_attach=False):
+        opened_sockets.append(self.socket)
+        return {"socket": self.socket, "no_attach": no_attach}
+
+    def fake_repair_all(self):
+        repair_sockets.append(self.frame.socket)
+        return {"ok": True}
+
+    monkeypatch.setattr("hive_ide.cli.Frame.open", fake_open)
+    monkeypatch.setattr("hive_ide.cli.SessionRepair.repair_all", fake_repair_all)
+
+    assert main(
+        [
+            "--state-home",
+            str(state),
+            "--workspace-key",
+            str(workspace),
+            "open",
+            "--no-attach",
+        ]
+    ) == 0
+
+    opened = json.loads(capsys.readouterr().out)
+    snapshot = store.read_path(store.config_snapshot_path())
+    assert opened == {"socket": "hive-ide-next-existing", "no_attach": True}
+    assert opened_sockets == ["hive-ide-next-existing"]
+    assert repair_sockets == ["hive-ide-next-existing"]
+    assert snapshot["tmux"]["socket"] == "hive-ide-next-existing"
 
 
 def test_adopt_requires_explicit_reference_or_limit(tmp_path, capsys, monkeypatch):

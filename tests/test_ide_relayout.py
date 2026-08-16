@@ -219,7 +219,7 @@ def test_resize_hook_snap_does_not_query_clients_or_status(tmp_path, monkeypatch
         if args[:2] == ["show-options", "-gv"]:
             raise AssertionError(f"resize-hook snap must not query status options: {args}")
         if args[:2] == ["list-windows", "-a"]:
-            return "@0\t254\t66"
+            raise AssertionError(f"targeted resize-hook snap must not scan windows: {args}")
         if args[-1] == "#{window_width}\t#{window_height}":
             raise AssertionError(f"resize-hook snap must not query active geometry: {args}")
         if args[-1] == "#{window_width}":
@@ -248,17 +248,12 @@ def test_resize_hook_snap_does_not_query_clients_or_status(tmp_path, monkeypatch
             str(state),
             "254",
             "67",
+            "@0",
         ]
     ) == 0
-    assert [
-        "resize-window",
-        "-t",
-        "@0",
-        "-x",
-        "254",
-        "-y",
-        "67",
-    ] in calls
+    assert ["resize-pane", "-t", "@0.0", "-x", "20"] in calls
+    assert ["resize-pane", "-t", "@0.2", "-x", "86"] in calls
+    assert all(call[:2] != ["resize-window", "-t"] for call in calls)
 
 
 def test_manual_snap_without_hook_geometry_can_use_latest_client_geometry(tmp_path, monkeypatch):

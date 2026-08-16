@@ -817,21 +817,22 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
             plan=args.plan,
             source=args.source,
         )
+    socket = args.tmux_socket or _socket(store, None) or f"hive-ide-{store.workspace_hash[:8]}"
     snapshot = normalized_snapshot(
         state_home=store.home,
         workspace_key=store.workspace_key,
         workspace_hash=store.workspace_hash,
-        socket=args.tmux_socket or f"hive-ide-{store.workspace_hash[:8]}",
+        socket=socket,
         registry=registry,
         config=config,
     )
     store.write_path(store.config_snapshot_path(), snapshot)
     SessionRepair(
         store,
-        Frame(store, socket=args.tmux_socket),
+        Frame(store, socket=socket),
         registry=registry,
     ).repair_all()
-    return Frame(store, socket=args.tmux_socket).open(no_attach=args.no_attach)
+    return Frame(store, socket=socket).open(no_attach=args.no_attach)
 
 
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:

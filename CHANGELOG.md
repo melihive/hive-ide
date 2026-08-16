@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Disabled tmux pane titlebar rows in the IDE frame after rapid Ghostty/Niri
+  window resizes proved they can block the tmux server for tens of seconds even
+  with resize hooks removed.
+- `hive-ide open` now preserves an existing saved tmux socket when refreshing a
+  workspace, preventing detached duplicate IDE servers during package upgrades.
+- Hidden sidebar panes now require both active window and active pane before
+  treating themselves as focused, reducing background tmux polling from
+  inactive session windows.
+
 ## [1.0.62] - 2026-08-16
 
 ### Fixed

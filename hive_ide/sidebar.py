@@ -228,6 +228,7 @@ class IdeSidebar:
     """Interactive render loop for one window's sidebar pane."""
 
     TICK_SECONDS = 1.5
+    HIDDEN_TICK_SECONDS = 5.0
     NO_WRAP, HOME, EL, CLEAR_BELOW, RESET = "\x1b[?7l", "\x1b[H", "\x1b[K", "\x1b[J", "\x1b[0m"
     CLEAR_SCREEN = "\x1b[2J"
     # Selection uses a REAL background colour, not reverse-video (SGR 7): erase-to-EOL
@@ -600,6 +601,37 @@ class IdeSidebar:
         return IdeSidebar._pane_active()
 
     @staticmethod
+    def _pane_visibility() -> tuple[bool, bool]:
+        """Return (visible_window, focused_sidebar_pane) for this sidebar pane.
+
+        `#{pane_active}` is true for the selected pane in every tmux window, including
+        hidden windows. A hidden sidebar must not treat that as focus or it will keep
+        polling/redrawing while the user is resizing a different visible window.
+        """
+        pane = os.environ.get("TMUX_PANE")
+        if not pane:
+            return False, False
+        try:
+            r = subprocess.run(
+                [
+                    "tmux",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    pane,
+                    "#{window_active}\t#{pane_active}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=0.25,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, False
+        window_active, pane_active = (r.stdout.strip().split("\t") + ["", ""])[:2]
+        visible = window_active == "1"
+        return visible, visible and pane_active == "1"
+
+    @staticmethod
     def _pane_active() -> bool:
         """Authoritative tmux focus state for this sidebar pane.
 
@@ -608,15 +640,7 @@ class IdeSidebar:
         already focused the chat pane. Polling the pane state before each draw keeps
         the visual selection tied to the real active pane, not stale process memory.
         """
-        pane = os.environ.get("TMUX_PANE")
-        if not pane:
-            return False
-        try:
-            r = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{pane_active}"],
-                               capture_output=True, text=True, timeout=2)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return r.stdout.strip() == "1"
+        return IdeSidebar._pane_visibility()[1]
 
     @staticmethod
     def _key(data: bytes) -> str | None:
@@ -1221,7 +1245,7 @@ class IdeSidebar:
         fd = sys.stdin.fileno()
         interactive = bool(termios) and sys.stdin.isatty()
         saved = termios.tcgetattr(fd) if interactive else None
-        focused = IdeSidebar._initial_focus()
+        visible, focused = IdeSidebar._pane_visibility()
         if interactive:
             tty.setcbreak(fd)     # unbuffered, no echo; Ctrl-C still raises KeyboardInterrupt
             sys.stdout.write(IdeSidebar.FOCUS_ON + IdeSidebar.MOUSE_ON)
@@ -1237,8 +1261,7 @@ class IdeSidebar:
                 # (two stats) and checked before drawing, so no stale frame is painted.
                 if IdeSidebar._reload_watch() != reload_baseline:
                     return 0
-                if focused and not IdeSidebar._pane_active():
-                    focused = False
+                visible, focused = IdeSidebar._pane_visibility()
                 # Every window runs its OWN sidebar, so cursor/query are per-process. Left
                 # alone they drift apart and arriving at a window shows a cursor parked
                 # where you last left it — reading as an out-of-sync bug. So a sidebar that
@@ -1251,6 +1274,14 @@ class IdeSidebar:
                     # active view centred on the window you're in.
                     query, on_plus = "", False
                     on_filter = on_archive = archive_mode = False
+                if not visible:
+                    if interactive:
+                        ready, _, _ = select.select([fd], [], [], IdeSidebar.HIDDEN_TICK_SECONDS)
+                        if ready:
+                            os.read(fd, 256)
+                    else:
+                        time.sleep(IdeSidebar.HIDDEN_TICK_SECONDS)
+                    continue
                 if archive_mode:
                     sessions = IdeSidebar._filter(StateIO.list_archived(skill_dir, repo), query)
                 else:

@@ -1257,17 +1257,9 @@ class Frame:
                 self.tmux(["set-option", "-g", "-u", name])
 
     def _normalize_pane_titlebars(self) -> None:
-        self.tmux(["set-option", "-g", "pane-border-status", "top"])
+        self.tmux(["set-option", "-g", "pane-border-status", "off"])
         self.tmux(["set-option", "-g", "pane-active-border-style", "fg=colour51"])
         self.tmux(["set-option", "-g", "pane-border-style", "fg=colour238"])
-        self.tmux(
-            [
-                "set-option",
-                "-g",
-                "pane-border-format",
-                "#{?pane_active,#[fg=colour16;bg=colour51;bold],#[fg=colour244]} #{@hive_ide_title} #[default]",
-            ]
-        )
 
     def _normalize_resize_behavior(self) -> None:
         """Follow the latest attached client so mobile SSH cannot pin desktop geometry."""
@@ -1426,7 +1418,7 @@ class Frame:
                 "snap",
             ],
         )
-        relayout_client = self._module(
+        relayout_window = self._module(
             "relayout",
             [
                 "--state-home",
@@ -1441,6 +1433,8 @@ class Frame:
                 "#{window_width}",
                 "--client-height",
                 "#{window_height}",
+                "--window-id",
+                "#{window_id}",
             ],
         )
         if key := keys.get("reset"):
@@ -1511,29 +1505,21 @@ class Frame:
                 f"run-shell -b {shlex.quote(adopt)}",
             ]
         )
-        self.tmux(
-            [
-                "set-hook",
-                "-t",
-                self.target,
-                "client-resized",
-                f"run-shell -b {shlex.quote(relayout_client)}",
-            ]
-        )
+        self.tmux(["set-hook", "-t", self.target, "-u", "client-resized"])
         self.tmux(
             [
                 "set-hook",
                 "-t",
                 self.target,
                 "client-attached",
-                f"run-shell -b {shlex.quote(relayout_client)}",
+                f"run-shell -b {shlex.quote(relayout_window)}",
             ]
         )
         for redundant_hook in ("client-active", "client-focus-in"):
             self.tmux(["set-hook", "-t", self.target, "-u", redundant_hook])
         focus_relayout = (
             f"if-shell -F '#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}' "
-            f"{shlex.quote(f'run-shell -b {shlex.quote(relayout_client)}')} "
+            f"{shlex.quote(f'run-shell -b {shlex.quote(relayout_window)}')} "
             "'true'"
         )
         self.tmux(

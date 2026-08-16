@@ -464,7 +464,7 @@ def test_sidebar_pane_active_reads_tmux_pane_state(monkeypatch):
 
     def fake_run(argv, **_kwargs):
         seen["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0, "0\n", "")
+        return subprocess.CompletedProcess(argv, 0, "1\t0\n", "")
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
@@ -475,8 +475,20 @@ def test_sidebar_pane_active_reads_tmux_pane_state(monkeypatch):
         "-p",
         "-t",
         "%12",
-        "#{pane_active}",
+        "#{window_active}\t#{pane_active}",
     ]
+
+
+def test_hidden_sidebar_pane_is_not_focused_even_when_pane_active(monkeypatch):
+    monkeypatch.setenv("TMUX_PANE", "%12")
+
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, "0\t1\n", "")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert IdeSidebar._pane_visibility() == (False, False)
+    assert IdeSidebar._pane_active() is False
 
 
 def test_subagent_count_renders_for_current_row_without_status_dot(tmp_path):

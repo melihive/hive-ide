@@ -571,6 +571,7 @@ class IdeRelayout:
             parser.add_argument("--mode", choices=("snap", "adopt"), default="snap")
             parser.add_argument("--client-width")
             parser.add_argument("--client-height")
+            parser.add_argument("--window-id")
             parsed = parser.parse_args(argv[1:])
             store = StateStore(parsed.state_home, parsed.workspace_key)
             relayout_argv = [
@@ -587,6 +588,8 @@ class IdeRelayout:
             ]
             if parsed.client_width and parsed.client_height:
                 relayout_argv.extend([parsed.client_width, parsed.client_height])
+            if parsed.window_id:
+                relayout_argv.append(parsed.window_id)
             return IdeRelayout.main(relayout_argv)
         if len(argv) < 4:
             return 0
@@ -612,6 +615,7 @@ class IdeRelayout:
         forced_geometry: tuple[int, int] | None = None
         if len(argv) > 11 and argv[10].isdigit() and argv[11].isdigit():
             forced_geometry = (int(argv[10]), int(argv[11]))
+        target_window = argv[12] if len(argv) > 12 and argv[12] else None
         if mode == "snap" and forced_geometry and IdeRelayout._coalesced_by_newer_snap(state_path):
             IdeRelayout._debug_write(
                 state_path,
@@ -692,7 +696,12 @@ class IdeRelayout:
         debug_options = IdeRelayout._tmux_options(sock) if debug_enabled else {}
         debug_windows = []
         remembered_plan = pw
-        for win, width, height in IdeRelayout._window_geometries(sock):
+        windows = (
+            [(target_window, *forced_window_geometry)]
+            if target_window and forced_window_geometry
+            else IdeRelayout._window_geometries(sock)
+        )
+        for win, width, height in windows:
             before_panes = IdeRelayout._pane_geometries(sock, win) if debug_enabled else []
             before = (width, height)
             resized_to = None
@@ -799,7 +808,7 @@ class IdeRelayout:
         # so its columns are where a manual drag would live. A `snap` (real terminal resize)
         # also refreshes this, which is what makes a resize "reset to defaults" stick.
         if state_path:
-            cur = IdeRelayout._tmux(sock, ["display-message", "-p", "#{window_id}"])
+            cur = target_window or IdeRelayout._tmux(sock, ["display-message", "-p", "#{window_id}"])
             if cur:
                 IdeRelayout._write_state(state_path, {"win": cur, "side": sw,
                                                       "plan": pw if mode == "snap"
