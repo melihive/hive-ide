@@ -43,6 +43,8 @@ from .store import StateStore
 class IdeRelayout:
     """Snap the sidebar/plan columns back to fixed widths across every ide window."""
 
+    TMUX_TIMEOUT_SECONDS = 0.75
+
     @staticmethod
     def _debug_enabled(path: str) -> bool:
         if os.environ.get("HIVE_IDE_RELAYOUT_DEBUG", "").lower() in {"1", "true", "yes"}:
@@ -77,7 +79,15 @@ class IdeRelayout:
 
     @staticmethod
     def _tmux(socket: str, args: list[str]) -> str:
-        r = subprocess.run(["tmux", "-L", socket, *args], capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                ["tmux", "-L", socket, *args],
+                capture_output=True,
+                text=True,
+                timeout=IdeRelayout.TMUX_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
         return r.stdout.strip() if r.returncode == 0 else ""
 
     @staticmethod
@@ -283,6 +293,21 @@ class IdeRelayout:
                 }
             )
         return panes
+
+    @staticmethod
+    def _window_geometries(socket: str) -> list[tuple[str, int, int]]:
+        rows = IdeRelayout._tmux(
+            socket,
+            ["list-windows", "-a", "-F", "#{window_id}\t#{window_width}\t#{window_height}"],
+        )
+        out: list[tuple[str, int, int]] = []
+        for line in rows.splitlines():
+            win, width, height = (
+                line.split("\t") if line.count("\t") == 2 else ("", "", "")
+            )
+            if win and width.isdigit() and height.isdigit():
+                out.append((win, int(width), int(height)))
+        return out
 
     @staticmethod
     def _tmux_options(socket: str) -> dict[str, str]:
@@ -639,43 +664,36 @@ class IdeRelayout:
             )
             if live.isdigit() and live_plan.isdigit():
                 prev_side, prev_plan = int(live), int(live_plan)
-        active_geometry = IdeRelayout._tmux(
-            sock,
-            ["display-message", "-p", "#{window_width}\t#{window_height}"],
-        ).split("\t")
-        active_tuple = (
-            (int(active_geometry[0]), int(active_geometry[1]))
-            if len(active_geometry) == 2
-            and active_geometry[0].isdigit()
-            and active_geometry[1].isdigit()
-            else None
-        )
-        latest_client_geometry = IdeRelayout._latest_client_geometry(sock)
-        latest_geometry = IdeRelayout._client_to_window_geometry(
-            sock, latest_client_geometry
-        )
-        forced_window_geometry = IdeRelayout._client_to_window_geometry(
-            sock, forced_geometry
-        )
+        # Hot path: resize hooks now pass tmux window geometry, not terminal-client
+        # geometry. Trust it directly and avoid extra tmux queries while tmux is
+        # already processing a resize storm.
+        active_tuple = None
+        latest_client_geometry = None
+        latest_geometry = None
+        forced_window_geometry = forced_geometry
+        if forced_window_geometry is None:
+            active_geometry = IdeRelayout._tmux(
+                sock,
+                ["display-message", "-p", "#{window_width}\t#{window_height}"],
+            ).split("\t")
+            active_tuple = (
+                (int(active_geometry[0]), int(active_geometry[1]))
+                if len(active_geometry) == 2
+                and active_geometry[0].isdigit()
+                and active_geometry[1].isdigit()
+                else None
+            )
+            latest_client_geometry = IdeRelayout._latest_client_geometry(sock)
+            latest_geometry = IdeRelayout._client_to_window_geometry(
+                sock, latest_client_geometry
+            )
         canonical = latest_geometry or forced_window_geometry or active_tuple
         debug_enabled = IdeRelayout._debug_enabled(state_path)
         debug_options = IdeRelayout._tmux_options(sock) if debug_enabled else {}
         debug_windows = []
         remembered_plan = pw
-        for win in IdeRelayout._tmux(sock, ["list-windows", "-a", "-F", "#{window_id}"]).split():
+        for win, width, height in IdeRelayout._window_geometries(sock):
             before_panes = IdeRelayout._pane_geometries(sock, win) if debug_enabled else []
-            raw_geometry = IdeRelayout._tmux(
-                sock,
-                ["display-message", "-p", "-t", win, "#{window_width}\t#{window_height}"],
-            ).split("\t")
-            if (
-                len(raw_geometry) != 2
-                or not raw_geometry[0].isdigit()
-                or not raw_geometry[1].isdigit()
-            ):
-                continue
-            width = int(raw_geometry[0])
-            height = int(raw_geometry[1])
             before = (width, height)
             resized_to = None
             if canonical and (width, height) != canonical:

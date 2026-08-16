@@ -218,7 +218,10 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert "session-window-changed" in hooks
         assert "run-shell -b" in hooks
         assert "--client-width" in hooks
-        assert "#{client_width}" in hooks
+        assert "#{window_width}" in hooks
+        assert "#{window_height}" in hooks
+        assert "--client-width '\"'\"'#{client_width}" not in hooks
+        assert "--client-height '\"'\"'#{client_height}" not in hooks
         assert "after-select-pane" in hooks
         assert (
             frame.tmux(["show-option", "-v", "-t", frame.target, "set-titles"]).stdout.strip()

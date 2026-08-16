@@ -1438,9 +1438,9 @@ class Frame:
                 "--mode",
                 "snap",
                 "--client-width",
-                "#{client_width}",
+                "#{window_width}",
                 "--client-height",
-                "#{client_height}",
+                "#{window_height}",
             ],
         )
         if key := keys.get("reset"):

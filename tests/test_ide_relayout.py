@@ -8,6 +8,7 @@ opposite (agent pinned at its minimum, plan absorbing every spare column), which
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -121,7 +122,7 @@ def test_adopt_with_only_mobile_windows_does_not_crash(tmp_path, monkeypatch):
 
     def fake_tmux(_socket, args):
         if args[:2] == ["list-windows", "-a"]:
-            return "@0 @1"
+            return "@0\t80\t24\n@1\t80\t24"
         if args[-1] == "#{window_width}\t#{window_height}":
             return "80\t24"
         if args[-1] == "#{window_width}":
@@ -151,14 +152,14 @@ def test_adopt_with_only_mobile_windows_does_not_crash(tmp_path, monkeypatch):
     assert json.loads(state.read_text(encoding="utf-8"))["plan"] == PW
 
 
-def test_snap_uses_explicit_client_size_when_tmux_window_is_stale(tmp_path, monkeypatch):
+def test_snap_uses_explicit_window_size_when_tmux_window_is_stale(tmp_path, monkeypatch):
     state = tmp_path / "layout.json"
     calls: list[list[str]] = []
 
     def fake_tmux(_socket, args):
         calls.append(args)
         if args[:2] == ["list-windows", "-a"]:
-            return "@0 @1"
+            return "@0\t254\t66\n@1\t254\t66"
         if args[-1] == "#{window_width}\t#{window_height}":
             return "254\t66"
         if args[-1] == "#{window_width}":
@@ -207,18 +208,20 @@ def test_snap_uses_explicit_client_size_when_tmux_window_is_stale(tmp_path, monk
     ] in calls
 
 
-def test_snap_prefers_latest_client_size_over_stale_invoker(tmp_path, monkeypatch):
+def test_resize_hook_snap_does_not_query_clients_or_status(tmp_path, monkeypatch):
     state = tmp_path / "layout.json"
     calls: list[list[str]] = []
 
     def fake_tmux(_socket, args):
         calls.append(args)
         if args[:2] == ["list-clients", "-F"]:
-            return "100\t254\t67\n200\t58\t24"
+            raise AssertionError(f"resize-hook snap must not query clients: {args}")
+        if args[:2] == ["show-options", "-gv"]:
+            raise AssertionError(f"resize-hook snap must not query status options: {args}")
         if args[:2] == ["list-windows", "-a"]:
-            return "@0"
+            return "@0\t254\t66"
         if args[-1] == "#{window_width}\t#{window_height}":
-            return "58\t45"
+            raise AssertionError(f"resize-hook snap must not query active geometry: {args}")
         if args[-1] == "#{window_width}":
             return "58"
         if args[-1] == "#{window_zoomed_flag}":
@@ -252,13 +255,13 @@ def test_snap_prefers_latest_client_size_over_stale_invoker(tmp_path, monkeypatc
         "-t",
         "@0",
         "-x",
-        "58",
+        "254",
         "-y",
-        "24",
+        "67",
     ] in calls
 
 
-def test_snap_converts_statusline_client_height_to_window_height(tmp_path, monkeypatch):
+def test_manual_snap_without_hook_geometry_can_use_latest_client_geometry(tmp_path, monkeypatch):
     state = tmp_path / "layout.json"
     calls: list[list[str]] = []
 
@@ -268,8 +271,10 @@ def test_snap_converts_statusline_client_height_to_window_height(tmp_path, monke
             return "on"
         if args[:2] == ["show-options", "-g"] and args[-1] == "status-format":
             return "status-format[0] default"
+        if args[:2] == ["list-clients", "-F"]:
+            return "100\t220\t65"
         if args[:2] == ["list-windows", "-a"]:
-            return "@0"
+            return "@0\t220\t65"
         if args[-1] == "#{window_width}\t#{window_height}":
             return "220\t65"
         if args[-1] == "#{window_width}":
@@ -295,8 +300,6 @@ def test_snap_converts_statusline_client_height_to_window_height(tmp_path, monke
             str(APREF),
             "snap",
             str(state),
-            "220",
-            "65",
         ]
     ) == 0
 
@@ -326,7 +329,7 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
         if args[:2] == ["list-panes", "-t"]:
             return "%1\t0\tsidebar\t24\t67\t0\t66\t1\tpython3"
         if args[:2] == ["list-windows", "-a"]:
-            return "@0"
+            return "@0\t254\t67"
         if args[:2] == ["show-options", "-gv"] and args[-1] == "status":
             return "on"
         if args[:2] == ["show-window-options", "-gv"] and args[-1] == "window-size":
@@ -371,15 +374,15 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
     assert len(events) == 1
     event = events[0]
     assert event["event"] == "relayout"
-    assert event["geometry_source"] == "latest-client"
+    assert event["geometry_source"] == "hook-client"
     assert event["forced_geometry"] == [254, 67]
-    assert event["latest_geometry"] == [58, 23]
-    assert event["latest_client_geometry"] == [58, 24]
+    assert event["latest_geometry"] is None
+    assert event["latest_client_geometry"] is None
     assert event["clients"][1]["tty"] == "/dev/pts/2"
     assert event["clients"][1]["session"] == "hive-ide"
     assert event["tmux_options"]["server.status"] == "on"
     assert event["tmux_options"]["window.window-size"] == "latest"
-    assert event["windows"][0]["resized_to"] == [58, 23]
+    assert event["windows"][0]["resized_to"] is None
     assert event["windows"][0]["panes_before"][0]["role"] == "sidebar"
 
 
@@ -392,7 +395,7 @@ def test_debug_trace_can_be_enabled_from_config_snapshot(tmp_path, monkeypatch):
 
     def fake_tmux(_socket, args):
         if args[:2] == ["list-windows", "-a"]:
-            return "@0"
+            return "@0\t180\t40"
         if args[-1] == "#{window_width}\t#{window_height}":
             return "180\t40"
         if args[-1] == "#{window_width}":
@@ -434,7 +437,7 @@ def test_debug_trace_is_silent_without_enable_file(tmp_path, monkeypatch):
 
     def fake_tmux(_socket, args):
         if args[:2] == ["list-windows", "-a"]:
-            return "@0"
+            return "@0\t180\t40"
         if args[-1] == "#{window_width}\t#{window_height}":
             return "180\t40"
         if args[-1] == "#{window_width}":
@@ -556,6 +559,15 @@ def test_duplicate_snap_skip_avoids_the_tmux_resize_loop(tmp_path, monkeypatch):
     ) == 0
 
     assert calls == []
+
+
+def test_tmux_timeout_returns_empty_instead_of_hanging(monkeypatch):
+    def timeout_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["tmux"], timeout=IdeRelayout.TMUX_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr("hive_ide.relayout.subprocess.run", timeout_run)
+
+    assert IdeRelayout._tmux("test-socket", ["display-message", "-p", "#{window_width}"]) == ""
 
 
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
