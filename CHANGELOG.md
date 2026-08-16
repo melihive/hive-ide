@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.62] - 2026-08-16
+
+### Fixed
+
+- Resize relayout hooks now pass tmux window geometry directly, avoiding extra
+  client/status geometry queries while tmux is already handling a resize burst.
+- Relayout tmux subprocess calls now have short timeouts, so a stuck tmux
+  `display-message` cannot leave long-lived background helpers that make the IDE
+  feel frozen.
+
 ## [1.0.61] - 2026-08-15
 
 ### Fixed
