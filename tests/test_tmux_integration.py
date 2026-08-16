@@ -210,12 +210,23 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         windows = frame.windows()
         assert set(windows) == {alpha["id"], beta["id"]}
         hooks = frame.tmux(["show-hooks", "-t", frame.target]).stdout
-        assert "client-resized" not in hooks
+        assert "client-resized" in hooks
         assert "client-attached" in hooks
         assert "client-active" not in hooks
         assert "client-focus-in" not in hooks
-        assert "after-select-pane" in hooks
+        assert "after-select-pane" not in hooks
         assert "session-window-changed" in hooks
+        client_resized = next(
+            line for line in hooks.splitlines() if line.startswith("client-resized")
+        )
+        assert "run-shell -b" in client_resized
+        assert "-m hive_ide.relayout" in client_resized
+        assert "--client-width" in client_resized
+        assert "#{window_width}" in client_resized
+        assert "--client-height" in client_resized
+        assert "#{window_height}" in client_resized
+        assert "--window-id" in client_resized
+        assert "#{window_id}" in client_resized
         assert "run-shell -b" in hooks
         assert "--client-width" in hooks
         assert "#{window_width}" in hooks
@@ -224,7 +235,6 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert "#{window_id}" in hooks
         assert "--client-width '\"'\"'#{client_width}" not in hooks
         assert "--client-height '\"'\"'#{client_height}" not in hooks
-        assert "after-select-pane" in hooks
         assert (
             frame.tmux(["show-option", "-v", "-t", frame.target, "set-titles"]).stdout.strip()
             == "on"

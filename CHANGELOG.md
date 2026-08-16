@@ -11,10 +11,17 @@ All notable changes to `hive-ide` will be documented in this file.
 - Removed IDE-managed Micro `repopath.maxwidth` updates; the Micro plugin owns
   statusline fitting again, independent of tmux hooks and relayout.
 - Restored tmux pane titlebars with the IDE-owned `#{@hive_ide_title}` format.
-- Removed the `client-resized` relayout hook entirely; the visible sidebar
-  heartbeat now repairs responsive columns after terminal resizes settle, so
-  Niri/Ghostty resize storms do not run tmux commands from inside the resize
-  event.
+- Reduced `client-resized` relayout back to a targeted current-window snap and
+  kept Micro/statusline work out of that path, so Niri/Ghostty resize storms do
+  not run package helpers across every IDE window.
+- Resize relayout now prefers the latest attached tmux client geometry after
+  debounce instead of trusting the hook's stale intermediate `window_width`.
+- Removed the duplicate-geometry snap skip; tmux can leave panes proportionally
+  drifted at the same final window size, so equal `window_width` is not proof
+  that the sidebar and plan columns are already repaired.
+- Removed the narrow-frame `after-select-pane` relayout hook and the sidebar
+  heartbeat geometry repair path; sidebars render/input only and no longer race
+  normal agent switching or chat pane redraws with their own tmux resize calls.
 
 ## [1.0.63] - 2026-08-16
 

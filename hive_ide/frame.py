@@ -364,7 +364,6 @@ class Frame:
         )
 
     def _sidebar_command(self, record: dict[str, Any]) -> str:
-        interpreter = (record.get("source") or {}).get("interpreter") or self.python
         command = self._module(
             "sidebar",
             [
@@ -377,7 +376,7 @@ class Frame:
                 "--tmux-socket",
                 self.socket,
             ],
-            interpreter=interpreter,
+            interpreter=self.python,
         )
         return self._interactive_command(f"while :; do {command}; sleep 1; done")
 
@@ -1500,7 +1499,15 @@ class Frame:
                 f"run-shell -b {shlex.quote(adopt)}",
             ]
         )
-        self.tmux(["set-hook", "-t", self.target, "-u", "client-resized"])
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-resized",
+                f"run-shell -b {shlex.quote(relayout_window)}",
+            ]
+        )
         self.tmux(
             [
                 "set-hook",
@@ -1512,20 +1519,7 @@ class Frame:
         )
         for redundant_hook in ("client-active", "client-focus-in"):
             self.tmux(["set-hook", "-t", self.target, "-u", redundant_hook])
-        focus_relayout = (
-            f"if-shell -F '#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}' "
-            f"{shlex.quote(f'run-shell -b {shlex.quote(relayout_window)}')} "
-            "'true'"
-        )
-        self.tmux(
-            [
-                "set-hook",
-                "-t",
-                self.target,
-                "after-select-pane",
-                focus_relayout,
-            ]
-        )
+        self.tmux(["set-hook", "-t", self.target, "-u", "after-select-pane"])
         sidebar_key = keys.get("sidebar")
         if sidebar_key:
             self.tmux(

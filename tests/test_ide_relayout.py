@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -210,22 +211,22 @@ def test_snap_uses_explicit_window_size_when_tmux_window_is_stale(tmp_path, monk
     assert ["set-window-option", "-u", "-t", "@1", "window-size"] in calls
 
 
-def test_resize_hook_snap_does_not_query_clients_or_status(tmp_path, monkeypatch):
+def test_resize_hook_snap_uses_latest_client_without_scanning_windows(tmp_path, monkeypatch):
     state = tmp_path / "layout.json"
     calls: list[list[str]] = []
 
     def fake_tmux(_socket, args):
         calls.append(args)
         if args[:2] == ["list-clients", "-F"]:
-            raise AssertionError(f"resize-hook snap must not query clients: {args}")
-        if args[:2] == ["show-options", "-gv"]:
-            raise AssertionError(f"resize-hook snap must not query status options: {args}")
+            return "100\t254\t69"
+        if args[:2] == ["show-options", "-gv"] and args[-1] == "status":
+            return "off"
         if args[:2] == ["list-windows", "-a"]:
             raise AssertionError(f"targeted resize-hook snap must not scan windows: {args}")
         if args[-1] == "#{window_width}\t#{window_height}":
             raise AssertionError(f"resize-hook snap must not query active geometry: {args}")
         if args[-1] == "#{window_width}":
-            return "58"
+            return "254"
         if args[-1] == "#{window_zoomed_flag}":
             return "1"
         if args[-1] == "#{window_id}":
@@ -255,7 +256,7 @@ def test_resize_hook_snap_does_not_query_clients_or_status(tmp_path, monkeypatch
     ) == 0
     assert ["resize-pane", "-t", "@0.0", "-x", "20"] in calls
     assert ["resize-pane", "-t", "@0.2", "-x", "86"] in calls
-    assert all(call[:2] != ["resize-window", "-t"] for call in calls)
+    assert ["resize-window", "-t", "@0", "-x", "254", "-y", "69"] in calls
 
 
 def test_manual_snap_without_hook_geometry_can_use_latest_client_geometry(tmp_path, monkeypatch):
@@ -372,15 +373,15 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
     assert len(events) == 1
     event = events[0]
     assert event["event"] == "relayout"
-    assert event["geometry_source"] == "hook-client"
+    assert event["geometry_source"] == "latest-client"
     assert event["forced_geometry"] == [254, 67]
-    assert event["latest_geometry"] is None
-    assert event["latest_client_geometry"] is None
+    assert event["latest_geometry"] == [58, 23]
+    assert event["latest_client_geometry"] == [58, 24]
     assert event["clients"][1]["tty"] == "/dev/pts/2"
     assert event["clients"][1]["session"] == "hive-ide"
     assert event["tmux_options"]["server.status"] == "on"
     assert event["tmux_options"]["window.window-size"] == "latest"
-    assert event["windows"][0]["resized_to"] is None
+    assert event["windows"][0]["resized_to"] == [58, 23]
     assert event["windows"][0]["panes_before"][0]["role"] == "sidebar"
 
 
@@ -528,9 +529,12 @@ def test_superseded_snap_skip_does_not_query_tmux_for_debug(tmp_path, monkeypatc
     assert "tmux_options" not in events[-1]
 
 
-def test_duplicate_snap_skip_avoids_the_tmux_resize_loop(tmp_path, monkeypatch):
+def test_repeated_snap_geometry_still_checks_tmux_panes(tmp_path, monkeypatch):
     state = str(tmp_path / "layout.json")
-    IdeRelayout._record_snap(state, (203, 70))
+    (tmp_path / "layout.json.last-snap").write_text(
+        json.dumps({"ts": time.time(), "geometry": [203, 70]}),
+        encoding="utf-8",
+    )
     calls: list[list[str]] = []
 
     def fake_tmux(_socket, args):
@@ -556,7 +560,7 @@ def test_duplicate_snap_skip_avoids_the_tmux_resize_loop(tmp_path, monkeypatch):
         ]
     ) == 0
 
-    assert calls == []
+    assert calls
 
 
 def test_tmux_timeout_returns_empty_instead_of_hanging(monkeypatch):
