@@ -4983,3 +4983,53 @@ def test_session_error_has_sidebar_priority(tmp_path):
     )
     legacy = {**record, "repo": store.workspace_key}
     assert IdeSidebar._status_dot(store.home, legacy)[0] == "!"
+
+
+def test_sidebar_heartbeat_repairs_visible_frame_geometry(monkeypatch):
+    calls = []
+
+    def fake_tmux(args, timeout=0.5):
+        calls.append(args)
+        if args[:3] == ["display-message", "-p", "-t"] and args[-1].startswith("#{window_active}"):
+            return subprocess.CompletedProcess(args, 0, "1\t@0\t203\t0\n", "")
+        if args[:2] == ["list-panes", "-t"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "0\t%0\t64\t0\n1\t%1\t107\t1\n2\t%2\t81\t0\n",
+                "",
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setenv("TMUX_PANE", "%0")
+    monkeypatch.setattr(IdeSidebar, "_tmux", fake_tmux)
+
+    IdeSidebar._repair_visible_frame_geometry()
+
+    assert ["resize-pane", "-t", "@0.0", "-x", "20"] in calls
+    assert ["resize-pane", "-t", "@0.2", "-x", "86"] in calls
+    assert ["select-pane", "-t", "%1"] in calls
+
+
+def test_sidebar_heartbeat_zooms_mobile_frame(monkeypatch):
+    calls = []
+
+    def fake_tmux(args, timeout=0.5):
+        calls.append(args)
+        if args[:3] == ["display-message", "-p", "-t"] and args[-1].startswith("#{window_active}"):
+            return subprocess.CompletedProcess(args, 0, "1\t@0\t49\t0\n", "")
+        if args[:2] == ["list-panes", "-t"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "0\t%0\t2\t0\n1\t%1\t19\t1\n2\t%2\t26\t0\n",
+                "",
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setenv("TMUX_PANE", "%0")
+    monkeypatch.setattr(IdeSidebar, "_tmux", fake_tmux)
+
+    IdeSidebar._repair_visible_frame_geometry()
+
+    assert ["resize-pane", "-Z", "-t", "%1"] in calls

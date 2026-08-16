@@ -210,26 +210,18 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         windows = frame.windows()
         assert set(windows) == {alpha["id"], beta["id"]}
         hooks = frame.tmux(["show-hooks", "-t", frame.target]).stdout
-        assert "client-resized" in hooks
+        assert "client-resized" not in hooks
         assert "client-attached" in hooks
         assert "client-active" not in hooks
         assert "client-focus-in" not in hooks
         assert "after-select-pane" in hooks
         assert "session-window-changed" in hooks
-        client_resized = next(
-            line for line in hooks.splitlines() if line.startswith("client-resized")
-        )
-        assert "resize-pane -t :.0 -x 20" in client_resized
-        assert "resize-pane -t :.2 -x 86" in client_resized
-        assert "-m hive_ide.relayout" not in client_resized
-        assert "run-shell -b" not in client_resized
         assert "run-shell -b" in hooks
         assert "--client-width" in hooks
         assert "#{window_width}" in hooks
         assert "#{window_height}" in hooks
         assert "--window-id" in hooks
         assert "#{window_id}" in hooks
-        assert "resize-snap" not in hooks
         assert "--client-width '\"'\"'#{client_width}" not in hooks
         assert "--client-height '\"'\"'#{client_height}" not in hooks
         assert "after-select-pane" in hooks

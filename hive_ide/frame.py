@@ -986,36 +986,6 @@ class Frame:
         self.tmux(["resize-pane", "-t", sidebar_pane, "-x", str(sidebar)])
         self.tmux(["resize-pane", "-t", plan_pane, "-x", str(plan)])
 
-    @staticmethod
-    def _resize_snap_hook() -> str:
-        """Cheap resize hook: tmux-only, per active window, no Python process storm."""
-        side = IdeLayout.SIDEBAR_W
-        plan_max = IdeLayout.PLAN_W
-        plan_min = IdeLayout.PLAN_MIN
-        agent_pref = IdeLayout.AGENT_PREF
-        mobile = IdeLayout.mobile_threshold()
-        plan_grows_at = side + agent_pref + plan_min
-        plan_full_at = side + agent_pref + plan_max
-
-        plan_command = f"resize-pane -t :.2 -x {plan_min}"
-        for width in range(plan_grows_at + 1, plan_full_at):
-            plan = width - side - agent_pref
-            plan_command = (
-                f"if-shell -F '#{{>=:#{{window_width}},{width}}}' "
-                f"{{ resize-pane -t :.2 -x {plan} }} "
-                f"{{ {plan_command} }}"
-            )
-        plan_command = (
-            f"if-shell -F '#{{>=:#{{window_width}},{plan_full_at}}}' "
-            f"{{ resize-pane -t :.2 -x {plan_max} }} "
-            f"{{ {plan_command} }}"
-        )
-        return (
-            f"if-shell -F '#{{<:#{{window_width}},{mobile}}}' "
-            f"{{ display-message -p '' }} "
-            f"{{ resize-pane -t :.0 -x {side} ; {plan_command} }}"
-        )
-
     def build(self, record: dict[str, Any]) -> str:
         working_dir = record["working_dir"]
         if not Path(working_dir).is_dir():
@@ -1530,15 +1500,7 @@ class Frame:
                 f"run-shell -b {shlex.quote(adopt)}",
             ]
         )
-        self.tmux(
-            [
-                "set-hook",
-                "-t",
-                self.target,
-                "client-resized",
-                self._resize_snap_hook(),
-            ]
-        )
+        self.tmux(["set-hook", "-t", self.target, "-u", "client-resized"])
         self.tmux(
             [
                 "set-hook",

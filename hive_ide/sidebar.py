@@ -643,6 +643,81 @@ class IdeSidebar:
         return IdeSidebar._pane_visibility()[1]
 
     @staticmethod
+    def _tmux(args: list[str], timeout: float = 0.5) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                ["tmux", *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    @staticmethod
+    def _repair_visible_frame_geometry() -> None:
+        """Repair the active window's responsive columns from the sidebar heartbeat.
+
+        Resize hooks run while tmux is already digesting terminal geometry changes; calling
+        back into tmux from that hook wedged the server under Niri/Ghostty resize storms.
+        The sidebar loop runs after the event has settled, and only for the visible window,
+        so it is the safe place to restore the IDE columns.
+        """
+        pane = os.environ.get("TMUX_PANE")
+        if not pane:
+            return
+        info = IdeSidebar._tmux(
+            [
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{window_active}\t#{window_id}\t#{window_width}\t#{window_zoomed_flag}",
+            ]
+        )
+        if info is None or info.returncode != 0:
+            return
+        active, win, raw_width, zoomed = (info.stdout.strip().split("\t") + ["", "", "", ""])[:4]
+        if active != "1" or not win or not raw_width.isdigit():
+            return
+        width = int(raw_width)
+        panes = IdeSidebar._tmux(
+            [
+                "list-panes",
+                "-t",
+                win,
+                "-F",
+                "#{pane_index}\t#{pane_id}\t#{pane_width}\t#{pane_active}",
+            ]
+        )
+        if panes is None or panes.returncode != 0:
+            return
+        rows = []
+        for line in panes.stdout.splitlines():
+            index, pane_id, pane_width, pane_active = (
+                line.split("\t") if line.count("\t") == 3 else ("", "", "", "")
+            )
+            if index.isdigit() and pane_id and pane_width.isdigit():
+                rows.append((int(index), pane_id, int(pane_width), pane_active == "1"))
+        active_pane = next((pane_id for _, pane_id, _, is_active in rows if is_active), f"{win}.1")
+        if IdeLayout.is_mobile(width):
+            if zoomed != "1":
+                IdeSidebar._tmux(["resize-pane", "-Z", "-t", active_pane])
+            return
+        columns = IdeLayout.columns(width)
+        if columns is None:
+            return
+        side, _, plan = columns
+        pane_widths = {index: pane_width for index, _, pane_width, _ in rows}
+        if zoomed == "1":
+            IdeSidebar._tmux(["resize-pane", "-Z", "-t", active_pane])
+        if pane_widths.get(0) != side:
+            IdeSidebar._tmux(["resize-pane", "-t", f"{win}.0", "-x", str(side)])
+        if pane_widths.get(2) != plan:
+            IdeSidebar._tmux(["resize-pane", "-t", f"{win}.2", "-x", str(plan)])
+        IdeSidebar._tmux(["select-pane", "-t", active_pane])
+
+    @staticmethod
     def _key(data: bytes) -> str | None:
         """Control keys only — anything else is filter text (so no j/k binding)."""
         if data == b"\x1b[I":
@@ -1282,6 +1357,7 @@ class IdeSidebar:
                     else:
                         time.sleep(IdeSidebar.HIDDEN_TICK_SECONDS)
                     continue
+                IdeSidebar._repair_visible_frame_geometry()
                 if archive_mode:
                     sessions = IdeSidebar._filter(StateIO.list_archived(skill_dir, repo), query)
                 else:
