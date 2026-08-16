@@ -718,6 +718,13 @@ class IdeRelayout:
                         str(canonical[1]),
                     ],
                 )
+                # `resize-window` pins the target at `window-size manual`; clear
+                # that local override so later terminal resizes can follow the
+                # attached client again.
+                IdeRelayout._tmux(
+                    sock,
+                    ["set-window-option", "-u", "-t", win, "window-size"],
+                )
                 width = canonical[0]
                 height = canonical[1]
                 resized_to = canonical
