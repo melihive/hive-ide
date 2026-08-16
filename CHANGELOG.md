@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.63] - 2026-08-16
+
 ### Fixed
 
 - Disabled tmux pane titlebar rows in the IDE frame after rapid Ghostty/Niri
