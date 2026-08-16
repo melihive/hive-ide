@@ -227,7 +227,7 @@ class SidebarCommandRunner:
 class IdeSidebar:
     """Interactive render loop for one window's sidebar pane."""
 
-    TICK_SECONDS = 1.5
+    TICK_SECONDS = 0.5
     HIDDEN_TICK_SECONDS = 5.0
     NO_WRAP, HOME, EL, CLEAR_BELOW, RESET = "\x1b[?7l", "\x1b[H", "\x1b[K", "\x1b[J", "\x1b[0m"
     CLEAR_SCREEN = "\x1b[2J"
