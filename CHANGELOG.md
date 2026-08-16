@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.64] - 2026-08-16
+
 ### Fixed
 
 - Snap relayout now clears tmux's per-window `window-size manual` override after
