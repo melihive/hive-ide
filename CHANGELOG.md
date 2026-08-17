@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.66] - 2026-08-17
+
 ### Fixed
 
 - `hive-ide monitor` no longer counts tmux frame server memory as session
