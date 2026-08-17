@@ -4,6 +4,18 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added `hive-ide monitor` / `hive-ide top` to report live local Hive IDE
+  agent/sidebar memory grouped by session, with unmatched agent processes called
+  out separately.
+
+### Fixed
+
+- `hive-ide archive` now closes a live tmux window before moving the session to
+  archive state, reports whether memory was released, and refuses to hide a
+  session if the live window exists but cannot be killed.
+
 ## [1.0.64] - 2026-08-16
 
 ### Fixed

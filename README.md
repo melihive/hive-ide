@@ -133,6 +133,22 @@ hive-ide source-set --session-id=<ID> --source=dev
 hive-ide source-set --session-id=<ID> --source=stable
 ```
 
+Archive is a hard sleep: `hive-ide archive --session-id=<ID>` closes the live
+tmux window before moving the session out of the active list. The JSON result
+includes `archive.memory_released`; if the window exists but cannot be closed,
+archive refuses instead of hiding an agent that is still consuming memory.
+
+Monitor local agent memory:
+
+```sh
+hive-ide monitor
+hive-ide top --workspace
+```
+
+`monitor` groups live Hive IDE agent/sidebar processes by session and reports
+unmatched agent processes separately. `--workspace` limits the report to the
+current workspace.
+
 Preview machine-global Claude and Codex status hooks before applying them:
 
 ```sh

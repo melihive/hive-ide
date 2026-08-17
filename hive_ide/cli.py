@@ -20,6 +20,7 @@ from .environments import EnvironmentManager
 from .frame import Frame
 from .handoff import HandoffPackage
 from .hooks import HookInstaller
+from .monitor import monitor_state
 from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
 from .relayout import IdeRelayout
@@ -315,9 +316,29 @@ def cmd_show(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_archive(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
-    record = store.archive_session(args.session_id)
-    Frame(store, socket=_socket(store, args.tmux_socket)).close(args.session_id)
-    return record
+    active = store.find_session(args.session_id)
+    archived = store.find_session(args.session_id, archived=True)
+    if active is None and archived is None:
+        raise UsageError(f"No session with id {args.session_id}.")
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    window_existed = args.session_id in frame.windows()
+    closed_window = False
+    if window_existed:
+        closed_window = frame.close(args.session_id)
+        if not closed_window:
+            raise HiveIdeError(
+                f"Could not close live tmux window for session {args.session_id}; "
+                "archive refused so the agent is not hidden while still consuming memory."
+            )
+    record = store.archive_session(args.session_id) if active is not None else archived
+    return {
+        **record,
+        "archive": {
+            "window_existed": window_existed,
+            "closed_window": closed_window,
+            "memory_released": closed_window,
+        },
+    }
 
 
 def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
@@ -835,6 +856,15 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
     return Frame(store, socket=socket).open(no_attach=args.no_attach)
 
 
+def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    return monitor_state(
+        home=store.home,
+        workspace_key=store.workspace_key,
+        all_workspaces=not args.workspace,
+    )
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
@@ -970,6 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify": "Verify package, drivers, hooks, source, and frame health.",
         "version": "Print package, protocol, schema, and interpreter versions.",
         "map": "Show local IDE workspaces and their sessions.",
+        "monitor": "Show live Hive IDE agent/sidebar memory by session.",
     }
     sub.metavar = "{" + ",".join(command_help) + "}"
 
@@ -1193,6 +1224,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     workspace.set_defaults(handler=cmd_workspace_map)
+
+    monitor = command("monitor", aliases=["top"])
+    monitor.add_argument(
+        "--workspace",
+        action="store_true",
+        help="Limit to the current workspace instead of all local Hive IDE processes.",
+    )
+    monitor.set_defaults(handler=cmd_monitor)
 
     version = command("version")
     version.set_defaults(

@@ -38,6 +38,7 @@ managed environment, use `pipx install hive-ide`.
 - `hive-ide working-dir-set --session-id=<ID> --working-dir=<PATH>`
 - `hive-ide archive --session-id=<ID>`
 - `hive-ide resume --session-id=<ID>`
+- `hive-ide monitor` or `hive-ide top`
 - `hive-ide repair --session-id=<ID>` or `hive-ide repair --all`
 - `hive-ide force-rebuild --session-id=<ID>`
 - `hive-ide clear-error --session-id=<ID>`
@@ -54,6 +55,14 @@ should be listed or changed. Do not guess a session ID when a command reports am
 Use the new-session modal's `new` / `adopt existing` toggle to visually adopt
 Claude Code or Codex conversations for the current directory. The CLI `adopt`
 command is mainly for automation or agent-driven maintenance.
+
+`archive` closes the session's live tmux window before moving it out of the
+active list. The JSON result includes `archive.memory_released`; if a live
+window exists but cannot be closed, archive refuses instead of hiding an agent
+that is still consuming memory.
+
+Use `hive-ide monitor` (alias: `top`) to inspect local agent/sidebar memory by
+session. Pass `--workspace` to limit the report to the current workspace.
 
 The right-side plan pane is read-only by default for known editors: `micro` uses
 `-readonly true`, and `vim`/`nvim`/`vi`/`gvim` use `-R`. Unknown editors are launched

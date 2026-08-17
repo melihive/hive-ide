@@ -27,6 +27,7 @@ from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
 from hive_ide.hooks import HookInstaller
 from hive_ide.info import _card, _keys
+from hive_ide.monitor import ProcessSample, build_monitor
 from hive_ide.python_cmd import PythonCommand
 from hive_ide.repair import SessionRepair
 from hive_ide.seen import IdeSeen
@@ -347,6 +348,144 @@ def test_rename_archive_and_resume_keep_the_same_id_path(tmp_path, capsys):
     assert active_path.is_file()
     assert not store.path("archive", session_id).exists()
     assert store.find_session(session_id)["name"] == "AFTER"
+
+
+def test_cli_archive_closes_live_window_before_hiding_session(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="MEMORY",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    closed: list[str] = []
+
+    class FakeFrame:
+        def __init__(self, _store, *, socket=None):
+            self.socket = socket
+
+        def windows(self):
+            return {record["id"]: "@7"}
+
+        def close(self, session_id):
+            closed.append(session_id)
+            return True
+
+    monkeypatch.setattr("hive_ide.cli.Frame", FakeFrame)
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            store.workspace_key,
+            "archive",
+            "--session-id",
+            record["id"],
+        ]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert closed == [record["id"]]
+    assert result["archive"] == {
+        "window_existed": True,
+        "closed_window": True,
+        "memory_released": True,
+    }
+    assert store.find_session(record["id"]) is None
+    assert store.find_session(record["id"], archived=True)["name"] == "MEMORY"
+
+
+def test_cli_archive_refuses_to_hide_session_when_live_window_close_fails(
+    tmp_path, monkeypatch, capsys
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="MEMORY",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+
+    class FakeFrame:
+        def __init__(self, _store, *, socket=None):
+            self.socket = socket
+
+        def windows(self):
+            return {record["id"]: "@7"}
+
+        def close(self, _session_id):
+            return False
+
+    monkeypatch.setattr("hive_ide.cli.Frame", FakeFrame)
+
+    assert main(
+        [
+            "--state-home",
+            str(store.home),
+            "--workspace-key",
+            store.workspace_key,
+            "archive",
+            "--session-id",
+            record["id"],
+        ]
+    ) == 2
+    captured = capsys.readouterr()
+
+    assert "archive refused" in captured.err
+    assert store.find_session(record["id"]) is not None
+    assert store.find_session(record["id"], archived=True) is None
+
+
+def test_monitor_groups_hive_process_memory_by_session():
+    sessions = {
+        "s1": {
+            "session_id": "s1",
+            "name": "HIVE IDE PYPI",
+            "workspace_key": "/work/hive",
+            "state": "active",
+            "driver": "codex",
+            "source": "dev 1.0.64",
+        }
+    }
+    samples = [
+        ProcessSample(
+            pid=101,
+            ppid=10,
+            rss_kb=200_000,
+            command="codex resume -C /work/hive abc",
+            env={"HIVE_IDE_SESSION_ID": "s1", "HIVE_IDE_WORKSPACE_KEY": "/work/hive"},
+        ),
+        ProcessSample(
+            pid=102,
+            ppid=10,
+            rss_kb=12_000,
+            command="python -m hive_ide.sidebar --session-id s1",
+            env={"HIVE_IDE_SESSION_ID": "s1", "HIVE_IDE_WORKSPACE_KEY": "/work/hive"},
+        ),
+        ProcessSample(
+            pid=201,
+            ppid=20,
+            rss_kb=150_000,
+            command="claude --resume orphan --name OLD",
+            env={},
+        ),
+    ]
+
+    result = build_monitor(samples=samples, sessions=sessions)
+
+    assert result["totals"]["processes"] == 3
+    assert result["totals"]["rss_kb"] == 362_000
+    assert result["by_kind"]["agent"]["rss_kb"] == 350_000
+    assert result["by_kind"]["sidebar"]["rss_kb"] == 12_000
+    assert result["sessions"][0]["session_id"] == "s1"
+    assert result["sessions"][0]["rss_kb"] == 212_000
+    assert result["sessions"][0]["by_kind"]["agent"]["processes"] == 1
+    assert result["unmatched_agents"][0]["pid"] == 201
 
 
 def test_rename_refreshes_claude_display_name_in_launch_command(tmp_path, capsys):
