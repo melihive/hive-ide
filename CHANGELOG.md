@@ -6,6 +6,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
+- The session info modal now includes live memory usage from `hive-ide monitor`,
+  including total RSS/process count and agent/sidebar split when available.
 - `hive-ide monitor` now supports macOS by reading RSS from `ps` and
   attributing agent processes through driver resume references when `/proc`
   environment data is unavailable.

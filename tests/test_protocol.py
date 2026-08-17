@@ -2761,7 +2761,20 @@ def test_info_modal_card_uses_framed_sidebar_style(tmp_path):
     }
     snapshot = {"sidebar": {"icons": {"drivers": {"codex": "◎"}}}}
 
-    rendered = "\n".join(_card(record, snapshot))
+    rendered = "\n".join(
+        _card(
+            record,
+            snapshot,
+            memory={
+                "processes": 4,
+                "rss_mb": 256.5,
+                "by_kind": {
+                    "agent": {"processes": 2, "rss_kb": 200_000},
+                    "sidebar": {"processes": 2, "rss_kb": 62_656},
+                },
+            },
+        )
+    )
 
     assert rendered.startswith("╭")
     assert "Hive IDE  HIVE IDE" in rendered
@@ -2770,6 +2783,25 @@ def test_info_modal_card_uses_framed_sidebar_style(tmp_path):
     assert "📝 plan     Feature Plan" in rendered
     assert "status   feat · 50%" in rendered
     assert "path     plans/feature.md" in rendered
+    assert "🧠 memory   256.5 MB / 4 proc" in rendered
+    assert "split    agent 195.3 MB · sidebar 61.2 MB" in rendered
+
+
+def test_info_modal_card_reports_no_live_memory_processes(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    record = {
+        "id": "abc123",
+        "name": "SLEEPING",
+        "working_dir": str(workspace),
+        "last_active": "2026-07-28T00:00:00+00:00",
+        "driver": {"id": "term"},
+        "source": {"kind": "stable", "version": "1.0.0"},
+    }
+
+    rendered = "\n".join(_card(record, {}, memory={"processes": 0, "rss_mb": 0.0}))
+
+    assert "🧠 memory   no live processes" in rendered
 
 
 def test_info_modal_keys_match_old_prefix_map_style():

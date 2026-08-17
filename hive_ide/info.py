@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import DEFAULT_KEYS, DEFAULT_SIDEBAR
 from .modal_io import wait_any_key
+from .monitor import monitor_state
 from .sidebar_grid import SidebarGrid
 from .store import StateStore
 
@@ -82,7 +83,61 @@ def _row(icon: str, label: str, value: str) -> str:
     return f"{icon} {label:<9}{value}"
 
 
-def _card(record: dict, snapshot: dict, error: dict | None = None) -> list[str]:
+def _memory_summary(
+    *, home: str | Path, workspace_key: str, session_id: str
+) -> dict | None:
+    try:
+        state = monitor_state(
+            home=home, workspace_key=workspace_key, all_workspaces=False
+        )
+    except Exception:
+        return None
+    if state.get("unsupported"):
+        return {"unsupported": state["unsupported"]}
+    for session in state.get("sessions", []):
+        if session.get("session_id") == session_id:
+            return session
+    return {"processes": 0, "rss_mb": 0.0}
+
+
+def _kind_mb(memory: dict, kind: str) -> float:
+    item = (memory.get("by_kind") or {}).get(kind) or {}
+    if isinstance(item.get("rss_mb"), (int, float)):
+        return float(item["rss_mb"])
+    return round(float(item.get("rss_kb") or 0) / 1024, 1)
+
+
+def _memory_rows(memory: dict | None) -> list[str]:
+    if not memory:
+        return []
+    if memory.get("unsupported"):
+        return [_row("🧠", "memory", f"unsupported: {memory['unsupported']}")]
+    processes = int(memory.get("processes") or 0)
+    rss_mb = float(memory.get("rss_mb") or 0)
+    if processes <= 0:
+        return [_row("🧠", "memory", "no live processes")]
+    agent_mb = _kind_mb(memory, "agent")
+    sidebar_mb = _kind_mb(memory, "sidebar")
+    detail = [
+        part
+        for part in [
+            f"agent {agent_mb:.1f} MB" if agent_mb else "",
+            f"sidebar {sidebar_mb:.1f} MB" if sidebar_mb else "",
+        ]
+        if part
+    ]
+    rows = [_row("🧠", "memory", f"{rss_mb:.1f} MB / {processes} proc")]
+    if detail:
+        rows.append(_row("  ", "split", " · ".join(detail)))
+    return rows
+
+
+def _card(
+    record: dict,
+    snapshot: dict,
+    error: dict | None = None,
+    memory: dict | None = None,
+) -> list[str]:
     driver = (record.get("driver") or {}).get("id") or "unknown"
     working_dir = record.get("working_dir") or ""
     folder = Path(working_dir).name if working_dir else "unknown"
@@ -112,6 +167,9 @@ def _card(record: dict, snapshot: dict, error: dict | None = None) -> list[str]:
         )
     else:
         rows.extend(["", _row("· ", "plan", "(none)")])
+    memory_rows = _memory_rows(memory)
+    if memory_rows:
+        rows.extend(["", *memory_rows])
     rows.append(_row("🕐", "active", record.get("last_active") or "?"))
     if error:
         rows.extend(
@@ -167,8 +225,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.kind == "card":
         record = store.find_session(args.session_id)
         error = store.read("errors", args.session_id)
+        memory = (
+            _memory_summary(
+                home=args.state_home,
+                workspace_key=args.workspace_key,
+                session_id=args.session_id,
+            )
+            if record
+            else None
+        )
         lines = (
-            _card(record, snapshot, error)
+            _card(record, snapshot, error, memory)
             if record
             else _box(["Session record not found."])
         )
