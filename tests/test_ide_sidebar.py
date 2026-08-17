@@ -4,6 +4,7 @@ stale-code ghost). The interactive render loop is verified by hand in the tmux f
 from __future__ import annotations
 
 import sys
+import hashlib
 import subprocess
 import pytest
 from pathlib import Path
@@ -761,6 +762,59 @@ def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
     )
     assert _plain(lines[0]).startswith("🧠 COMPACT")
     assert "💻" not in _plain(lines[0])
+
+
+def test_legacy_release_activity_outranks_package_compacting_activity(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="DEPLOY",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+    )
+    store.write(
+        "activity",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "kind": "compacting",
+            "state": "running",
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+    key = hashlib.sha1(b"team-repo\x00DEPLOY").hexdigest()[:16]
+    legacy_dir = workspace / ".skills" / "hive-ide" / ".state_local" / "activity"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / f"{key}.json").write_text(
+        '{"kind":"release","state":"running","ts":"2099-01-01T00:00:00+00:00"}',
+        encoding="utf-8",
+    )
+    session["host"] = {"hive": {"repo": "team-repo"}}
+    session["workspace_key"] = str(workspace)
+
+    registry = SidebarProviderRegistry()
+    provider = registry.get("activity")
+    assert provider.value(store.home, session) == "release"
+
+    sidebar = _sidebar_config({}, registry)
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        "none",
+        0,
+        20,
+        focused=False,
+        entry_rows=1,
+        sidebar=sidebar,
+        providers=registry,
+    )
+    assert _plain(lines[0]).startswith("🚀 DEPLOY")
+    assert "🧠" not in _plain(lines[0])
 
 
 def _plain(line: str) -> str:

@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- External release activity markers remain visible in package sidebars by
+  bridging legacy activity state; active release markers now outrank
+  compacting markers so deploy rows show the rocket instead of a stale brain.
+
 ## [1.0.67] - 2026-08-17
 
 ### Fixed

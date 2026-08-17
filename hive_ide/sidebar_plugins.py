@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from datetime import datetime, timezone
 from importlib.metadata import entry_points
@@ -50,6 +52,13 @@ class ActivityProvider:
         "compacting": "🧠",
     }
     stale_seconds = 1800
+    priority = {
+        "blocked": 30,
+        "release": 20,
+        "compacting": 10,
+        "task": 5,
+        "default": 5,
+    }
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -60,13 +69,53 @@ class ActivityProvider:
         }
 
     def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
-        activity = StateIO.read_session_activity(state_home, session)
+        values = [
+            value
+            for value in (
+                self._activity_value(StateIO.read_session_activity(state_home, session)),
+                self._activity_value(self._legacy_activity(session)),
+            )
+            if value
+        ]
+        if not values:
+            return None
+        values.sort(key=lambda value: self.priority.get(value, 0), reverse=True)
+        return values[0]
+
+    def _activity_value(self, activity: dict[str, Any] | None) -> str | None:
         if not activity or _age_seconds(activity.get("ts")) > self.stale_seconds:
             return None
         if activity.get("state") == "blocked":
             return "blocked"
         kind = activity.get("kind")
         return kind if isinstance(kind, str) and kind else None
+
+    @classmethod
+    def _legacy_activity(cls, session: dict[str, Any]) -> dict[str, Any] | None:
+        workspace = session.get("workspace_key") or session.get("repo")
+        if not isinstance(workspace, str) or not workspace:
+            return None
+        skill_dir = Path(workspace) / ".skills" / "hive-ide"
+        directory = skill_dir / ".state_local" / "activity"
+        hive = ((session.get("host") or {}).get("hive") or {})
+        legacy = hive.get("legacy_record") if isinstance(hive.get("legacy_record"), dict) else {}
+        repo = hive.get("repo") or legacy.get("repo") or Path(workspace).name
+        names = [session.get("name"), legacy.get("name")]
+        for name in names:
+            if not isinstance(repo, str) or not repo or not isinstance(name, str) or not name:
+                continue
+            path = directory / f"{cls._legacy_identity_key(repo, name)}.json"
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict):
+                return {**data, "ts": data.get("ts") or data.get("observed_at")}
+        return None
+
+    @staticmethod
+    def _legacy_identity_key(repo: str, name: str) -> str:
+        return hashlib.sha1(f"{repo}\x00{name}".encode("utf-8")).hexdigest()[:16]
 
 
 class PlanProvider:

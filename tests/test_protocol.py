@@ -1454,6 +1454,26 @@ def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
     assert "else sleep 1" in sidebar
 
 
+def test_frame_exports_legacy_hive_activity_environment(tmp_path):
+    workspace = tmp_path / "workspace"
+    skill_dir = workspace / ".skills" / "hive-ide"
+    skill_dir.mkdir(parents=True)
+    store = StateStore(tmp_path / "state", workspace)
+    frame = Frame(store)
+    env = frame._environment(
+        {
+            "id": "abc",
+            "name": "DEPLOY",
+            "working_dir": store.workspace_key,
+            "source": {"kind": "stable"},
+            "host": {"hive": {"repo": "team-repo"}},
+        }
+    )
+
+    assert f"HIVE_IDE_REPO=team-repo" in env
+    assert f"HIVE_IDE_SKILL_DIR={skill_dir}" in env
+
+
 def test_frame_normalizes_resize_behavior(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -338,6 +338,13 @@ class Frame:
             "-e",
             f"HIVE_IDE_SOURCE={source.get('kind') or 'stable'}",
         ]
+        hive = (record.get("host") or {}).get("hive") or {}
+        repo = hive.get("repo")
+        if isinstance(repo, str) and repo:
+            env.extend(["-e", f"HIVE_IDE_REPO={repo}"])
+        legacy_skill = Path(self.store.workspace_key) / ".skills" / "hive-ide"
+        if legacy_skill.is_dir():
+            env.extend(["-e", f"HIVE_IDE_SKILL_DIR={legacy_skill}"])
         handoff = record.get("handoff")
         if isinstance(handoff, dict) and handoff:
             payload = json.dumps(handoff, separators=(",", ":"), sort_keys=True)
