@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Frame startup and snap relayout now force tmux `aggressive-resize` off on
+  existing IDE windows as well as future windows, preventing attached-client
+  resizes from widening the fixed sidebar column again.
+- Hidden session sidebars now exit instead of keeping one Python renderer alive
+  per inactive IDE window; repair refreshes only stale sidebar wrappers so the
+  new hidden-aware loop lands without rebuilding chat or plan panes.
+
 ## [1.0.66] - 2026-08-17
 
 ### Fixed

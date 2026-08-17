@@ -666,6 +666,10 @@ class IdeRelayout:
                     sock,
                     ["set-window-option", "-u", "-t", win, "window-size"],
                 )
+                IdeRelayout._tmux(
+                    sock,
+                    ["set-window-option", "-t", win, "aggressive-resize", "off"],
+                )
                 width = canonical[0]
                 height = canonical[1]
                 resized_to = canonical

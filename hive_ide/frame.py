@@ -378,7 +378,14 @@ class Frame:
             ],
             interpreter=self.python,
         )
-        return self._interactive_command(f"while :; do {command}; sleep 1; done")
+        visible = (
+            'tmux display-message -p -t "$TMUX_PANE" "#{window_active}" '
+            "2>/dev/null | grep -qx 1"
+        )
+        return self._interactive_command(
+            f"while :; do if {visible}; then {command}; sleep 1; "
+            "else sleep 1; fi; done"
+        )
 
     @classmethod
     def _interactive_command(cls, command: str) -> str:
@@ -844,6 +851,42 @@ class Frame:
         if result.returncode != 0:
             raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
 
+    def refresh_sidebar_if_needed(self, record: dict[str, Any]) -> bool:
+        pane_id = self.role_panes(record["id"]).get("sidebar")
+        if not pane_id or not self._sidebar_wrapper_is_stale(pane_id):
+            return False
+        result = self.tmux(
+            [
+                "respawn-pane",
+                "-k",
+                "-t",
+                pane_id,
+                "-c",
+                self.safe_working_dir(record),
+                "sh",
+                "-c",
+                self._sidebar_command(record),
+            ]
+        )
+        if result.returncode != 0:
+            raise HiveIdeError(result.stderr.strip() or "Could not refresh the sidebar pane.")
+        self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", "sidebar"])
+        self.tmux(["select-pane", "-T", self._pane_titles(record)["sidebar"], "-t", pane_id])
+        return True
+
+    def _sidebar_wrapper_is_stale(self, pane_id: str) -> bool:
+        result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+        if result.returncode != 0:
+            return False
+        raw = result.stdout.strip()
+        if not raw.isdigit():
+            return False
+        try:
+            cmdline = Path(f"/proc/{raw}/cmdline").read_bytes().replace(b"\0", b" ")
+        except OSError:
+            return False
+        return b"hive_ide.sidebar" in cmdline and b"window_active" not in cmdline
+
     def driver_rename(
         self, record: dict[str, Any], *, name: str | None = None
     ) -> dict[str, Any]:
@@ -1258,6 +1301,9 @@ class Frame:
     def _normalize_resize_behavior(self) -> None:
         """Follow the latest attached client so mobile SSH cannot pin desktop geometry."""
         self.tmux(["set-option", "-g", "window-size", "latest"])
+        self.tmux(["set-window-option", "-g", "aggressive-resize", "off"])
+        for window_id in self.windows().values():
+            self.tmux(["set-window-option", "-t", window_id, "aggressive-resize", "off"])
 
     def bind_keys(self) -> None:
         self._normalize_frame_environment()

@@ -1449,6 +1449,30 @@ def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
     assert "--state-home" in sidebar
     assert "--workspace-key" in sidebar
     assert "--session-id abc" in sidebar
+    assert "#{window_active}" in sidebar
+    assert "grep -qx 1" in sidebar
+    assert "else sleep 1" in sidebar
+
+
+def test_frame_normalizes_resize_behavior(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+    calls: list[list[str]] = []
+
+    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+    monkeypatch.setattr(frame, "windows", lambda: {"one": "@1", "two": "@2"})
+
+    frame._normalize_resize_behavior()
+
+    assert ["set-option", "-g", "window-size", "latest"] in calls
+    assert ["set-window-option", "-g", "aggressive-resize", "off"] in calls
+    assert ["set-window-option", "-t", "@1", "aggressive-resize", "off"] in calls
+    assert ["set-window-option", "-t", "@2", "aggressive-resize", "off"] in calls
 
 
 def test_cli_runs_from_normal_python_environment():
@@ -2128,6 +2152,85 @@ def test_repair_retitles_healthy_existing_window(tmp_path, monkeypatch):
     assert result["ok"] is True
     assert result["actions"] == ["window: retitled panes"]
     assert retitled == [record["id"]]
+
+
+def test_repair_refreshes_stale_sidebar_wrapper_without_rebuilding(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    refreshed = []
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "pane_hive_ide_env", lambda _self, _pane_id: {})
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: None)
+    monkeypatch.setattr(
+        Frame,
+        "refresh_sidebar_if_needed",
+        lambda _self, repaired: refreshed.append(repaired["id"]) or True,
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(Frame, "retitle_panes", lambda _self, _record: False)
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["sidebar: refreshed hidden-aware wrapper"]
+    assert refreshed == [record["id"]]
+    assert rebuilt == []
+
+
+def test_frame_refresh_sidebar_respawns_only_sidebar_pane(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source={"interpreter": sys.executable},
+        driver=_term(),
+    )
+    frame = Frame(store)
+    calls: list[list[str]] = []
+
+    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"sidebar": "%1"})
+    monkeypatch.setattr(frame, "_sidebar_wrapper_is_stale", lambda _pane_id: True)
+
+    assert frame.refresh_sidebar_if_needed(record) is True
+
+    respawns = [call for call in calls if call[:3] == ["respawn-pane", "-k", "-t"]]
+    assert len(respawns) == 1
+    assert respawns[0][3] == "%1"
+    assert not any(call[:3] == ["respawn-pane", "-k", "-t"] and call[3] != "%1" for call in calls)
+    assert "#{window_active}" in " ".join(respawns[0])
 
 
 def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch):

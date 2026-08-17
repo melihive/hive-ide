@@ -1246,6 +1246,8 @@ class IdeSidebar:
         interactive = bool(termios) and sys.stdin.isatty()
         saved = termios.tcgetattr(fd) if interactive else None
         visible, focused = IdeSidebar._pane_visibility()
+        if not visible:
+            return 0
         if interactive:
             tty.setcbreak(fd)     # unbuffered, no echo; Ctrl-C still raises KeyboardInterrupt
             sys.stdout.write(IdeSidebar.FOCUS_ON + IdeSidebar.MOUSE_ON)
@@ -1275,13 +1277,7 @@ class IdeSidebar:
                     query, on_plus = "", False
                     on_filter = on_archive = archive_mode = False
                 if not visible:
-                    if interactive:
-                        ready, _, _ = select.select([fd], [], [], IdeSidebar.HIDDEN_TICK_SECONDS)
-                        if ready:
-                            os.read(fd, 256)
-                    else:
-                        time.sleep(IdeSidebar.HIDDEN_TICK_SECONDS)
-                    continue
+                    return 0
                 if archive_mode:
                     sessions = IdeSidebar._filter(StateIO.list_archived(skill_dir, repo), query)
                 else:

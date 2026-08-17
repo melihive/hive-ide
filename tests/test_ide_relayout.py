@@ -199,6 +199,7 @@ def test_snap_uses_explicit_window_size_when_tmux_window_is_stale(tmp_path, monk
         "24",
     ] in calls
     assert ["set-window-option", "-u", "-t", "@0", "window-size"] in calls
+    assert ["set-window-option", "-t", "@0", "aggressive-resize", "off"] in calls
     assert [
         "resize-window",
         "-t",
@@ -209,6 +210,7 @@ def test_snap_uses_explicit_window_size_when_tmux_window_is_stale(tmp_path, monk
         "24",
     ] in calls
     assert ["set-window-option", "-u", "-t", "@1", "window-size"] in calls
+    assert ["set-window-option", "-t", "@1", "aggressive-resize", "off"] in calls
 
 
 def test_resize_hook_snap_uses_latest_client_without_scanning_windows(tmp_path, monkeypatch):
@@ -311,6 +313,7 @@ def test_manual_snap_without_hook_geometry_can_use_latest_client_geometry(tmp_pa
         "64",
     ] in calls
     assert ["set-window-option", "-u", "-t", "@0", "window-size"] in calls
+    assert ["set-window-option", "-t", "@0", "aggressive-resize", "off"] in calls
 
 
 def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):

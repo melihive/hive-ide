@@ -132,6 +132,8 @@ class SessionRepair:
                         actions.append("window: rebuilt for deleted pane cwd")
                     else:
                         actions.append("window: pane cwd differs; live panes preserved")
+                if self.frame.refresh_sidebar_if_needed(repaired):
+                    actions.append("sidebar: refreshed hidden-aware wrapper")
                 if self.frame.retitle_panes(repaired):
                     actions.append("window: retitled panes")
                 self._clear_repair_error(session_id)
