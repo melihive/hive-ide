@@ -540,6 +540,44 @@ def test_monitor_inferrs_macos_agent_session_from_resume_reference():
     assert result["unmatched_agents"] == []
 
 
+def test_monitor_keeps_tmux_frame_memory_out_of_session_sidebar():
+    sessions = {
+        "s1": {
+            "session_id": "s1",
+            "name": "HIVE IDE",
+            "workspace_key": "/work/hive",
+            "state": "active",
+            "driver": "codex",
+        }
+    }
+    samples = [
+        ProcessSample(
+            pid=99,
+            ppid=1,
+            rss_kb=90_000,
+            command=(
+                "tmux -L hive-ide -f /state/ide.conf new-session "
+                "sh -c 'python -m hive_ide.sidebar --session-id s1'"
+            ),
+            env={},
+        ),
+        ProcessSample(
+            pid=100,
+            ppid=99,
+            rss_kb=20_000,
+            command="python -m hive_ide.sidebar --session-id s1",
+            env={},
+        ),
+    ]
+
+    result = build_monitor(samples=samples, sessions=sessions)
+
+    assert result["by_kind"]["frame"]["rss_kb"] == 90_000
+    assert result["by_kind"]["sidebar"]["rss_kb"] == 20_000
+    assert result["sessions"][0]["rss_kb"] == 20_000
+    assert result["sessions"][0]["by_kind"]["sidebar"]["processes"] == 1
+
+
 def test_rename_refreshes_claude_display_name_in_launch_command(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

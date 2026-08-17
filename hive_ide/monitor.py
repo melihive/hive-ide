@@ -13,6 +13,16 @@ from typing import Any, Iterable
 AGENT_NEEDLES = ("codex", "claude", "agy")
 
 
+def _command_name(command: str) -> str:
+    return Path(command.split(" ", 1)[0]).name if command.split() else ""
+
+
+def _is_shell(command_name: str) -> bool:
+    return command_name in {"sh", "bash", "fish", "zsh"} or command_name.endswith(
+        ("sh", "bash", "fish", "zsh")
+    )
+
+
 @dataclass(frozen=True)
 class ProcessSample:
     pid: int
@@ -23,14 +33,16 @@ class ProcessSample:
 
     @property
     def kind(self) -> str:
+        command_name = _command_name(self.command)
+        if command_name == "tmux":
+            return "frame"
+        if _is_shell(command_name):
+            return "shell"
         lowered = self.command.lower()
         if "hive_ide.sidebar" in lowered:
             return "sidebar"
         if any(needle in lowered for needle in AGENT_NEEDLES):
             return "agent"
-        command_name = Path(self.command.split(" ", 1)[0]).name
-        if any(shell in command_name for shell in ("sh", "bash", "fish", "zsh")):
-            return "shell"
         return "helper"
 
     @property
@@ -43,6 +55,8 @@ class ProcessSample:
 
     @property
     def session_id(self) -> str | None:
+        if _command_name(self.command) == "tmux":
+            return None
         explicit = self.env.get("HIVE_IDE_SESSION_ID")
         if explicit:
             return explicit

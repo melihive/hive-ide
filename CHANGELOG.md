@@ -6,6 +6,9 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
+- `hive-ide monitor` no longer counts tmux frame server memory as session
+  sidebar memory, so session info reports actual sidebar RSS instead of
+  workspace frame overhead.
 - The session info modal now includes live memory usage from `hive-ide monitor`,
   including total RSS/process count and agent/sidebar split when available.
 - `hive-ide monitor` now supports macOS by reading RSS from `ps` and
