@@ -62,7 +62,8 @@ window exists but cannot be closed, archive refuses instead of hiding an agent
 that is still consuming memory.
 
 Use `hive-ide monitor` (alias: `top`) to inspect local agent/sidebar memory by
-session. Pass `--workspace` to limit the report to the current workspace.
+session on Linux and macOS. Pass `--workspace` to limit the report to the current
+workspace.
 
 The right-side plan pane is read-only by default for known editors: `micro` uses
 `-readonly true`, and `vim`/`nvim`/`vi`/`gvim` use `-R`. Unknown editors are launched

@@ -146,8 +146,8 @@ hive-ide top --workspace
 ```
 
 `monitor` groups live Hive IDE agent/sidebar processes by session and reports
-unmatched agent processes separately. `--workspace` limits the report to the
-current workspace.
+unmatched agent processes separately. It uses `/proc` on Linux and `ps` on
+macOS. `--workspace` limits the report to the current workspace.
 
 Preview machine-global Claude and Codex status hooks before applying them:
 

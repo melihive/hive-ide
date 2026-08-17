@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `hive-ide monitor` now supports macOS by reading RSS from `ps` and
+  attributing agent processes through driver resume references when `/proc`
+  environment data is unavailable.
+
 ## [1.0.65] - 2026-08-17
 
 ### Added

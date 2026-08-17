@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import platform
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -90,18 +92,25 @@ def _read_status(pid: int) -> tuple[int | None, int]:
     return ppid, rss_kb
 
 
-def iter_local_processes() -> list[ProcessSample]:
+def _is_relevant_command(command: str, env: dict[str, str] | None = None) -> bool:
+    lowered = command.lower()
+    if (
+        "hive_ide.sidebar" in lowered
+        or any(needle in lowered for needle in AGENT_NEEDLES)
+        or "hive-ide" in lowered
+    ):
+        return True
+    return bool(env)
+
+
+def _iter_proc_processes() -> list[ProcessSample]:
     """Return relevant local processes.
 
     Linux exposes enough through `/proc` to map agent children back to the IDE
-    session via inherited `HIVE_IDE_*` env. Other platforms fail open with an
-    empty list; workspace-level tmux inspection can still be added later.
+    session via inherited `HIVE_IDE_*` env.
     """
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return []
     rows: list[ProcessSample] = []
-    for entry in proc.iterdir():
+    for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
@@ -113,11 +122,7 @@ def iter_local_processes() -> list[ProcessSample]:
         if not command:
             continue
         lowered = command.lower()
-        if (
-            "hive_ide.sidebar" not in lowered
-            and not any(needle in lowered for needle in AGENT_NEEDLES)
-            and "hive-ide" not in lowered
-        ):
+        if not _is_relevant_command(command):
             continue
         env = _read_environ(pid)
         if (
@@ -133,6 +138,56 @@ def iter_local_processes() -> list[ProcessSample]:
             )
         )
     return rows
+
+
+def _parse_ps_rows(raw: str) -> list[ProcessSample]:
+    rows: list[ProcessSample] = []
+    for line in raw.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid_raw, ppid_raw, rss_raw, command = parts
+        if not pid_raw.isdigit():
+            continue
+        try:
+            pid = int(pid_raw)
+            ppid = int(ppid_raw) if ppid_raw.lstrip("-").isdigit() else None
+            rss_kb = int(rss_raw) if rss_raw.lstrip("-").isdigit() else 0
+        except ValueError:
+            continue
+        if not command or not _is_relevant_command(command):
+            continue
+        rows.append(
+            ProcessSample(pid=pid, ppid=ppid, rss_kb=rss_kb, command=command, env={})
+        )
+    return rows
+
+
+def _iter_macos_processes() -> list[ProcessSample]:
+    """Return relevant local processes on macOS.
+
+    Darwin does not expose `/proc/<pid>/environ`, but `ps` provides RSS and
+    command lines. Session attribution is recovered later from driver resume
+    references and explicit `--session-id` flags.
+    """
+    try:
+        raw = subprocess.check_output(
+            ["ps", "-axo", "pid=,ppid=,rss=,command="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return _parse_ps_rows(raw)
+
+
+def iter_local_processes() -> list[ProcessSample]:
+    """Return relevant local Hive IDE processes for this platform."""
+    if Path("/proc").is_dir():
+        return _iter_proc_processes()
+    if platform.system() == "Darwin":
+        return _iter_macos_processes()
+    return []
 
 
 def _load_session_index(home: Path) -> dict[str, dict[str, Any]]:
@@ -154,6 +209,12 @@ def _load_session_index(home: Path) -> dict[str, dict[str, Any]]:
                 "workspace_key": record.get("workspace_key"),
                 "state": "archived" if archived else "active",
                 "driver": driver.get("id"),
+                "_driver_launch_argv": driver.get("launch_argv"),
+                "_driver_resume_reference": (
+                    driver.get("resume", {}).get("reference")
+                    if isinstance(driver.get("resume"), dict)
+                    else None
+                ),
                 "source": " ".join(
                     str(value)
                     for value in (source.get("kind"), source.get("version"))
@@ -162,6 +223,42 @@ def _load_session_index(home: Path) -> dict[str, dict[str, Any]]:
                 or None,
             }
     return index
+
+
+def _infer_session_id_from_command(
+    command: str, sessions: dict[str, dict[str, Any]]
+) -> str | None:
+    """Recover session ownership when env vars are unavailable.
+
+    macOS does not expose process environments through `/proc`, so child agent
+    processes are matched back to their session by the driver's stable resume
+    reference. Ambiguous references stay unmatched.
+    """
+    matches: list[str] = []
+    for session_id, session in sessions.items():
+        reference = session.get("_driver_resume_reference")
+        if isinstance(reference, str) and reference and reference in command:
+            matches.append(session_id)
+            continue
+        launch_argv = session.get("_driver_launch_argv")
+        if not isinstance(launch_argv, list):
+            continue
+        meaningful = [
+            str(arg)
+            for arg in launch_argv
+            if isinstance(arg, str)
+            and arg
+            and arg not in {"claude", "codex", "agy", "--resume", "--name"}
+        ]
+        if meaningful and all(arg in command for arg in meaningful):
+            matches.append(session_id)
+    return matches[0] if len(set(matches)) == 1 else None
+
+
+def _unsupported_reason() -> str | None:
+    if Path("/proc").is_dir() or platform.system() == "Darwin":
+        return None
+    return "process memory mapping requires /proc or macOS ps"
 
 
 def _brief_command(command: str) -> str:
@@ -189,7 +286,9 @@ def build_monitor(
     by_kind: dict[str, dict[str, int]] = {}
 
     for sample in samples:
-        session_id = sample.session_id
+        session_id = sample.session_id or _infer_session_id_from_command(
+            sample.command, sessions
+        )
         session = sessions.get(session_id or "")
         env_workspace = sample.env.get("HIVE_IDE_WORKSPACE_KEY")
         if (
@@ -218,16 +317,18 @@ def build_monitor(
             if sample.kind == "agent":
                 unmatched.append(process)
             continue
+        public_session = (
+            {key: value for key, value in session.items() if not key.startswith("_")}
+            if session
+            else {
+                "session_id": session_id,
+                "name": sample.env.get("HIVE_IDE_SESSION") or session_id,
+            }
+        )
         row = by_session.setdefault(
             session_id,
             {
-                **(
-                    session
-                    or {
-                        "session_id": session_id,
-                        "name": sample.env.get("HIVE_IDE_SESSION") or session_id,
-                    }
-                ),
+                **public_session,
                 "processes": 0,
                 "rss_kb": 0,
                 "rss_mb": 0.0,
@@ -263,8 +364,8 @@ def build_monitor(
         ),
         "unsupported": (
             None
-            if Path("/proc").is_dir()
-            else "process memory mapping requires /proc"
+            if totals["processes"] or _unsupported_reason() is None
+            else _unsupported_reason()
         ),
     }
 

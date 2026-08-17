@@ -27,7 +27,7 @@ from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
 from hive_ide.hooks import HookInstaller
 from hive_ide.info import _card, _keys
-from hive_ide.monitor import ProcessSample, build_monitor
+from hive_ide.monitor import ProcessSample, _parse_ps_rows, build_monitor
 from hive_ide.python_cmd import PythonCommand
 from hive_ide.repair import SessionRepair
 from hive_ide.seen import IdeSeen
@@ -486,6 +486,58 @@ def test_monitor_groups_hive_process_memory_by_session():
     assert result["sessions"][0]["rss_kb"] == 212_000
     assert result["sessions"][0]["by_kind"]["agent"]["processes"] == 1
     assert result["unmatched_agents"][0]["pid"] == 201
+
+
+def test_monitor_parses_macos_ps_rows():
+    raw = """
+      123    10  512000 claude --resume abc-123 --name HIVE
+      124   123   28000 /opt/homebrew/bin/python -m hive_ide.sidebar --session-id s1
+      bad row
+      125     1    4096 /usr/sbin/sshd
+    """
+
+    samples = _parse_ps_rows(raw)
+
+    assert [sample.pid for sample in samples] == [123, 124]
+    assert samples[0].ppid == 10
+    assert samples[0].rss_kb == 512_000
+    assert samples[1].session_id == "s1"
+
+
+def test_monitor_inferrs_macos_agent_session_from_resume_reference():
+    sessions = {
+        "s1": {
+            "session_id": "s1",
+            "name": "HIVE",
+            "workspace_key": "/work/hive",
+            "state": "active",
+            "driver": "claude",
+            "_driver_resume_reference": "abc-123",
+            "_driver_launch_argv": [
+                "claude",
+                "--resume",
+                "abc-123",
+                "--name",
+                "HIVE",
+            ],
+        }
+    }
+    samples = [
+        ProcessSample(
+            pid=101,
+            ppid=10,
+            rss_kb=200_000,
+            command="claude --resume abc-123 --name HIVE",
+            env={},
+        )
+    ]
+
+    result = build_monitor(samples=samples, sessions=sessions)
+
+    assert result["sessions"][0]["session_id"] == "s1"
+    assert result["sessions"][0]["rss_kb"] == 200_000
+    assert "_driver_resume_reference" not in result["sessions"][0]
+    assert result["unmatched_agents"] == []
 
 
 def test_rename_refreshes_claude_display_name_in_launch_command(tmp_path, capsys):
