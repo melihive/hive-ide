@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.68] - 2026-08-17
+
 ### Fixed
 
 - External release activity markers remain visible in package sidebars by
