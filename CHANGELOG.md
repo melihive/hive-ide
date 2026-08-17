@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.65] - 2026-08-17
+
 ### Added
 
 - Added `hive-ide monitor` / `hive-ide top` to report live local Hive IDE
