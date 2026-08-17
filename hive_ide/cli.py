@@ -784,10 +784,22 @@ def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:
     )
     store.write("sessions", record["id"], record)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    repair = SessionRepair(
-        store, frame, registry=configured_registry(config)
-    ).repair(record)
-    frame.bind_keys()
+    if record["id"] in frame.windows():
+        repair = SessionRepair(
+            store, frame, registry=configured_registry(config)
+        ).repair(record)
+        frame.bind_keys()
+    else:
+        repair = {
+            "session_id": record["id"],
+            "name": record.get("name"),
+            "ok": True,
+            "applied": False,
+            "actions": ["source: updated; live window not open"],
+            "warnings": [],
+            "errors": [],
+            "working_dir": record.get("working_dir"),
+        }
     return {"session_id": record["id"], "source": record["source"], "repair": repair}
 
 

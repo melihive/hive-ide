@@ -5073,7 +5073,9 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
     assert rebuilt == []
 
 
-def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_path, capsys):
+def test_source_set_updates_metadata_without_repairing_absent_window(
+    monkeypatch, tmp_path, capsys
+):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     missing = tmp_path / "missing"
@@ -5090,9 +5092,10 @@ def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_pa
         source={"kind": "dev", "interpreter": sys.executable, "version": "old"},
         driver=_term(),
     )
+    monkeypatch.setattr("hive_ide.cli.Frame.windows", lambda _frame: {})
     monkeypatch.setattr(
-        "hive_ide.cli.Frame.rebuild",
-        lambda _frame, _record: pytest.fail("stale sessions must not rebuild"),
+        "hive_ide.cli.SessionRepair.repair",
+        lambda _repair, _record: pytest.fail("absent windows must not be repaired"),
     )
 
     assert (
@@ -5117,6 +5120,66 @@ def test_source_set_repairs_session_with_missing_working_dir(monkeypatch, tmp_pa
     updated = store.find_session(record["id"])
     assert updated["source"]["kind"] == "stable"
     assert updated["source"]["interpreter"] == sys.executable
+    assert updated["working_dir"] == str(missing)
+
+
+def test_source_set_repairs_existing_live_window(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"sources": {"stable": {"interpreter": sys.executable}}}),
+        encoding="utf-8",
+    )
+    store = StateStore(state, workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source={"kind": "dev", "interpreter": sys.executable, "version": "old"},
+        driver=_term(),
+    )
+    repaired = []
+    monkeypatch.setattr(
+        "hive_ide.cli.Frame.windows",
+        lambda _frame: {record["id"]: "@1"},
+    )
+    monkeypatch.setattr("hive_ide.cli.Frame.bind_keys", lambda _frame: None)
+    monkeypatch.setattr(
+        "hive_ide.cli.SessionRepair.repair",
+        lambda _repair, rec: repaired.append(rec["id"])
+        or {
+            "session_id": rec["id"],
+            "name": rec["name"],
+            "ok": True,
+            "applied": True,
+            "actions": ["checked live window"],
+            "warnings": [],
+            "errors": [],
+            "working_dir": rec["working_dir"],
+        },
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(state),
+                "--config",
+                str(config),
+                "--workspace-key",
+                str(workspace),
+                "source-set",
+                "--session-id",
+                record["id"],
+                "--source",
+                "stable",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert repaired == [record["id"]]
 
 
 def test_working_dir_set_updates_metadata_without_rebuilding_live_window(

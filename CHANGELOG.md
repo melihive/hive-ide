@@ -9,6 +9,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - External release activity markers remain visible in package sidebars by
   bridging legacy activity state; active release markers now outrank
   compacting markers so deploy rows show the rocket instead of a stale brain.
+- `source-set` no longer creates detached duplicate tmux frames when it only
+  needs to update session source metadata; it repairs only an already-open
+  matching window.
 
 ## [1.0.67] - 2026-08-17
 
