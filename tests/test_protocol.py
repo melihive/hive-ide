@@ -2170,7 +2170,10 @@ def test_repair_retitles_healthy_existing_window(tmp_path, monkeypatch):
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
 
     assert result["ok"] is True
-    assert result["actions"] == ["window: retitled panes"]
+    assert result["actions"] == [
+        "sidebar: refreshed hidden-aware wrapper",
+        "window: retitled panes",
+    ]
     assert retitled == [record["id"]]
 
 
@@ -2251,6 +2254,39 @@ def test_frame_refresh_sidebar_respawns_only_sidebar_pane(tmp_path, monkeypatch)
     assert respawns[0][3] == "%1"
     assert not any(call[:3] == ["respawn-pane", "-k", "-t"] and call[3] != "%1" for call in calls)
     assert "#{window_active}" in " ".join(respawns[0])
+    assert any(call[:4] == ["set-option", "-p", "-t", "%1"] and call[4] == "@hive_ide_sidebar_source" for call in calls)
+
+
+def test_frame_refresh_sidebar_when_source_marker_is_stale(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "1.2.3"},
+        driver=_term(),
+    )
+    frame = Frame(store)
+    calls: list[list[str]] = []
+
+    def fake_tmux(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:3] == ["display-message", "-p", "-t"]:
+            return subprocess.CompletedProcess(args, 0, "old-marker\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"sidebar": "%1"})
+    monkeypatch.setattr(frame, "_sidebar_wrapper_is_stale", lambda _pane_id: False)
+
+    assert frame.refresh_sidebar_if_needed(record) is True
+
+    respawns = [call for call in calls if call[:3] == ["respawn-pane", "-k", "-t"]]
+    assert len(respawns) == 1
+    source_tags = [call for call in calls if call[:5] == ["set-option", "-p", "-t", "%1", "@hive_ide_sidebar_source"]]
+    assert source_tags
+    assert '"version":"1.2.3"' in source_tags[-1][-1]
 
 
 def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch):

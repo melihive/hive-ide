@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar panes now carry a source/version marker, so `repair` refreshes live
+  sidebars after a package source upgrade instead of leaving old sidebar code
+  visible until a manual pane respawn.
+
 ## [1.0.70] - 2026-08-21
 
 ### Changed

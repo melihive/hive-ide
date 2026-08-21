@@ -383,7 +383,7 @@ class Frame:
                 "--tmux-socket",
                 self.socket,
             ],
-            interpreter=self.python,
+            interpreter=self._record_python(record),
         )
         visible = (
             'tmux display-message -p -t "$TMUX_PANE" "#{window_active}" '
@@ -399,6 +399,21 @@ class Frame:
         """Keep launcher-only display controls out of the interactive frame."""
         names = " ".join(cls.INTERACTIVE_ENV_UNSET)
         return f"unset {names}; {command}"
+
+    def _record_python(self, record: dict[str, Any]) -> str:
+        source = record.get("source") or {}
+        interpreter = source.get("interpreter")
+        return interpreter if isinstance(interpreter, str) and interpreter else self.python
+
+    @staticmethod
+    def _sidebar_source_marker(record: dict[str, Any]) -> str:
+        source = record.get("source") or {}
+        marker = {
+            "kind": source.get("kind"),
+            "interpreter": source.get("interpreter"),
+            "version": source.get("version"),
+        }
+        return json.dumps(marker, separators=(",", ":"), sort_keys=True)
 
     @classmethod
     def _agent_command(cls, record: dict[str, Any]) -> str:
@@ -917,7 +932,7 @@ class Frame:
 
     def refresh_sidebar_if_needed(self, record: dict[str, Any]) -> bool:
         pane_id = self.role_panes(record["id"]).get("sidebar")
-        if not pane_id or not self._sidebar_wrapper_is_stale(pane_id):
+        if not pane_id or not self._sidebar_needs_refresh(pane_id, record):
             return False
         result = self.tmux(
             [
@@ -935,8 +950,34 @@ class Frame:
         if result.returncode != 0:
             raise HiveIdeError(result.stderr.strip() or "Could not refresh the sidebar pane.")
         self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", "sidebar"])
+        self._tag_sidebar_source(pane_id, record)
         self.tmux(["select-pane", "-T", self._pane_titles(record)["sidebar"], "-t", pane_id])
         return True
+
+    def _sidebar_needs_refresh(self, pane_id: str, record: dict[str, Any]) -> bool:
+        marker = self.tmux(
+            ["display-message", "-p", "-t", pane_id, "#{@hive_ide_sidebar_source}"]
+        )
+        if marker.returncode != 0:
+            return self._sidebar_wrapper_is_stale(pane_id)
+        value = marker.stdout.strip()
+        if "\n" in value or "\t" in value:
+            return self._sidebar_wrapper_is_stale(pane_id)
+        if value != self._sidebar_source_marker(record):
+            return True
+        return self._sidebar_wrapper_is_stale(pane_id)
+
+    def _tag_sidebar_source(self, pane_id: str, record: dict[str, Any]) -> None:
+        self.tmux(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                pane_id,
+                "@hive_ide_sidebar_source",
+                self._sidebar_source_marker(record),
+            ]
+        )
 
     def _sidebar_wrapper_is_stale(self, pane_id: str) -> bool:
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
@@ -1012,6 +1053,8 @@ class Frame:
             }
         for role, pane in role_panes.items():
             self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_pane", role])
+            if role == "sidebar":
+                self._tag_sidebar_source(pane, record)
         self._retitle_panes(target, record)
 
     def _retitle_panes(self, target: str, record: dict[str, Any]) -> None:
@@ -1212,6 +1255,8 @@ class Frame:
             pane_id = created.stdout.strip()
             if pane_id:
                 self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", role])
+                if role == "sidebar":
+                    self._tag_sidebar_source(pane_id, record)
             restored.append(role)
         if restored:
             self._retitle_panes(target, record)
