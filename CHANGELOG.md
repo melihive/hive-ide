@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.69] - 2026-08-21
+
 ### Added
 
 - Added `hive-ide sleep` to stop a live agent process while keeping the session
