@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hive_ide.sidebar import IdeSidebar, SidebarCommandRunner, SidebarCursorState  # noqa: E402
 from hive_ide.sidebar_grid import SidebarGrid  # noqa: E402
 from hive_ide.sidebar_plugins import SidebarProviderRegistry, SubagentsProvider  # noqa: E402
-from hive_ide.state_compat import StateIO  # noqa: E402
+from hive_ide.state_compat import StateIO, migrate_snapshot  # noqa: E402
 from hive_ide.store import StateStore  # noqa: E402
 from hive_ide.config import _sidebar_config  # noqa: E402
 from hive_ide.errors import UsageError  # noqa: E402
@@ -1007,6 +1007,29 @@ def test_default_sidebar_icons_are_terminal_cell_safe():
         sidebar["icons"]["providers"]["checkout"]["busy"],
     ):
         assert SidebarGrid.cell_width(value) in {1, 2}
+
+
+def test_legacy_sleeping_snapshot_icon_migrates_to_current_default():
+    snapshot = {
+        "package_version": "1.0.69",
+        "sidebar": {"icons": {"status": {"sleeping": "☾"}}},
+    }
+
+    migrated = migrate_snapshot(snapshot)
+
+    assert migrated["sidebar"]["icons"]["status"]["sleeping"] == "💤"
+    assert snapshot["sidebar"]["icons"]["status"]["sleeping"] == "☾"
+
+
+def test_current_snapshot_sleeping_icon_override_is_preserved():
+    snapshot = {
+        "package_version": "1.0.71",
+        "sidebar": {"icons": {"status": {"sleeping": "☾"}}},
+    }
+
+    migrated = migrate_snapshot(snapshot)
+
+    assert migrated["sidebar"]["icons"]["status"]["sleeping"] == "☾"
 
 
 def test_sidebar_rejects_icons_wider_than_a_grid_track():

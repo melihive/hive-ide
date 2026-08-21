@@ -14,6 +14,42 @@ from .agents import AgentResumeState
 from .store import StateStore, utc_now
 
 
+def _version_tuple(value: object) -> tuple[int, ...]:
+    if not isinstance(value, str):
+        return ()
+    parts: list[int] = []
+    for part in value.split("."):
+        if not part.isdigit():
+            break
+        parts.append(int(part))
+    return tuple(parts)
+
+
+def migrate_snapshot(snapshot: dict) -> dict:
+    """Normalize old persisted snapshots without erasing explicit current config."""
+    sidebar = snapshot.get("sidebar")
+    if not isinstance(sidebar, dict):
+        return snapshot
+    icons = sidebar.get("icons")
+    if not isinstance(icons, dict):
+        return snapshot
+    status = icons.get("status")
+    if not isinstance(status, dict):
+        return snapshot
+    version = _version_tuple(snapshot.get("package_version"))
+    if status.get("sleeping") == "☾" and (not version or version < (1, 0, 70)):
+        migrated = dict(snapshot)
+        migrated_sidebar = dict(sidebar)
+        migrated_icons = dict(icons)
+        migrated_status = dict(status)
+        migrated_status["sleeping"] = "💤"
+        migrated_icons["status"] = migrated_status
+        migrated_sidebar["icons"] = migrated_icons
+        migrated["sidebar"] = migrated_sidebar
+        return migrated
+    return snapshot
+
+
 class StateIO:
     NAME_MAX = 14
     NAME_RE = re.compile(r"[A-Z0-9][A-Z0-9 ]{0,13}")
@@ -43,7 +79,8 @@ class StateIO:
     @staticmethod
     def read_config_snapshot(state_home: Path, workspace_key: str) -> dict | None:
         store = StateIO._store(state_home, workspace_key)
-        return store.read_path(store.config_snapshot_path())
+        snapshot = store.read_path(store.config_snapshot_path())
+        return migrate_snapshot(snapshot) if snapshot is not None else None
 
     @staticmethod
     def read(state_home: Path, workspace_key: str, name: str) -> dict | None:

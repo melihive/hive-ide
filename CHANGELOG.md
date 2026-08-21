@@ -4,6 +4,11 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Old workspace config snapshots that still contain the former sleeping-session
+  crescent glyph now migrate to the current `💤` default at render time.
+
 ## [1.0.71] - 2026-08-21
 
 ### Fixed
