@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.70] - 2026-08-21
+
 ### Changed
 
 - Sleeping sessions now use the `💤` status emoji in the sidebar instead of the
