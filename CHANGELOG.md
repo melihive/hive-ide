@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.72] - 2026-08-21
+
 ### Fixed
 
 - Old workspace config snapshots that still contain the former sleeping-session
