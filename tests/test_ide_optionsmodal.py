@@ -11,7 +11,19 @@ def test_options_modal_offers_session_info_action():
     assert ("scratchpad", "scratchpad", "open notes in a plan popup") in actions
     assert ("repair", "repair", "heal session state and redraw") in actions
     assert ("archive", "archive", "close and move to archive") in actions
+    assert not any(action == "sleep" for action, _label, _note in actions)
     assert not any(action == "rebuild" for action, _label, _note in actions)
+
+
+def test_options_modal_offers_sleep_for_agent_sessions_before_archive():
+    actions = IdeOptionsModal._actions({"driver": {"id": "codex"}})
+
+    assert ("sleep", "sleep agent", "stop agent, keep session listed") in actions
+    assert [action for action, _label, _note in actions[-3:]] == [
+        "repair",
+        "sleep",
+        "archive",
+    ]
 
 
 def test_options_modal_offers_driver_rename_for_claude_and_codex():
@@ -55,6 +67,7 @@ def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
     assert IdeOptionsModal._command(tmp_path, "session-id", "tasks-modal") == (True, "")
     assert IdeOptionsModal._command(tmp_path, "session-id", "scratchpad") == (True, "")
     assert IdeOptionsModal._command(tmp_path, "session-id", "repair") == (True, "")
+    assert IdeOptionsModal._command(tmp_path, "session-id", "sleep") == (True, "")
     assert IdeOptionsModal._command(tmp_path, "session-id", "archive") == (True, "")
     assert (
         IdeOptionsModal._command(tmp_path, "session-id", "rename", name="NEW NAME")
@@ -104,6 +117,12 @@ def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
         [
             "--quiet",
             "repair",
+            "--session-id=session-id",
+            "--tmux-socket=socket",
+        ],
+        [
+            "--quiet",
+            "sleep",
             "--session-id=session-id",
             "--tmux-socket=socket",
         ],

@@ -996,11 +996,13 @@ def test_default_sidebar_icons_are_terminal_cell_safe():
     sidebar = _sidebar_config({}, SidebarProviderRegistry())
 
     assert sidebar["icons"]["status"]["working"] == "▶"
+    assert sidebar["icons"]["status"]["sleeping"] == "☾"
     assert sidebar["icons"]["controls"]["archive"] == "▼"
     assert sidebar["icons"]["providers"]["checkout"]["busy"] == "⏳"
     assert "subagents" not in sidebar["icons"]["providers"]
     for value in (
         sidebar["icons"]["status"]["working"],
+        sidebar["icons"]["status"]["sleeping"],
         sidebar["icons"]["controls"]["archive"],
         sidebar["icons"]["providers"]["checkout"]["busy"],
     ):

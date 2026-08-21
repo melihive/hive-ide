@@ -36,6 +36,7 @@ managed environment, use `pipx install hive-ide`.
 - `hive-ide plan-set --session-id=<ID> --path=<PATH>`
 - `hive-ide attach-conversation --session-id=<ID> --reference=<REFERENCE>`
 - `hive-ide working-dir-set --session-id=<ID> --working-dir=<PATH>`
+- `hive-ide sleep [--session-id=<ID>]`
 - `hive-ide archive --session-id=<ID>`
 - `hive-ide resume --session-id=<ID>`
 - `hive-ide monitor` or `hive-ide top`
@@ -56,10 +57,13 @@ Use the new-session modal's `new` / `adopt existing` toggle to visually adopt
 Claude Code or Codex conversations for the current directory. The CLI `adopt`
 command is mainly for automation or agent-driven maintenance.
 
-`archive` closes the session's live tmux window before moving it out of the
-active list. The JSON result includes `archive.memory_released`; if a live
-window exists but cannot be closed, archive refuses instead of hiding an agent
-that is still consuming memory.
+`sleep` stops the live agent process, leaves the session in the active list, and
+marks it with the sleeping status glyph. `hive-ide chat --session-id=<ID>` is the
+deliberate wake path. The session options menu exposes `sleep agent` for
+Claude/Codex-style sessions. `archive` is stronger: it closes the live tmux window
+before moving the session out of the active list. The JSON result includes
+`archive.memory_released`; if a live window exists but cannot be closed, archive
+refuses instead of hiding an agent that is still consuming memory.
 
 Use `hive-ide monitor` (alias: `top`) to inspect local agent/sidebar memory by
 session on Linux and macOS. Pass `--workspace` to limit the report to the current
@@ -70,3 +74,7 @@ The right-side plan pane is read-only by default for known editors: `micro` uses
 unchanged. Plan/task/scratchpad popups are intentional edit surfaces and stay editable.
 To edit from a long-lived `micro` plan pane, press `Ctrl-e`, run `reload`, then press
 `Ctrl-e` again and run `set readonly false`.
+
+Plan paths may be relative to the workspace/current working directory or absolute.
+Absolute paths are accepted as-is, so standalone/non-Hive users can attach personal
+plan files outside the repository root.

@@ -48,6 +48,7 @@ WORKSPACE_MUTATIONS = frozenset(
         "resume",
         "snapshot",
         "source-set",
+        "sleep",
         "status-event",
         "switch-driver",
         "working-dir-set",
@@ -350,6 +351,38 @@ def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
     frame.bind_keys()
     frame.select_session(record["id"])
     return record
+
+
+def cmd_sleep(args: argparse.Namespace) -> dict[str, Any]:
+    session_id = args.session_id or os.environ.get("HIVE_IDE_SESSION_ID")
+    if not session_id:
+        raise UsageError("No current session id is available.")
+    store, _ = _context(args)
+    record = _session(store, session_id, None)
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    result = frame.sleep_agent(record)
+    now = utc_now()
+    record = store.find_session(record["id"]) or record
+    record["sleep"] = {
+        "state": "sleeping",
+        "slept_at": now,
+    }
+    record["last_active"] = now
+    store.write("sessions", record["id"], record)
+    store.write(
+        "status",
+        record["id"],
+        {
+            "session_id": record["id"],
+            "driver": (record.get("driver") or {}).get("id"),
+            "conversation_reference": (
+                (record.get("driver") or {}).get("resume") or {}
+            ).get("reference"),
+            "state": "sleeping",
+            "observed_at": now,
+        },
+    )
+    return {**record, "sleep": {**record["sleep"], **result}}
 
 
 def cmd_rename(args: argparse.Namespace) -> dict[str, Any]:
@@ -991,6 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-popup": "Open a popup editor on the current plan or its task area.",
         "scratchpad": "Open the current plan's human-owned Scratchpad popup.",
         "chat": "Focus or resume the current session's agent pane.",
+        "sleep": "Stop the current session's agent while keeping it in the active list.",
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "driver-rename": "Send the IDE display name into a supported live driver pane.",
@@ -1096,6 +1130,11 @@ def build_parser() -> argparse.ArgumentParser:
     current_chat.add_argument("--session-id")
     current_chat.add_argument("--tmux-socket")
     current_chat.set_defaults(handler=cmd_current_chat)
+
+    sleep = command("sleep")
+    sleep.add_argument("--session-id")
+    sleep.add_argument("--tmux-socket")
+    sleep.set_defaults(handler=cmd_sleep)
 
     driver_rename = command("driver-rename")
     driver_rename.add_argument("--session-id", required=True)

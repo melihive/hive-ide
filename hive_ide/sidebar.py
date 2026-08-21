@@ -303,6 +303,7 @@ class IdeSidebar:
     # (`CUR_FG`) — a status dot and an identity colour must not be the same value.
     STATUS_DOT = {"waiting": ("●", "\x1b[1;38;5;51m"),    # bright cyan — needs you
                   "working": ("●", "\x1b[38;5;220m"),
+                  "sleeping": ("☾", "\x1b[38;5;245m"),
                   "error": ("!", "\x1b[1;38;5;203m")}
     STALE_WORKING_SECONDS = 900   # a crashed agent must not sit on "working" forever
     PLUS = "+"                    # footer button — click to create an ide session

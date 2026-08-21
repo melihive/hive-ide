@@ -88,19 +88,28 @@ class SessionRepair:
         warnings.extend(pane_cwd_warnings)
         agent_env_warnings = self._agent_env_warnings(repaired)
         warnings.extend(agent_env_warnings)
+        sleeping = (repaired.get("sleep") or {}).get("state") == "sleeping"
         live_shell_agent = self._has_live_shell_agent(repaired)
         shell_agent = self._shell_agent_pane(repaired)
 
         if apply and not errors:
             try:
-                if self.frame.ensure(repaired):
+                window_exists = repaired["id"] in self.frame.windows()
+                if sleeping and not window_exists:
+                    actions.append("window: sleeping; not built")
+                elif self.frame.ensure(repaired):
                     actions.append("window: built")
                 elif missing := self._missing_pane_roles(repaired):
                     if "agent" in missing:
-                        self.frame.rebuild(repaired)
-                        actions.append(
-                            "window: rebuilt for missing panes: " + ", ".join(missing)
-                        )
+                        if sleeping:
+                            warnings.append(
+                                "window missing sleeping agent pane; repair preserved sleep state"
+                            )
+                        else:
+                            self.frame.rebuild(repaired)
+                            actions.append(
+                                "window: rebuilt for missing panes: " + ", ".join(missing)
+                            )
                     else:
                         restored = self.frame.restore_missing_panes(repaired, missing)
                         if restored:
@@ -120,12 +129,19 @@ class SessionRepair:
                         actions.append(
                             "agent: stale environment observed; live driver preserved"
                         )
+                    elif sleeping:
+                        actions.append(
+                            "agent: sleeping; stale environment preserved until wake"
+                        )
                     else:
                         self.frame.rebuild(repaired)
                         actions.append("window: rebuilt for stale agent environment")
                 elif shell_agent:
-                    self.frame.respawn_agent(repaired, shell_agent)
-                    actions.append("agent: respawned exited driver pane")
+                    if sleeping:
+                        actions.append("agent: sleeping; exited driver pane preserved")
+                    else:
+                        self.frame.respawn_agent(repaired, shell_agent)
+                        actions.append("agent: respawned exited driver pane")
                 elif pane_cwd_warnings:
                     if self._has_deleted_pane_cwd(pane_cwd_warnings):
                         self.frame.rebuild(repaired)

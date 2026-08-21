@@ -780,12 +780,14 @@ class Frame:
             if self.is_shell_agent_pane(record, current):
                 self.respawn_agent(record, pane_id)
                 self._clear_consumed_handoff(record)
+                self.clear_sleep(record)
                 self.tmux(["select-pane", "-t", pane_id])
                 return {
                     "session_id": record["id"],
                     "driver": driver.get("id"),
                     "opened": "agent-pane",
                 }
+            self.clear_sleep(record)
             self.tmux(["select-pane", "-t", pane_id])
             return {
                 "session_id": record["id"],
@@ -801,17 +803,31 @@ class Frame:
                     fallback_argv.extend(["--name", name])
                 fallback = subprocess.run(fallback_argv, cwd=record["working_dir"])
                 if fallback.returncode == 0:
+                    self.clear_sleep(record)
                     return {
                         "session_id": record["id"],
                         "driver": driver.get("id"),
                         "opened": "claude",
                     }
             raise HiveIdeError(f"The agent exited with status {result.returncode}.")
+        self.clear_sleep(record)
         return {
             "session_id": record["id"],
             "driver": driver.get("id"),
             "opened": "terminal",
         }
+
+    def clear_sleep(self, record: dict[str, Any]) -> bool:
+        if (record.get("sleep") or {}).get("state") != "sleeping":
+            return False
+        current = self.store.find_session(record["id"])
+        if current is None:
+            return False
+        current.pop("sleep", None)
+        current["last_active"] = utc_now()
+        self.store.write("sessions", current["id"], current)
+        self.store.delete("status", current["id"])
+        return True
 
     @classmethod
     def is_shell_agent_pane(
@@ -857,6 +873,47 @@ class Frame:
         )
         if result.returncode != 0:
             raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
+
+    def sleep_agent(self, record: dict[str, Any]) -> dict[str, Any]:
+        driver = record.get("driver") or {}
+        if driver.get("id") == "term":
+            raise UsageError("Terminal sessions do not have an agent to sleep.")
+        pane_id = self.role_panes(record["id"]).get("agent")
+        if not pane_id:
+            return {
+                "session_id": record["id"],
+                "driver": driver.get("id"),
+                "window_existed": record["id"] in self.windows(),
+                "agent_pane_existed": False,
+                "memory_released": False,
+            }
+        command = self._interactive_command(
+            "printf '\\n  hive-ide: agent sleeping. Run `hive-ide chat` to wake.\\n\\n'; "
+            'exec "${SHELL:-/bin/sh}"'
+        )
+        result = self.tmux(
+            [
+                "respawn-pane",
+                "-k",
+                "-t",
+                pane_id,
+                "-c",
+                self.safe_working_dir(record),
+                *self._environment(record),
+                "sh",
+                "-c",
+                command,
+            ]
+        )
+        if result.returncode != 0:
+            raise HiveIdeError(result.stderr.strip() or "Could not sleep the agent pane.")
+        return {
+            "session_id": record["id"],
+            "driver": driver.get("id"),
+            "window_existed": True,
+            "agent_pane_existed": True,
+            "memory_released": True,
+        }
 
     def refresh_sidebar_if_needed(self, record: dict[str, Any]) -> bool:
         pane_id = self.role_panes(record["id"]).get("sidebar")

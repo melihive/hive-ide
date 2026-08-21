@@ -4,6 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added `hive-ide sleep` to stop a live agent process while keeping the session
+  in the active sidebar list, with `hive-ide chat` as the deliberate wake path.
+- The session options menu now offers `sleep agent` for agent-backed sessions.
+- Documented and pinned absolute plan path support so standalone/non-Hive
+  sessions can attach personal plan files outside the workspace root.
+
+### Fixed
+
+- Repair now preserves intentionally sleeping shell agent panes instead of
+  treating them as crashed agents that should be respawned.
+
 ## [1.0.68] - 2026-08-17
 
 ### Fixed

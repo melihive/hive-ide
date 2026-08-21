@@ -118,6 +118,10 @@ To edit from a long-lived `micro` plan pane, reload before changing anything: pr
 run `reload`, then press `Ctrl-e` again and run `set readonly false`. This keeps edits based
 on the current file instead of a stale monitoring buffer.
 
+Plan paths may be relative to the workspace/current working directory or absolute.
+Absolute paths are accepted as-is, so standalone/non-Hive use can attach personal
+plan files outside the repository root.
+
 Sidebar symbols may occupy one or two terminal cells. `state` selects one mutually
 exclusive provider; `slots` is an ordered list and may contain any number of columns.
 Additional field providers can be declared in config. Python entry points in
@@ -133,10 +137,15 @@ hive-ide source-set --session-id=<ID> --source=dev
 hive-ide source-set --session-id=<ID> --source=stable
 ```
 
-Archive is a hard sleep: `hive-ide archive --session-id=<ID>` closes the live
-tmux window before moving the session out of the active list. The JSON result
-includes `archive.memory_released`; if the window exists but cannot be closed,
-archive refuses instead of hiding an agent that is still consuming memory.
+Use `hive-ide sleep [--session-id=<ID>]` to stop the live agent process while keeping
+the session in the active list. Sleeping sessions show the sleep status glyph, keep
+their sidebar/plan panes, and wake deliberately through `hive-ide chat --session-id=<ID>`.
+The session options menu also exposes `sleep agent` for Claude/Codex-style sessions.
+
+Archive is stronger: `hive-ide archive --session-id=<ID>` closes the live tmux window
+before moving the session out of the active list. The JSON result includes
+`archive.memory_released`; if the window exists but cannot be closed, archive refuses
+instead of hiding an agent that is still consuming memory.
 
 Monitor local agent memory:
 

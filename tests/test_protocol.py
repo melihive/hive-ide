@@ -2441,6 +2441,107 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     assert respawned == []
 
 
+def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["source"] = {}
+    record["sleep"] = {"state": "sleeping", "slept_at": "2026-08-20T00:00:00+00:00"}
+    respawned = []
+    rebuilt = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: "sh")
+    monkeypatch.setattr(Frame, "agent_pane_pid", lambda _self, _record: 123)
+    monkeypatch.setattr(Frame, "_process_tree", lambda _pid: [123])
+    monkeypatch.setattr(SessionRepair, "_process_cmdline", lambda _pid: None)
+    monkeypatch.setattr(
+        Frame,
+        "respawn_agent",
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"sidebar\t{workspace}\n"
+                f"agent\t{workspace}\n"
+                f"plan\t{workspace}\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["agent: sleeping; exited driver pane preserved"]
+    assert respawned == []
+    assert rebuilt == []
+
+
+def test_repair_does_not_build_missing_sleeping_window(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CODEX",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CODEX",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["source"] = {}
+    record["sleep"] = {"state": "sleeping", "slept_at": "2026-08-20T00:00:00+00:00"}
+    ensured = []
+
+    monkeypatch.setattr(Frame, "windows", lambda _self: {})
+    monkeypatch.setattr(
+        Frame,
+        "ensure",
+        lambda _self, _record: ensured.append(_record["id"]) or False,
+    )
+    monkeypatch.setattr(Frame, "role_panes", lambda _self, _session_id: {})
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: None)
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["window: sleeping; not built"]
+    assert ensured == []
+
+
 def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
     tmp_path, monkeypatch
 ):
@@ -3611,6 +3712,40 @@ def test_plan_set_resolves_worktree_session_plan_from_workspace_first(
     assert updated["plan"]["path"] == "plans/team/Simon/_archive/rolled.md"
 
 
+def test_plan_set_accepts_absolute_plan_outside_workspace(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "personal-plans" / "own-plan.md"
+    workspace.mkdir()
+    outside.parent.mkdir()
+    outside.write_text("# Own Plan\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PERSONAL",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(store.home),
+                "--workspace-key",
+                str(workspace),
+                "plan-set",
+                f"--session-id={record['id']}",
+                f"--path={outside}",
+            ]
+        )
+        == 0
+    )
+
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["plan"]["path"] == str(outside)
+    assert Frame.plan_path(updated) == outside.resolve()
+
+
 def test_plan_set_refuses_missing_relative_plan_for_worktree_session(tmp_path):
     workspace = tmp_path / "workspace"
     worktree = tmp_path / "worktree" / "feature"
@@ -3680,6 +3815,24 @@ def test_frame_plan_path_falls_back_to_working_dir_when_workspace_plan_missing(t
     )
 
     assert Frame.plan_path(record) == worktree_plan.resolve()
+
+
+def test_frame_plan_path_resolves_absolute_plan_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "personal-plans" / "own-plan.md"
+    workspace.mkdir()
+    outside.parent.mkdir()
+    outside.write_text("# Own Plan\n", encoding="utf-8")
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PERSONAL",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+        plan={"path": str(outside), "active_task": None},
+    )
+
+    assert Frame.plan_path(record) == outside.resolve()
 
 
 def test_frame_plan_path_refuses_missing_relative_plan_for_worktree_session(tmp_path):
@@ -4481,6 +4634,143 @@ def test_current_chat_respawns_dead_agent_shell_pane(tmp_path, monkeypatch):
     assert result["opened"] == "agent-pane"
     assert any(call[:3] == ["respawn-pane", "-k", "-t"] for call in calls)
     assert calls[-1] == ["select-pane", "-t", "%2"]
+
+
+def test_sleep_agent_respawns_agent_pane_into_sleeping_shell(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    frame = Frame(store)
+    calls = []
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda args, **_kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = frame.sleep_agent(record)
+
+    assert result == {
+        "session_id": record["id"],
+        "driver": "codex",
+        "window_existed": True,
+        "agent_pane_existed": True,
+        "memory_released": True,
+    }
+    assert calls[0][:3] == ["respawn-pane", "-k", "-t"]
+    assert calls[0][3] == "%2"
+    assert f"HIVE_IDE_SESSION_ID={record['id']}" in calls[0]
+    assert "agent sleeping" in calls[0][-1]
+
+
+def test_sleep_command_marks_session_and_status_sleeping(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "sleep_agent",
+        lambda _self, _record: {
+            "session_id": _record["id"],
+            "driver": "codex",
+            "window_existed": True,
+            "agent_pane_existed": True,
+            "memory_released": True,
+        },
+    )
+
+    assert (
+        main(
+            [
+                "--state-home",
+                str(store.home),
+                "--workspace-key",
+                str(workspace),
+                "sleep",
+                f"--session-id={record['id']}",
+            ]
+        )
+        == 0
+    )
+
+    updated = store.find_session(record["id"])
+    status = store.read("status", record["id"])
+    assert updated["sleep"]["state"] == "sleeping"
+    assert status["state"] == "sleeping"
+    assert status["driver"] == "codex"
+
+
+def test_current_chat_wakes_sleeping_shell_pane(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["sleep"] = {"state": "sleeping", "slept_at": "2026-08-20T00:00:00+00:00"}
+    store.write("sessions", record["id"], record)
+    store.write(
+        "status",
+        record["id"],
+        {
+            "session_id": record["id"],
+            "driver": "codex",
+            "state": "sleeping",
+            "observed_at": "2026-08-20T00:00:00+00:00",
+        },
+    )
+    frame = Frame(store)
+    calls = []
+    respawned = []
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
+    monkeypatch.setattr(
+        frame,
+        "respawn_agent",
+        lambda _record, pane_id: respawned.append((_record["id"], pane_id)),
+    )
+
+    def fake_tmux(args, **_kwargs):
+        calls.append(args)
+        stdout = "sh\n" if args[:4] == ["display-message", "-p", "-t", "%2"] else ""
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+
+    result = frame.current_chat(record)
+
+    assert result["opened"] == "agent-pane"
+    assert respawned == [(record["id"], "%2")]
+    assert store.find_session(record["id"]).get("sleep") is None
+    assert store.read("status", record["id"]) is None
 
 
 def test_frame_select_session_selects_window_then_agent_pane(tmp_path, monkeypatch):

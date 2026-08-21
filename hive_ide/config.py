@@ -26,7 +26,12 @@ DEFAULT_THEME = {
         "antigravity": {"icon": "🔷", "label": "Antigravity"},
         "term": {"icon": "💻", "label": "Terminal"},
     },
-    "status": {"working": "working", "waiting": "waiting", "error": "error"},
+    "status": {
+        "working": "working",
+        "waiting": "waiting",
+        "sleeping": "sleeping",
+        "error": "error",
+    },
     "labels": {"sessions": "Sessions", "archive": "Archive"},
 }
 
@@ -62,7 +67,7 @@ DEFAULT_SIDEBAR = {
             "terminal": "💻",
             "default": "•",
         },
-        "status": {"working": "▶", "waiting": "●", "error": "!"},
+        "status": {"working": "▶", "waiting": "●", "sleeping": "☾", "error": "!"},
         "controls": {"create": "+", "archive": "▼"},
         "providers": {
             "checkout": {"busy": "⏳"},

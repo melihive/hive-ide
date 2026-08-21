@@ -60,26 +60,15 @@ class IdeOptionsModal:
     DRIVER_RENAME_ACTIONS = [
         ("driver-rename", "rename driver", "send /rename when agent is idle"),
     ]
+    SLEEP_ACTION = ("sleep", "sleep agent", "stop agent, keep session listed")
 
     @staticmethod
     def _actions(record: dict) -> list[tuple[str, str, str]]:
-        actions = [
+        return [
             action
-            for _group, group_actions in IdeOptionsModal.GROUPS
+            for _group, group_actions in IdeOptionsModal._grouped_actions(record)
             for action in group_actions
         ]
-        driver = (record.get("driver") or {}).get("id")
-        if driver in {"claude", "codex"}:
-            rename_index = next(
-                (
-                    index
-                    for index, (action, _label, _note) in enumerate(actions)
-                    if action == "rename"
-                ),
-                len(actions),
-            )
-            actions[rename_index + 1:rename_index + 1] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
-        return actions
 
     @staticmethod
     def _command(
@@ -141,6 +130,11 @@ class IdeOptionsModal:
             return IdeNewModal._cli(
                 skill_dir,
                 ["--quiet", "repair", f"--session-id={session_id}", *socket_args],
+            )
+        if action == "sleep":
+            return IdeNewModal._cli(
+                skill_dir,
+                ["--quiet", "sleep", f"--session-id={session_id}", *socket_args],
             )
         if action == "archive":
             return IdeNewModal._cli(
@@ -292,6 +286,19 @@ class IdeOptionsModal:
                 len(session_actions),
             )
             session_actions[rename_index + 1:rename_index + 1] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
+        if driver != "term":
+            maintenance_actions = groups[2][1]
+            archive_index = next(
+                (
+                    index
+                    for index, (action, _label, _note) in enumerate(maintenance_actions)
+                    if action == "archive"
+                ),
+                len(maintenance_actions),
+            )
+            maintenance_actions[archive_index:archive_index] = [
+                IdeOptionsModal.SLEEP_ACTION
+            ]
         return groups
 
     @staticmethod
