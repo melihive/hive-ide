@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.71] - 2026-08-21
+
 ### Fixed
 
 - Sidebar panes now carry a source/version marker, so `repair` refreshes live
