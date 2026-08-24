@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.73] - 2026-08-24
+
 ### Fixed
 
 - Sleeping sessions now stay below awake sessions in the active sidebar order
