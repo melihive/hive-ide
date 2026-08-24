@@ -185,6 +185,10 @@ class StateStore:
         records = [record for path in paths if (record := self.read_path(path)) is not None]
         records.sort(key=lambda item: (item.get("name") or "").casefold())
         records.sort(key=lambda item: item.get("last_active") or "", reverse=True)
+        if collection == "sessions":
+            records.sort(
+                key=lambda item: (item.get("sleep") or {}).get("state") == "sleeping"
+            )
         return records
 
     def refresh_stable_sources(self, *, collections: tuple[str, ...] = ("sessions",)) -> dict[str, Any]:

@@ -325,7 +325,7 @@ class IdeSidebar:
             t = t.replace(tzinfo=timezone.utc)
         secs = max(0, int((datetime.now(timezone.utc) - t).total_seconds()))
         if secs < 60:
-            return f"{secs}s"
+            return ""
         mins = secs // 60
         if mins < 60:
             return f"{mins}m"

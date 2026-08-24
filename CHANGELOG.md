@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sleeping sessions now stay below awake sessions in the active sidebar order
+  even when the sleep action just stamped a fresh activity time.
+- Sidebar relative ages no longer count seconds; new activity stays blank until
+  the first minute, then advances by minute/hour/day buckets.
+
 ## [1.0.72] - 2026-08-21
 
 ### Fixed
