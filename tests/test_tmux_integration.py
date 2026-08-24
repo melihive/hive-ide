@@ -24,18 +24,44 @@ pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is un
 def _processes_referencing(path) -> list[int]:
     needle = str(path).encode()
     pids: list[int] = []
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
+    try:
+        entries = list(os.scandir("/proc"))
+    except FileNotFoundError:
+        entries = []
+    if entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            if pid == os.getpid():
+                continue
+            try:
+                with open(os.path.join(entry.path, "cmdline"), "rb") as handle:
+                    cmdline = handle.read()
+            except OSError:
+                continue
+            if needle in cmdline:
+                pids.append(pid)
+        return pids
+
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    needle_text = str(path)
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
             continue
-        pid = int(entry.name)
+        pid = int(parts[0])
         if pid == os.getpid():
             continue
-        try:
-            with open(os.path.join(entry.path, "cmdline"), "rb") as handle:
-                cmdline = handle.read()
-        except OSError:
-            continue
-        if needle in cmdline:
+        if needle_text in parts[1]:
             pids.append(pid)
     return pids
 
@@ -126,6 +152,29 @@ def _git(directory, *args):
         check=True,
         text=True,
     )
+
+
+def test_processes_referencing_falls_back_to_ps_without_proc(tmp_path, monkeypatch):
+    def missing_proc(_path):
+        raise FileNotFoundError
+
+    def fake_run(args, **kwargs):
+        assert args == ["ps", "-axo", "pid=,command="]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                f" 123 python -m hive_ide.sidebar {tmp_path}\n"
+                f" {os.getpid()} python -m pytest {tmp_path}\n"
+                " 456 python -m hive_ide.sidebar /elsewhere\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(os, "scandir", missing_proc)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _processes_referencing(tmp_path) == [123]
 
 
 def test_linked_checkout_status_reaches_the_live_sidebar(tmp_path, monkeypatch):
