@@ -4,12 +4,6 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
-### Fixed
-
-- `hive-ide hook-setup` now replaces the legacy `~/.my_scripts/hive-ide-hook.sh`
-  Claude hook shim with the package-owned `python -m hive_ide.hook` command
-  instead of leaving both hooks installed.
-
 ## [1.0.73] - 2026-08-24
 
 ### Fixed

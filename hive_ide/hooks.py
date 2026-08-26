@@ -48,13 +48,6 @@ class HookInstaller:
         "PostCompact": ("activity", "clear"),
     }
     COMMAND_MARKER = "-m hive_ide.hook"
-    LEGACY_COMMAND_MARKERS = ("hive-ide-hook.sh",)
-
-    @classmethod
-    def _is_managed_command(cls, command: str) -> bool:
-        return cls.COMMAND_MARKER in command or any(
-            marker in command for marker in cls.LEGACY_COMMAND_MARKERS
-        )
 
     def __init__(
         self,
@@ -129,7 +122,7 @@ class HookInstaller:
                             f"Hook event {event!r} contains a non-object handler."
                         )
                     existing_command = handler.get("command") or ""
-                    installed = self._is_managed_command(existing_command)
+                    installed = self.COMMAND_MARKER in existing_command
                     if installed and handler.get("command") != command:
                         changed = True
                         continue
