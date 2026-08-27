@@ -1148,6 +1148,50 @@ def test_sidebar_command_runner_switches_window_and_agent_pane(monkeypatch, tmp_
     ]
 
 
+def test_sidebar_command_runner_does_not_wake_sleeping_window(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        SidebarCommandRunner,
+        "window_id",
+        lambda _self, session_id: "@7" if session_id == "session-id" else None,
+    )
+    monkeypatch.setattr(
+        SidebarCommandRunner,
+        "is_sleeping",
+        lambda _self, session_id: session_id == "session-id",
+    )
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("hive_ide.sidebar.subprocess.run", fake_run)
+
+    assert not SidebarCommandRunner(tmp_path, str(tmp_path)).switch("session-id")
+    assert calls == [
+        ["tmux", "select-window", "-t", "@7"],
+        ["tmux", "select-pane", "-t", "@7.0"],
+        ["tmux", "send-keys", "-t", "@7.0", "-l", "\x1b[O"],
+    ]
+
+
+def test_sidebar_command_runner_does_not_repair_missing_sleeping_window(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-next")
+    monkeypatch.setattr(SidebarCommandRunner, "window_id", lambda _self, _sid: None)
+    monkeypatch.setattr(SidebarCommandRunner, "is_sleeping", lambda _self, _sid: True)
+    monkeypatch.setattr(
+        SidebarCommandRunner,
+        "cli",
+        lambda _self, args: calls.append(args) or True,
+    )
+
+    assert not SidebarCommandRunner(tmp_path, str(tmp_path)).switch("missing")
+    assert calls == []
+
+
 def test_sidebar_command_runner_does_not_select_after_failed_repair(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-next")

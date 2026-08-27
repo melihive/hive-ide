@@ -142,10 +142,28 @@ class SidebarCommandRunner:
             None,
         )
 
+    def is_sleeping(self, session_id: str) -> bool:
+        try:
+            found = StateIO.find_by_id(self.state_home, self.workspace_key, session_id)
+        except Exception:
+            return False
+        if found is None:
+            return False
+        record = found[2]
+        return (record.get("sleep") or {}).get("state") == "sleeping"
+
     def switch(self, session_id: str) -> bool:
-        """Select a session window and focus its agent/chat pane."""
+        """Select a session window and focus its agent/chat pane.
+
+        Returns true only when the chat pane was deliberately activated. Sleeping
+        sessions may be selected for inspection, but sidebar selection is not a
+        wake action; `hive-ide chat` owns that path.
+        """
+        sleeping = self.is_sleeping(session_id)
         target = self.window_id(session_id)
         if target is None:
+            if sleeping:
+                return False
             args = ["repair", f"--session-id={session_id}"]
             if socket := os.environ.get("HIVE_IDE_TMUX_SOCKET"):
                 args.append(f"--tmux-socket={socket}")
@@ -160,13 +178,13 @@ class SidebarCommandRunner:
             stderr=subprocess.DEVNULL,
         )
         pane = subprocess.run(
-            ["tmux", "select-pane", "-t", f"{target}.1"],
+            ["tmux", "select-pane", "-t", f"{target}.0" if sleeping else f"{target}.1"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         if window.returncode == 0 and pane.returncode == 0:
             self.wake_sidebar(target)
-        return window.returncode == 0 and pane.returncode == 0
+        return window.returncode == 0 and pane.returncode == 0 and not sleeping
 
     @staticmethod
     def wake_sidebar(window_id: str) -> None:

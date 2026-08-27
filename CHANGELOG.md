@@ -4,6 +4,11 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar click/Enter no longer wakes sleeping sessions or repairs missing
+  sleeping windows. `hive-ide chat` remains the deliberate wake action.
+
 ## [1.0.73] - 2026-08-24
 
 ### Fixed
