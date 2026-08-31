@@ -1787,39 +1787,19 @@ class Frame:
             ).stdout.strip() or None
         built: list[str] = []
         built_sleeping: list[str] = []
-        skipped_sleeping: list[str] = []
         failed: list[dict[str, str]] = []
-        initial_windows = self.windows()
-        missing_sleeping = [
-            record
-            for record in sessions
-            if self._is_sleeping(record) and record["id"] not in initial_windows
-        ]
-        missing_sleeping_ids = {record["id"] for record in missing_sleeping}
         for record in sessions:
-            if record["id"] in missing_sleeping_ids:
-                skipped_sleeping.append(record["id"])
-                self._clear_open_error(record)
-                continue
             try:
                 if self.ensure(record):
-                    built.append(record["id"])
+                    if self._is_sleeping(record):
+                        built_sleeping.append(record["id"])
+                    else:
+                        built.append(record["id"])
             except HiveIdeError as exc:
                 failed.append(self._record_open_error(record, exc))
                 continue
             self._clear_open_error(record)
         windows = self.windows()
-        if not windows and missing_sleeping:
-            for record in missing_sleeping:
-                try:
-                    self.build(record)
-                    built_sleeping.append(record["id"])
-                    skipped_sleeping.remove(record["id"])
-                    self._clear_open_error(record)
-                    break
-                except HiveIdeError as exc:
-                    failed.append(self._record_open_error(record, exc))
-            windows = self.windows()
         if not windows:
             raise UsageError(
                 f"No session windows could be opened; {len(failed)} session(s) failed. "
@@ -1847,7 +1827,6 @@ class Frame:
             "tmux_session": self.target,
             "built": built,
             "built_sleeping": built_sleeping,
-            "skipped_sleeping": skipped_sleeping,
             "failed": failed,
             "windows": len(windows),
         }

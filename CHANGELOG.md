@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Post-restart `hive-ide open` now prebuilds sleeping session windows with
+  shell-only agent panes, so first selecting an asleep session does not cause a
+  delayed layout rebuild or wake the agent.
+
 ## [1.0.75] - 2026-08-31
 
 ### Fixed

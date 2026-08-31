@@ -1016,7 +1016,9 @@ def test_open_preserves_saved_tmux_socket(tmp_path, capsys, monkeypatch):
     assert snapshot["tmux"]["socket"] == "hive-ide-next-existing"
 
 
-def test_open_after_restart_skips_missing_sleeping_sessions(tmp_path, monkeypatch):
+def test_open_after_restart_prebuilds_sleeping_sessions_without_waking_agents(
+    tmp_path, monkeypatch
+):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -1067,14 +1069,13 @@ def test_open_after_restart_skips_missing_sleeping_sessions(tmp_path, monkeypatc
 
     result = frame.open(no_attach=True)
 
-    assert built == ["AWAKE"]
+    assert built == ["AWAKE", "SLEEPING"]
     assert result["built"] == [awake["id"]]
-    assert result["built_sleeping"] == []
-    assert result["skipped_sleeping"] == [sleeping["id"]]
-    assert result["windows"] == 1
+    assert result["built_sleeping"] == [sleeping["id"]]
+    assert result["windows"] == 2
 
 
-def test_open_after_restart_builds_one_sleeping_shell_when_all_sessions_sleep(
+def test_open_after_restart_prebuilds_all_sleeping_sessions_as_shells(
     tmp_path, monkeypatch
 ):
     workspace = tmp_path / "workspace"
@@ -1128,11 +1129,10 @@ def test_open_after_restart_builds_one_sleeping_shell_when_all_sessions_sleep(
 
     result = frame.open(no_attach=True)
 
-    assert len(built) == 1
+    assert built == ["SLEEP-A", "SLEEP-B"]
     assert result["built"] == []
-    assert result["built_sleeping"]
-    assert len(result["skipped_sleeping"]) == 1
-    assert result["windows"] == 1
+    assert set(result["built_sleeping"]) == {first["id"], second["id"]}
+    assert result["windows"] == 2
 
 
 def test_adopt_requires_explicit_reference_or_limit(tmp_path, capsys, monkeypatch):
