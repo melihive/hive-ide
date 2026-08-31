@@ -1016,6 +1016,125 @@ def test_open_preserves_saved_tmux_socket(tmp_path, capsys, monkeypatch):
     assert snapshot["tmux"]["socket"] == "hive-ide-next-existing"
 
 
+def test_open_after_restart_skips_missing_sleeping_sessions(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    awake = store.create_session(
+        name="AWAKE",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="AWAKE",
+            working_dir=str(workspace),
+            conversation_reference="awake-1",
+        ),
+    )
+    sleeping = store.create_session(
+        name="SLEEPING",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="SLEEPING",
+            working_dir=str(workspace),
+            conversation_reference="sleeping-1",
+        ),
+    )
+    sleeping["sleep"] = {
+        "state": "sleeping",
+        "slept_at": "2026-08-20T00:00:00+00:00",
+    }
+    store.write("sessions", sleeping["id"], sleeping)
+    frame = Frame(store)
+    windows: dict[str, str] = {}
+    built: list[str] = []
+
+    def fake_build(record):
+        built.append(record["name"])
+        windows[record["id"]] = f"@{len(windows) + 1}"
+        return windows[record["id"]]
+
+    monkeypatch.setattr(frame, "require_tmux", lambda: None)
+    monkeypatch.setattr(frame, "exists", lambda: False)
+    monkeypatch.setattr(frame, "windows", lambda: dict(windows))
+    monkeypatch.setattr(frame, "build", fake_build)
+    monkeypatch.setattr(frame, "bind_keys", lambda: None)
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda _args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = frame.open(no_attach=True)
+
+    assert built == ["AWAKE"]
+    assert result["built"] == [awake["id"]]
+    assert result["built_sleeping"] == []
+    assert result["skipped_sleeping"] == [sleeping["id"]]
+    assert result["windows"] == 1
+
+
+def test_open_after_restart_builds_one_sleeping_shell_when_all_sessions_sleep(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    first = store.create_session(
+        name="SLEEP-A",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="SLEEP-A",
+            working_dir=str(workspace),
+            conversation_reference="sleep-a",
+        ),
+    )
+    second = store.create_session(
+        name="SLEEP-B",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="SLEEP-B",
+            working_dir=str(workspace),
+            conversation_reference="sleep-b",
+        ),
+    )
+    for record in (first, second):
+        record["sleep"] = {
+            "state": "sleeping",
+            "slept_at": "2026-08-20T00:00:00+00:00",
+        }
+        store.write("sessions", record["id"], record)
+    frame = Frame(store)
+    windows: dict[str, str] = {}
+    built: list[str] = []
+
+    def fake_build(record):
+        built.append(record["name"])
+        windows[record["id"]] = f"@{len(windows) + 1}"
+        return windows[record["id"]]
+
+    monkeypatch.setattr(frame, "require_tmux", lambda: None)
+    monkeypatch.setattr(frame, "exists", lambda: False)
+    monkeypatch.setattr(frame, "windows", lambda: dict(windows))
+    monkeypatch.setattr(frame, "build", fake_build)
+    monkeypatch.setattr(frame, "bind_keys", lambda: None)
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda _args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = frame.open(no_attach=True)
+
+    assert len(built) == 1
+    assert result["built"] == []
+    assert result["built_sleeping"]
+    assert len(result["skipped_sleeping"]) == 1
+    assert result["windows"] == 1
+
+
 def test_adopt_requires_explicit_reference_or_limit(tmp_path, capsys, monkeypatch):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
@@ -4709,6 +4828,52 @@ def test_sleep_agent_respawns_agent_pane_into_sleeping_shell(tmp_path, monkeypat
     assert calls[0][3] == "%2"
     assert f"HIVE_IDE_SESSION_ID={record['id']}" in calls[0]
     assert "agent sleeping" in calls[0][-1]
+
+
+def test_build_uses_sleeping_shell_for_sleeping_session(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="CHAT",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="CHAT",
+            working_dir=str(workspace),
+            conversation_reference="conversation-1",
+        ),
+    )
+    record["sleep"] = {
+        "state": "sleeping",
+        "slept_at": "2026-08-20T00:00:00+00:00",
+    }
+    frame = Frame(store)
+    calls = []
+
+    def fake_tmux(args, **kwargs):
+        calls.append((args, kwargs))
+        if args and args[0] == "has-session":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if args and args[0] == "new-session":
+            return SimpleNamespace(returncode=0, stdout="@7\n", stderr="")
+        if args and args[0] == "split-window":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", fake_tmux)
+    monkeypatch.setattr(frame, "_refresh_source_if_needed", lambda *_args: None)
+    monkeypatch.setattr(frame, "_tag", lambda *_args: None)
+    monkeypatch.setattr(frame, "_apply_columns", lambda *_args: None)
+
+    assert frame.build(record) == "@7"
+
+    split_commands = [args for args, _kwargs in calls if args and args[0] == "split-window"]
+    assert len(split_commands) == 2
+    agent_command = split_commands[0][-1]
+    assert "agent sleeping" in agent_command
+    assert "codex" not in agent_command
+    assert "conversation-1" not in agent_command
 
 
 def test_sleep_command_marks_session_and_status_sleeping(tmp_path, monkeypatch):

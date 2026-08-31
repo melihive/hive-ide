@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `hive-ide open` no longer wakes sleeping sessions after a machine restart.
+  Missing sleeping windows are skipped during startup, and the all-sleeping
+  case opens a single shell-only sleeping placeholder instead of launching an
+  agent.
+
 ## [1.0.74] - 2026-08-27
 
 ### Fixed

@@ -400,6 +400,17 @@ class Frame:
         names = " ".join(cls.INTERACTIVE_ENV_UNSET)
         return f"unset {names}; {command}"
 
+    @staticmethod
+    def _is_sleeping(record: dict[str, Any]) -> bool:
+        return (record.get("sleep") or {}).get("state") == "sleeping"
+
+    @classmethod
+    def _sleeping_agent_command(cls) -> str:
+        return cls._interactive_command(
+            "printf '\\n  hive-ide: agent sleeping. Run `hive-ide chat` to wake.\\n\\n'; "
+            'exec "${SHELL:-/bin/sh}"'
+        )
+
     def _record_python(self, record: dict[str, Any]) -> str:
         source = record.get("source") or {}
         interpreter = source.get("interpreter")
@@ -902,10 +913,7 @@ class Frame:
                 "agent_pane_existed": False,
                 "memory_released": False,
             }
-        command = self._interactive_command(
-            "printf '\\n  hive-ide: agent sleeping. Run `hive-ide chat` to wake.\\n\\n'; "
-            'exec "${SHELL:-/bin/sh}"'
-        )
+        command = self._sleeping_agent_command()
         result = self.tmux(
             [
                 "respawn-pane",
@@ -1185,7 +1193,12 @@ class Frame:
         target = created.stdout.strip()
         if not target:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
-        for command in (self._agent_command(record), self._plan_command(record)):
+        agent_command = (
+            self._sleeping_agent_command()
+            if self._is_sleeping(record)
+            else self._agent_command(record)
+        )
+        for command in (agent_command, self._plan_command(record)):
             result = self.tmux(
                 [
                     "split-window",
@@ -1773,8 +1786,21 @@ class Frame:
                 ["display-message", "-p", "-t", self.target, "#{window_id}"]
             ).stdout.strip() or None
         built: list[str] = []
+        built_sleeping: list[str] = []
+        skipped_sleeping: list[str] = []
         failed: list[dict[str, str]] = []
+        initial_windows = self.windows()
+        missing_sleeping = [
+            record
+            for record in sessions
+            if self._is_sleeping(record) and record["id"] not in initial_windows
+        ]
+        missing_sleeping_ids = {record["id"] for record in missing_sleeping}
         for record in sessions:
+            if record["id"] in missing_sleeping_ids:
+                skipped_sleeping.append(record["id"])
+                self._clear_open_error(record)
+                continue
             try:
                 if self.ensure(record):
                     built.append(record["id"])
@@ -1783,6 +1809,17 @@ class Frame:
                 continue
             self._clear_open_error(record)
         windows = self.windows()
+        if not windows and missing_sleeping:
+            for record in missing_sleeping:
+                try:
+                    self.build(record)
+                    built_sleeping.append(record["id"])
+                    skipped_sleeping.remove(record["id"])
+                    self._clear_open_error(record)
+                    break
+                except HiveIdeError as exc:
+                    failed.append(self._record_open_error(record, exc))
+            windows = self.windows()
         if not windows:
             raise UsageError(
                 f"No session windows could be opened; {len(failed)} session(s) failed. "
@@ -1809,6 +1846,8 @@ class Frame:
             "tmux_socket": self.socket,
             "tmux_session": self.target,
             "built": built,
+            "built_sleeping": built_sleeping,
+            "skipped_sleeping": skipped_sleeping,
             "failed": failed,
             "windows": len(windows),
         }
