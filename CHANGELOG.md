@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.76] - 2026-08-31
+
 ### Fixed
 
 - Post-restart `hive-ide open` now prebuilds sleeping session windows with
