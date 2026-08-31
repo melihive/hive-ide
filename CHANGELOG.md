@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.75] - 2026-08-31
+
 ### Fixed
 
 - `hive-ide open` no longer wakes sleeping sessions after a machine restart.
