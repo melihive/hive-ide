@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Removed the frame-level `MouseDown1Pane` override introduced in `1.0.77`.
+  Sidebar clicks now use the sidebar process's normal SGR mouse mode again, so
+  left-click session selection is not intercepted by tmux before it reaches the
+  sidebar.
+
 ## [1.0.77] - 2026-09-09
 
 ### Fixed
