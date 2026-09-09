@@ -5533,7 +5533,13 @@ def test_activity_is_environment_gated(tmp_path, monkeypatch):
         source=_source(),
         driver=_term(),
     )
-    for key in ("HIVE_IDE_STATE_HOME", "HIVE_IDE_WORKSPACE_KEY", "HIVE_IDE_SESSION_ID"):
+    for key in (
+        "HIVE_IDE_STATE_HOME",
+        "HIVE_IDE_WORKSPACE_KEY",
+        "HIVE_IDE_SESSION_ID",
+        "HIVE_IDE_TMUX_SOCKET",
+        "TMUX_PANE",
+    ):
         monkeypatch.delenv(key, raising=False)
     assert not IdeActivity.mark(IdeActivity.KIND_TASK)
 
@@ -5543,6 +5549,44 @@ def test_activity_is_environment_gated(tmp_path, monkeypatch):
     assert IdeActivity.mark(IdeActivity.KIND_TASK, label="Tests")
     assert store.read("activity", record["id"])["label"] == "Tests"
     assert IdeActivity.clear()
+
+
+def test_activity_uses_tagged_tmux_pane_over_stale_environment(tmp_path, monkeypatch):
+    stale_workspace = tmp_path / "stale"
+    live_workspace = tmp_path / "live"
+    stale_workspace.mkdir()
+    live_workspace.mkdir()
+    stale = StateStore(tmp_path / "state", stale_workspace)
+    live = StateStore(tmp_path / "state", live_workspace)
+    stale_record = stale.create_session(
+        name="STALE",
+        working_dir=stale_workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    live_record = live.create_session(
+        name="LIVE",
+        working_dir=live_workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(live.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", stale.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", stale_record["id"])
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-next-test")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    def fake_run(argv, **kwargs):
+        assert argv[:4] == ["tmux", "display-message", "-p", "-t"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"{live.workspace_key}\t{live_record['id']}\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert IdeActivity.mark(IdeActivity.KIND_RELEASE, label="Deploy")
+    assert live.read("activity", live_record["id"])["kind"] == "release"
+    assert stale.read("activity", stale_record["id"]) is None
 
 
 def test_default_adapters_are_complete_noops(tmp_path):
