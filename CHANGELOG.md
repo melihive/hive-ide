@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.77] - 2026-09-09
+
+### Fixed
+
+- `hive-ide repair` now reapplies live frame column widths for healthy
+  existing windows, so a repair fixes drifted sidebar and plan pane geometry
+  without rebuilding or respawning panes.
+- Claude `/clear` sessions now stay attached to their IDE session: Claude
+  `SessionStart` hooks are installed, and unowned new Claude session IDs
+  reported from the active IDE driver pane replace the old resume reference.
+
 ## [1.0.76] - 2026-08-31
 
 ### Fixed
