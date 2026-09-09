@@ -152,6 +152,7 @@ class SessionRepair:
                     actions.append("sidebar: refreshed hidden-aware wrapper")
                 if self.frame.retitle_panes(repaired):
                     actions.append("window: retitled panes")
+                self.frame.apply_columns(repaired)
                 self._clear_repair_error(session_id)
             except HiveIdeError as exc:
                 errors.append(str(exc))

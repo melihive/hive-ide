@@ -2296,6 +2296,81 @@ def test_repair_retitles_healthy_existing_window(tmp_path, monkeypatch):
     assert retitled == [record["id"]]
 
 
+def test_repair_reapplies_columns_for_healthy_existing_window(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(Frame, "pane_hive_ide_env", lambda _self, _pane_id: {})
+    monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: None)
+    monkeypatch.setattr(Frame, "refresh_sidebar_if_needed", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "retitle_panes", lambda _self, _record: False)
+
+    def fake_tmux(
+        _self,
+        args: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:2] == ["list-panes", "-t"] and any(
+            "#{pane_current_path}" in arg for arg in args
+        ):
+            rows = "\n".join(
+                [
+                    f"sidebar\t{workspace}",
+                    f"agent\t{workspace}",
+                    f"plan\t{workspace}",
+                ]
+            )
+            return subprocess.CompletedProcess(args, 0, rows + "\n", "")
+        if args[:2] == ["list-panes", "-t"] and any(
+            "#{pane_index}" in arg for arg in args
+        ):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "0\t%1\tsidebar\n1\t%2\tagent\n2\t%3\tplan\n",
+                "",
+            )
+        if args[:2] == ["list-panes", "-t"] and any(
+            "#{@hive_ide_pane}" in arg and "#{pane_id}" in arg for arg in args
+        ):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "sidebar\t%1\nagent\t%2\nplan\t%3\n",
+                "",
+            )
+        if args == ["display-message", "-p", "-t", "@7", "#{window_width}"]:
+            return subprocess.CompletedProcess(args, 0, "206\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(Frame, "tmux", fake_tmux)
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == []
+    assert ["resize-pane", "-t", "%1", "-x", "20"] in calls
+    assert ["resize-pane", "-t", "%3", "-x", "86"] in calls
+    assert not any(call[:1] == ["kill-window"] for call in calls)
+    assert not any(call[:3] == ["respawn-pane", "-k", "-t"] for call in calls)
+
+
 def test_repair_refreshes_stale_sidebar_wrapper_without_rebuilding(
     tmp_path, monkeypatch
 ):

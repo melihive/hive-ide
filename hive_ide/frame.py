@@ -1143,6 +1143,13 @@ class Frame:
         self.tmux(["resize-pane", "-t", sidebar_pane, "-x", str(sidebar)])
         self.tmux(["resize-pane", "-t", plan_pane, "-x", str(plan)])
 
+    def apply_columns(self, record: dict[str, Any]) -> bool:
+        target = self.windows().get(record["id"])
+        if not target:
+            return False
+        self._apply_columns(target)
+        return True
+
     def build(self, record: dict[str, Any]) -> str:
         working_dir = record["working_dir"]
         if not Path(working_dir).is_dir():
