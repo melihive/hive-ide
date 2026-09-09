@@ -161,10 +161,8 @@ class IdeHook:
                 store.write("status", session_id, status)
                 record["last_active"] = status["observed_at"]
                 current_driver = record.get("driver") or {}
-                current_reference = (current_driver.get("resume") or {}).get("reference")
                 agents = AgentResumeState(record)
                 current_driver_matches = current_driver.get("id") == parsed.driver
-                reference_matches = not current_reference or current_reference == reference
                 owner = (
                     store.find_conversation_owner(
                         driver_id=parsed.driver,
@@ -175,17 +173,12 @@ class IdeHook:
                     else None
                 )
                 reference_available = owner is None
-                if (
-                    reference
-                    and reference_available
-                    and (not current_driver_matches or reference_matches)
-                ):
+                if reference and reference_available:
                     agents.remember(parsed.driver, reference)
                 if (
                     reference
                     and reference_available
                     and current_driver_matches
-                    and reference_matches
                 ):
                     agents.mark_active(parsed.driver)
                     record["driver"] = driver.resolve(

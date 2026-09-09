@@ -31,6 +31,7 @@ def _configured_stable_python() -> Path | None:
 
 class HookInstaller:
     CLAUDE_EVENTS = {
+        "SessionStart": ("state", "waiting"),
         "UserPromptSubmit": ("state", "working"),
         "Stop": ("state", "waiting"),
         "Notification": ("state", "waiting"),

@@ -1682,7 +1682,7 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     ]
 
 
-def test_hook_does_not_overwrite_existing_conversation_reference(tmp_path, monkeypatch):
+def test_hook_updates_current_driver_when_clear_changes_claude_session(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -1716,12 +1716,12 @@ def test_hook_does_not_overwrite_existing_conversation_reference(tmp_path, monke
     status = store.read("status", record["id"])
     assert status["conversation_reference"] == "background-1"
     updated = store.find_session(record["id"])
-    assert updated["driver"]["resume"]["reference"] == "manual-1"
-    assert updated["agents"]["resume_ids"]["claude"] == "manual-1"
+    assert updated["driver"]["resume"]["reference"] == "background-1"
+    assert updated["agents"]["resume_ids"]["claude"] == "background-1"
     assert updated["driver"]["launch_argv"] == [
         "claude",
         "--resume",
-        "manual-1",
+        "background-1",
         "--name",
         "HOOK",
     ]
@@ -5900,6 +5900,12 @@ def test_hook_setup_merges_preserves_and_is_idempotent(monkeypatch, tmp_path):
     ]
     assert any("--subagent start" in command for command in claude_commands)
     assert any("--subagent stop" in command for command in claude_commands)
+    assert "SessionStart" in merged["hooks"]
+    assert any(
+        "--state waiting --driver claude" in handler["command"]
+        for group in merged["hooks"]["SessionStart"]
+        for handler in group["hooks"]
+    )
     assert installer.setup(apply=True)["changes"] == []
     assert installer.verify() == []
     merged["hooks"].pop("Notification")
