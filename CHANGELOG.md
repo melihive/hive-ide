@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.81] - 2026-09-09
+
 ### Fixed
 
 - Terminal titles now always include the IDE host label, including local frames,
