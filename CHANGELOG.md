@@ -4,8 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.80] - 2026-09-09
+
 ### Fixed
 
+- The package release now carries the `1.0.79` mouse-binding repair and
+  visible-pane hook adoption fixes to PyPI after the tag-only `1.0.79` attempt
+  failed before upload.
 - CI now verifies tmux's default `MouseDown1Pane` repair without depending on
   tmux's column spacing in `list-keys`, unblocking the package publish after the
   tag-only `1.0.79` release attempt failed before PyPI upload.
