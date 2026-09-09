@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.82] - 2026-09-09
+
+### Fixed
+
+- Activity markers now prefer the live tmux pane tags over stale inherited
+  process environment, so release/SOP work keeps the correct sidebar icon when a
+  long-lived chat pane was renamed, rebuilt, or adopted in place.
+
 ## [1.0.81] - 2026-09-09
 
 ### Fixed
