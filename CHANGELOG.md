@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.78] - 2026-09-09
+
 ### Fixed
 
 - Removed the frame-level `MouseDown1Pane` override introduced in `1.0.77`.
