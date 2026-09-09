@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- CI now verifies tmux's default `MouseDown1Pane` repair without depending on
+  tmux's column spacing in `list-keys`, unblocking the package publish after the
+  tag-only `1.0.79` release attempt failed before PyPI upload.
+
 ## [1.0.79] - 2026-09-09
 
 ### Fixed
