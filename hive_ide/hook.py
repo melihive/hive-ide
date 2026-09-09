@@ -71,6 +71,51 @@ class IdeHook:
         return {}
 
     @staticmethod
+    def _ide_context_from_environment() -> tuple[str | None, str | None]:
+        """Resolve the IDE workspace/session for a hook event.
+
+        New agent panes inherit explicit `HIVE_IDE_*` variables from the frame, but
+        tmux also has a session-level environment that can stay pinned to the first
+        window created in that server. When the IDE tmux socket marker is present,
+        the tagged tmux window is the authority. Otherwise, explicit environment
+        values are trusted so tests, relayed writes, and one-off invocations running
+        under an unrelated outer tmux pane are not misdirected. This keeps `/clear`
+        and restarted-in-place chats attached to the visible IDE session without
+        rebuilding the pane.
+        """
+        workspace = os.environ.get(IdeHook.ENV_WORKSPACE)
+        session_id = os.environ.get(IdeHook.ENV_SESSION_ID)
+        pane = os.environ.get("TMUX_PANE")
+        if workspace and session_id and not os.environ.get(IdeHook.ENV_TMUX_SOCKET):
+            return workspace, session_id
+        if pane:
+            try:
+                result = subprocess.run(
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane,
+                        "#{@hive_ide_workspace_key}\t#{@hive_ide_session_id}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+            except (OSError, subprocess.SubprocessError):
+                result = None
+            if result is not None and result.returncode == 0:
+                observed_workspace, _, observed_session_id = (
+                    result.stdout.strip().partition("\t")
+                )
+                if observed_workspace and observed_session_id:
+                    return observed_workspace, observed_session_id
+                workspace = workspace or observed_workspace or None
+                session_id = session_id or observed_session_id or None
+        return workspace, session_id
+
+    @staticmethod
     def main(argv: list[str] | None = None) -> int:
         args = argv if argv is not None else sys.argv[1:]
         if "--state-home" in args:
@@ -91,8 +136,7 @@ class IdeHook:
             parser.add_argument("--relayed", action="store_true")
             parser.add_argument("payload", nargs="?")
             parsed = parser.parse_args(args)
-            workspace = os.environ.get(IdeHook.ENV_WORKSPACE)
-            session_id = os.environ.get(IdeHook.ENV_SESSION_ID)
+            workspace, session_id = IdeHook._ide_context_from_environment()
             if not workspace or not session_id:
                 return 0
             payload = {}

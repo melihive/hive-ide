@@ -12,6 +12,10 @@ All notable changes to `hive-ide` will be documented in this file.
   (`select-pane -t = ; send-keys -M`) after the `1.0.77` sidebar mouse
   regression, so refreshing an existing frame repairs a damaged live tmux
   key table instead of merely avoiding the bad binding for new frames.
+- Agent status hooks now prefer the visible tmux pane's immutable
+  `@hive_ide_session_id` over inherited `HIVE_IDE_SESSION_ID`, so a live chat pane
+  whose shell environment is stale still updates and adopts the correct IDE
+  session after `/clear` or an in-place restart.
 
 ## [1.0.78] - 2026-09-09
 

@@ -1727,6 +1727,117 @@ def test_hook_updates_current_driver_when_clear_changes_claude_session(tmp_path,
     ]
 
 
+def test_hook_adopts_visible_tmux_pane_when_ide_env_is_missing(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["claude"]
+    record = store.create_session(
+        name="HOOK",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="HOOK", working_dir=str(workspace), conversation_reference="manual-1"
+        ),
+    )
+    monkeypatch.delenv("HIVE_IDE_WORKSPACE_KEY", raising=False)
+    monkeypatch.delenv("HIVE_IDE_SESSION_ID", raising=False)
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    def fake_run(argv, **kwargs):
+        assert argv == [
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            "%7",
+            "#{@hive_ide_workspace_key}\t#{@hive_ide_session_id}",
+        ]
+        return subprocess.CompletedProcess(
+            argv, 0, f"{store.workspace_key}\t{record['id']}\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "waiting",
+            "--driver",
+            "claude",
+            '{"session_id":"visible-pane-1"}',
+        ]
+    ) == 0
+
+    status = store.read("status", record["id"])
+    assert status["conversation_reference"] == "visible-pane-1"
+    updated = store.find_session(record["id"])
+    assert updated["last_active"] == status["observed_at"]
+    assert updated["driver"]["resume"]["reference"] == "visible-pane-1"
+    assert updated["agents"]["resume_ids"]["claude"] == "visible-pane-1"
+
+
+def test_hook_prefers_visible_tmux_pane_over_stale_session_environment(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["claude"]
+    stale = store.create_session(
+        name="STALE",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="STALE", working_dir=str(workspace), conversation_reference="stale-1"
+        ),
+    )
+    visible = store.create_session(
+        name="VISIBLE",
+        working_dir=workspace,
+        source=_source(),
+        driver=driver.resolve(
+            name="VISIBLE", working_dir=str(workspace), conversation_reference="visible-1"
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", stale["id"])
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-test")
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, f"{store.workspace_key}\t{visible['id']}\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "claude",
+            "--relayed",
+            '{"session_id":"visible-pane-2"}',
+        ]
+    ) == 0
+
+    assert store.read("status", stale["id"]) is None
+    visible_status = store.read("status", visible["id"])
+    assert visible_status["conversation_reference"] == "visible-pane-2"
+    assert store.find_session(stale["id"])["driver"]["resume"]["reference"] == "stale-1"
+    assert (
+        store.find_session(visible["id"])["driver"]["resume"]["reference"]
+        == "visible-pane-2"
+    )
+
+
 def test_hook_does_not_claim_conversation_owned_by_another_session(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1796,6 +1907,7 @@ def test_hook_relay_uses_tmux_server_when_available(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
     monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-test")
     monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setattr("hive_ide.hook.subprocess.run", fake_run)
 
     assert IdeHook.main(
