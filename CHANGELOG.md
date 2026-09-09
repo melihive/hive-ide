@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.79] - 2026-09-09
+
 ### Fixed
 
 - `hive-ide open` now restores tmux's default `MouseDown1Pane` binding
