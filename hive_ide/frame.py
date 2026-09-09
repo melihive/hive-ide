@@ -1464,6 +1464,20 @@ class Frame:
         self.tmux(["set-option", "-g", "focus-events", "on"])
         self.tmux(["set-option", "-s", "extended-keys", "on"])
         self.tmux(["set-option", "-as", "terminal-features", "xterm*:extkeys"])
+        self.tmux(
+            [
+                "bind-key",
+                "-T",
+                "root",
+                "MouseDown1Pane",
+                "select-pane",
+                "-t",
+                "=",
+                "\\;",
+                "send-keys",
+                "-M",
+            ]
+        )
         new_modal = self._module(
             "newmodal",
             [

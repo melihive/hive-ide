@@ -303,6 +303,10 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         root_keys = frame.tmux(["list-keys", "-T", "root"]).stdout
         for key in (" n ", " p ", " l ", " c ", " e ", " a ", " o ", " i ", " g ", " r ", " k "):
             assert key in keys
+        assert (
+            "MouseDown1Pane            select-pane -t = \\; send-keys -M"
+            in root_keys
+        )
         assert "#{@hive_ide_pane},sidebar" not in root_keys
         assert "#{client_width}" in keys
         assert "resize-pane -Z ; select-pane -t .0" in keys

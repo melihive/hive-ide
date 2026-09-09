@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `hive-ide open` now restores tmux's default `MouseDown1Pane` binding
+  (`select-pane -t = ; send-keys -M`) after the `1.0.77` sidebar mouse
+  regression, so refreshing an existing frame repairs a damaged live tmux
+  key table instead of merely avoiding the bad binding for new frames.
+
 ## [1.0.78] - 2026-09-09
 
 ### Fixed
