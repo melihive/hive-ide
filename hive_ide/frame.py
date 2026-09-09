@@ -1464,6 +1464,21 @@ class Frame:
         self.tmux(["set-option", "-g", "focus-events", "on"])
         self.tmux(["set-option", "-s", "extended-keys", "on"])
         self.tmux(["set-option", "-as", "terminal-features", "xterm*:extkeys"])
+        self.tmux(
+            [
+                "bind-key",
+                "-T",
+                "root",
+                "MouseDown1Pane",
+                "if-shell",
+                "-F",
+                "-t",
+                "=",
+                "#{==:#{@hive_ide_pane},sidebar}",
+                'select-pane -t = ; send-keys -t = -l "\\033[<0;#{mouse_x};#{mouse_y}M"',
+                "select-pane -t = ; send-keys -M",
+            ]
+        )
         new_modal = self._module(
             "newmodal",
             [

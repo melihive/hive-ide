@@ -14,6 +14,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Claude `/clear` sessions now stay attached to their IDE session: Claude
   `SessionStart` hooks are installed, and unowned new Claude session IDs
   reported from the active IDE driver pane replace the old resume reference.
+- Sidebar mouse clicks now route through a frame-level tmux binding for Hive
+  sidebar panes, so session switching does not depend on fragile per-pane
+  application mouse mode after terminal, tmux, or resize state changes.
 
 ## [1.0.76] - 2026-08-31
 
