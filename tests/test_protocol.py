@@ -47,7 +47,7 @@ def _term() -> dict:
     )
 
 
-def test_terminal_title_uses_workspace_name_without_ssh_suffix(tmp_path, monkeypatch):
+def test_terminal_title_appends_local_host_name(tmp_path, monkeypatch):
     monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_CLIENT", raising=False)
@@ -57,7 +57,7 @@ def test_terminal_title_uses_workspace_name_without_ssh_suffix(tmp_path, monkeyp
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE"
+    assert frame._terminal_title() == "workspace IDE vivo"
 
 
 def test_terminal_title_appends_configured_ssh_host_name(tmp_path, monkeypatch):

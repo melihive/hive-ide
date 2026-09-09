@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Terminal titles now always include the IDE host label, including local frames,
+  so titles consistently render as `workspace IDE vivo` rather than only appending
+  the host for SSH-opened sessions.
+
 ## [1.0.80] - 2026-09-09
 
 ### Fixed

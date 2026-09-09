@@ -1368,23 +1368,17 @@ class Frame:
 
     def _terminal_title(self) -> str:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
-        host = self._ssh_host_title_suffix()
+        host = self._host_title_suffix()
         if host:
             return f"{workspace} IDE {host}"
         return f"{workspace} IDE"
 
     @classmethod
-    def _ssh_host_title_suffix(cls) -> str | None:
-        if not cls._is_ssh_session():
-            return None
+    def _host_title_suffix(cls) -> str | None:
         override = cls._clean_title_label(os.environ.get("HIVE_IDE_HOST_NAME"))
         if override:
             return override
         return cls._clean_title_label(os.environ.get("HOSTNAME") or os.uname().nodename)
-
-    @staticmethod
-    def _is_ssh_session() -> bool:
-        return bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"))
 
     @staticmethod
     def _clean_title_label(value: str | None) -> str | None:
