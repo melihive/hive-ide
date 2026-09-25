@@ -1569,7 +1569,11 @@ def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
     assert "--workspace-key" in sidebar
     assert "--session-id abc" in sidebar
     assert "#{window_active}" in sidebar
-    assert "grep -qx 1" in sidebar
+    assert "guard=$!" in sidebar
+    assert 'kill "$pid"' in sidebar
+    assert 'wait "$guard"' in sidebar
+    assert '[ "$out" = 1 ]' in sidebar
+    assert "grep -qx 1" not in sidebar
     assert "else sleep 1" in sidebar
 
 

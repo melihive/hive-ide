@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sidebar keep-alive loops now bound their tmux visibility probe, so a wedged
+  tmux server cannot accumulate stuck `display-message` clients and make an IDE
+  frame stop reacting after resize or stale-socket failures.
+
 ## [1.0.82] - 2026-09-09
 
 ### Fixed

@@ -385,13 +385,27 @@ class Frame:
             ],
             interpreter=self._record_python(record),
         )
-        visible = (
-            'tmux display-message -p -t "$TMUX_PANE" "#{window_active}" '
-            "2>/dev/null | grep -qx 1"
-        )
+        visible = self._sidebar_visible_probe()
         return self._interactive_command(
             f"while :; do if {visible}; then {command}; sleep 1; "
             "else sleep 1; fi; done"
+        )
+
+    @staticmethod
+    def _sidebar_visible_probe() -> str:
+        """Bound the tmux visibility poll used by the sidebar keep-alive shell.
+
+        A wedged tmux server must not leave one `display-message` client per sidebar
+        stuck forever. Keep this POSIX-sh compatible; the package runs on Linux and
+        macOS, where GNU `timeout` is not guaranteed.
+        """
+        return (
+            'out=$(tmux display-message -p -t "$TMUX_PANE" "#{window_active}" '
+            "2>/dev/null & pid=$!; "
+            '(sleep 0.25; kill "$pid" 2>/dev/null) & guard=$!; '
+            'wait "$pid" 2>/dev/null; rc=$?; '
+            'kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; '
+            'exit "$rc") && [ "$out" = 1 ]'
         )
 
     @classmethod
