@@ -1368,10 +1368,38 @@ class Frame:
         window_id = self.windows().get(session_id)
         if not window_id:
             return False
-        return (
+        renamed = (
             self.tmux(["rename-window", "-t", window_id, display_name]).returncode
             == 0
         )
+        record = self.store.read("sessions", session_id)
+        if record is not None:
+            # The agent pane's titlebar carries the display name too.
+            self._retitle_panes(window_id, {**record, "name": display_name})
+        return renamed
+
+    def refresh_plan_pane(self, record: dict[str, Any]) -> bool:
+        """Reload the plan pane after the linked plan changes or is cleared."""
+        pane_id = self.role_panes(record["id"]).get("plan")
+        if not pane_id or os.environ.get("TMUX_PANE") == pane_id:
+            return False
+        result = self.tmux(
+            [
+                "respawn-pane",
+                "-k",
+                "-t",
+                pane_id,
+                "-c",
+                self.safe_working_dir(record),
+                "sh",
+                "-c",
+                self._plan_command(record),
+            ]
+        )
+        title = self._plan_title(record)
+        self.tmux(["select-pane", "-T", title, "-t", pane_id])
+        self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_title", title])
+        return result.returncode == 0
 
     def _key_bindings(self) -> dict[str, str | None]:
         settings = self.settings.get("keys") or {}

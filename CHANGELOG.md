@@ -4,8 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The session options rename prompt now has an "also rename driver" checkbox
+  (Tab toggles) that sends `/rename` to the live agent in the same step. It
+  defaults on for Claude and off for Codex, which a mid-turn `/rename` can stop.
+- A "clear plan" session option unlinks the session plan and reloads the plan
+  pane, shown only when a plan is linked.
+
 ### Fixed
 
+- Renaming a session now retitles the agent pane titlebar, not just the window.
+- Changing or clearing a session plan with `plan-set` now reloads the plan pane
+  and its title instead of leaving the previous plan on screen.
 - Sidebar keep-alive loops now bound their tmux visibility probe, so a wedged
   tmux server cannot accumulate stuck `display-message` clients and make an IDE
   frame stop reacting after resize or stale-socket failures.

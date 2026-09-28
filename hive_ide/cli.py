@@ -494,6 +494,7 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, None)
     plan = dict(record.get("plan") or {})
+    previous_path = plan.get("path")
     if args.clear:
         plan = {"path": None, "active_task": None}
     else:
@@ -508,6 +509,8 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
     }
     record["last_active"] = utc_now()
     store.write("sessions", record["id"], record)
+    if record["plan"]["path"] != previous_path:
+        Frame(store, socket=_socket(store, args.tmux_socket)).refresh_plan_pane(record)
     return record
 
 
@@ -1147,6 +1150,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--path")
     plan.add_argument("--active-task")
     plan.add_argument("--clear", action="store_true")
+    plan.add_argument("--tmux-socket")
     plan.set_defaults(handler=cmd_plan_set)
 
     attach = command("attach-conversation")

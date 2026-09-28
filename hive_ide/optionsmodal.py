@@ -61,6 +61,9 @@ class IdeOptionsModal:
         ("driver-rename", "rename driver", "send /rename when agent is idle"),
     ]
     SLEEP_ACTION = ("sleep", "sleep agent", "stop agent, keep session listed")
+    CLEAR_PLAN_ACTION = ("plan-clear", "clear plan", "unlink the session plan")
+    # Claude absorbs a typed /rename mid-turn; other drivers can be interrupted by it.
+    DRIVER_RENAME_DEFAULT = {"claude": True, "codex": False}
 
     @staticmethod
     def _actions(record: dict) -> list[tuple[str, str, str]]:
@@ -161,6 +164,18 @@ class IdeOptionsModal:
                     "--quiet",
                     "driver-rename",
                     f"--session-id={session_id}",
+                    *([f"--name={name}"] if name else []),
+                    *socket_args,
+                ],
+            )
+        if action == "plan-clear":
+            return IdeNewModal._cli(
+                skill_dir,
+                [
+                    "--quiet",
+                    "plan-set",
+                    f"--session-id={session_id}",
+                    "--clear",
                     *socket_args,
                 ],
             )
@@ -241,7 +256,13 @@ class IdeOptionsModal:
         return (found[0], found[2]["id"], found[2]) if found else None
 
     @staticmethod
-    def _draw(record: dict, repo: str, sel: int, rename_value: str = "") -> None:
+    def _draw(
+        record: dict,
+        repo: str,
+        sel: int,
+        rename_value: str = "",
+        driver_too: bool | None = None,
+    ) -> None:
         M = IdeNewModal
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
@@ -264,6 +285,11 @@ class IdeOptionsModal:
             offset += len(group_actions)
         if rename_value:
             o.append(f"\n  {M.DIM}new name:{M.RST} {M.NAME}{rename_value}{M.RST}{M.EL}")
+            if driver_too is not None:
+                box = "[x]" if driver_too else "[ ]"
+                o.append(
+                    f"\n  {box} also rename {driver} {M.DIM}(Tab toggles){M.RST}{M.EL}"
+                )
         o.append(
             f"\n  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
             f" · rename types after selecting rename{M.RST}{M.EL}"
@@ -286,6 +312,8 @@ class IdeOptionsModal:
                 len(session_actions),
             )
             session_actions[rename_index + 1:rename_index + 1] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
+        if (record.get("plan") or {}).get("path"):
+            groups[1][1].append(IdeOptionsModal.CLEAR_PLAN_ACTION)
         if driver != "term":
             maintenance_actions = groups[2][1]
             archive_index = next(
@@ -370,17 +398,25 @@ class IdeOptionsModal:
         return "esc"
 
     @staticmethod
-    def _rename_prompt(fd: int, record: dict, repo: str, sel: int) -> str | None:
+    def _rename_prompt(
+        fd: int, record: dict, repo: str, sel: int
+    ) -> tuple[str, bool] | None:
+        """Return the new name and whether to also send `/rename` to the driver."""
         value = record.get("name") or ""
+        driver = (record.get("driver") or {}).get("id")
+        driver_too = IdeOptionsModal.DRIVER_RENAME_DEFAULT.get(driver)
         while True:
-            IdeOptionsModal._draw(record, repo, sel, value)
+            IdeOptionsModal._draw(record, repo, sel, value, driver_too)
             key = IdeOptionsModal._getkey(fd)
             if key == "esc":
                 return None
             if key == "enter":
                 cleaned = " ".join(value.split())
-                return cleaned if cleaned else None
-            if key in ("bs", "delete", "backspace"):
+                return (cleaned, bool(driver_too)) if cleaned else None
+            if key == "\t":
+                if driver_too is not None:
+                    driver_too = not driver_too
+            elif key in ("bs", "delete", "backspace"):
                 value = value[:-1]
             elif key == "\x15":  # Ctrl-U
                 value = ""
@@ -468,13 +504,20 @@ class IdeOptionsModal:
                 if action == "card":
                     return IdeOptionsModal._popup(skill_dir, repo, session_id, "card")
                 name = None
+                driver_too = False
                 if action == "rename":
-                    name = IdeOptionsModal._rename_prompt(fd, record, repo, sel)
-                    if name is None:
+                    answer = IdeOptionsModal._rename_prompt(fd, record, repo, sel)
+                    if answer is None:
                         continue
+                    name, driver_too = answer
                 ok, detail = IdeOptionsModal._command(
                     skill_dir, session_id, action, name=name
                 )
+                if ok and driver_too:
+                    action = "driver-rename"
+                    ok, detail = IdeOptionsModal._command(
+                        skill_dir, session_id, action, name=name
+                    )
                 if ok:
                     return 0
                 return IdeNewModal._bail(

@@ -175,7 +175,7 @@ def test_options_modal_rename_prompt_accepts_bs_key(monkeypatch):
             "/workspace",
             0,
         )
-        == "OX"
+        == ("OX", False)
     )
 
 
@@ -191,5 +191,51 @@ def test_options_modal_rename_prompt_supports_clear_line(monkeypatch):
             "/workspace",
             0,
         )
-        == "New"
+        == ("New", False)
     )
+
+
+def test_options_modal_rename_driver_checkbox_defaults_by_driver(monkeypatch):
+    monkeypatch.setattr("hive_ide.optionsmodal.IdeOptionsModal._draw", lambda *args: None)
+
+    def prompt(driver: str, keys: list[str]):
+        feed = iter(keys)
+        monkeypatch.setattr(
+            "hive_ide.optionsmodal.IdeOptionsModal._getkey", lambda _fd: next(feed)
+        )
+        return IdeOptionsModal._rename_prompt(
+            0, {"name": "OLD", "driver": {"id": driver}}, "/workspace", 0
+        )
+
+    assert prompt("claude", ["enter"]) == ("OLD", True)
+    assert prompt("codex", ["enter"]) == ("OLD", False)
+    assert prompt("claude", ["\t", "enter"]) == ("OLD", False)
+    assert prompt("codex", ["\t", "enter"]) == ("OLD", True)
+    # Drivers without /rename support never get the checkbox.
+    assert prompt("term", ["\t", "enter"]) == ("OLD", False)
+
+
+def test_options_modal_offers_clear_plan_only_when_linked():
+    expected = ("plan-clear", "clear plan", "unlink the session plan")
+    linked = {"driver": {"id": "claude"}, "plan": {"path": "plans/x.md"}}
+    unlinked = {"driver": {"id": "claude"}, "plan": {"path": None}}
+
+    assert expected in IdeOptionsModal._actions(linked)
+    assert expected not in IdeOptionsModal._actions(unlinked)
+
+
+def test_options_modal_routes_clear_plan_and_named_driver_rename(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "hive_ide.optionsmodal.IdeNewModal._cli",
+        lambda _skill_dir, args: calls.append(args) or (True, ""),
+    )
+    monkeypatch.setattr("hive_ide.optionsmodal.IdeNewModal._tmux_socket", "")
+
+    IdeOptionsModal._command(tmp_path, "sid", "plan-clear")
+    IdeOptionsModal._command(tmp_path, "sid", "driver-rename", name="NEW")
+
+    assert calls == [
+        ["--quiet", "plan-set", "--session-id=sid", "--clear"],
+        ["--quiet", "driver-rename", "--session-id=sid", "--name=NEW"],
+    ]

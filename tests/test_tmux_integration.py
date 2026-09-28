@@ -420,6 +420,29 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             ["display-message", "-p", "-t", alpha_window, "#{window_name}"]
         )
         assert renamed.stdout.strip() == "ALPHA RENAMED"
+        agent_pane = frame.role_panes(alpha["id"])["agent"]
+        agent_title = frame.tmux(
+            ["display-message", "-p", "-t", agent_pane, "#{@hive_ide_title}|#{pane_title}"]
+        )
+        assert agent_title.stdout.strip() == "ALPHA RENAMED|ALPHA RENAMED"
+
+        plan_file = workspace / "alpha-plan.md"
+        plan_file.write_text("# Alpha Plan\n", encoding="utf-8")
+        plan_pane = frame.role_panes(alpha["id"])["plan"]
+
+        def plan_title() -> str:
+            return frame.tmux(
+                ["display-message", "-p", "-t", plan_pane, "#{@hive_ide_title}"]
+            ).stdout.strip()
+
+        plan_args = [*base, "plan-set", f"--session-id={alpha['id']}"]
+        assert main(
+            [*plan_args, f"--path={plan_file}", f"--tmux-socket={socket}"]
+        ) == 0
+        assert plan_title() == "Alpha Plan"
+        assert main([*plan_args, "--clear", f"--tmux-socket={socket}"]) == 0
+        assert plan_title() == "No plan"
+        alpha = store.find_session(alpha["id"])
 
         moved = tmp_path / "moved"
         moved.mkdir()
