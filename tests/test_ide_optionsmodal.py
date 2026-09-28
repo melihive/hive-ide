@@ -239,3 +239,36 @@ def test_options_modal_routes_clear_plan_and_named_driver_rename(monkeypatch, tm
         ["--quiet", "plan-set", "--session-id=sid", "--clear"],
         ["--quiet", "driver-rename", "--session-id=sid", "--name=NEW"],
     ]
+
+
+def test_options_modal_draws_a_record_loaded_the_way_the_popup_loads_it(tmp_path, capsys):
+    # The popup reads sessions through StateIO, which flattens `plan` to a path
+    # string. Drawing must survive that shape, with and without a linked plan.
+    from hive_ide.drivers import bundled_drivers
+    from hive_ide.state_compat import StateIO
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="ALPHA",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "python3", "version": "test"},
+        driver=bundled_drivers()["claude"].resolve(
+            name="ALPHA", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    clear = ("plan-clear", "clear plan", "unlink the session plan")
+
+    loaded = StateIO.find_by_id(store.home, str(workspace), record["id"])[2]
+    IdeOptionsModal._draw(loaded, str(workspace), 0)
+    assert clear not in IdeOptionsModal._actions(loaded)
+
+    record["plan"] = {"path": "plans/x.md", "active_task": None}
+    store.write("sessions", record["id"], record)
+    loaded = StateIO.find_by_id(store.home, str(workspace), record["id"])[2]
+    assert isinstance(loaded["plan"], str)
+    IdeOptionsModal._draw(loaded, str(workspace), 0)
+    assert clear in IdeOptionsModal._actions(loaded)
+    assert "Session options" in capsys.readouterr().out

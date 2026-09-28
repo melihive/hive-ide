@@ -312,7 +312,7 @@ class IdeOptionsModal:
                 len(session_actions),
             )
             session_actions[rename_index + 1:rename_index + 1] = IdeOptionsModal.DRIVER_RENAME_ACTIONS
-        if (record.get("plan") or {}).get("path"):
+        if IdeOptionsModal._linked_plan(record):
             groups[1][1].append(IdeOptionsModal.CLEAR_PLAN_ACTION)
         if driver != "term":
             maintenance_actions = groups[2][1]
@@ -328,6 +328,13 @@ class IdeOptionsModal:
                 IdeOptionsModal.SLEEP_ACTION
             ]
         return groups
+
+    @staticmethod
+    def _linked_plan(record: dict) -> str | None:
+        """The linked plan path, from a store record (dict) or a StateIO one (str)."""
+        plan = record.get("plan")
+        path = plan.get("path") if isinstance(plan, dict) else plan
+        return path if isinstance(path, str) and path else None
 
     @staticmethod
     def _action_rows(record: dict) -> dict[int, int]:

@@ -4,6 +4,12 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- The session options menu opened from the sidebar crashed as soon as it drew,
+  so the popup flashed and closed. 1.0.83 read the linked plan as a mapping,
+  but the menu loads sessions with the plan as a path string.
+
 ## [1.0.83] - 2026-09-28
 
 ### Added
