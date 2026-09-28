@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from importlib.metadata import entry_points
@@ -48,6 +49,7 @@ class CommandDriver:
         resume_cwd_flag: str | None = None,
         name_argv: list[str] | None = None,
         capabilities: tuple[str, ...] = ("launch",),
+        conversation_probe: str | None = None,
     ):
         self.id = driver_id
         self.label = label
@@ -57,6 +59,7 @@ class CommandDriver:
         self.resume_cwd_flag = resume_cwd_flag
         self.name_argv = name_argv or []
         self.capabilities = capabilities
+        self.conversation_probe = conversation_probe
 
     def detect(self) -> DriverAvailability:
         executable = shutil.which(self.command[0])
@@ -94,6 +97,20 @@ class CommandDriver:
         return [*self.name_argv, clean]
 
     def conversation_exists(self, reference: str, working_dir: str) -> bool | None:
+        """Three states: True resumable here, False confirmed gone, None unknown.
+
+        None is never evidence of absence. A missing or unreadable store, an
+        unrecognised reference, or a conversation that lives somewhere this
+        working dir cannot resume it from all answer None, so a caller that
+        drops references acts only on a confirmed False.
+        """
+        try:
+            if self.conversation_probe == "claude":
+                return ConversationProbe.claude(reference, working_dir)
+            if self.conversation_probe == "codex":
+                return ConversationProbe.codex(reference)
+        except OSError:
+            return None
         return None
 
     def translate_status(
@@ -110,6 +127,60 @@ class CommandDriver:
         return {"state": requested_state, "conversation_reference": reference}
 
 
+class ConversationProbe:
+    """Read-only lookups against each agent CLI's own on-disk conversation store."""
+
+    UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+    @staticmethod
+    def claude_root() -> Path:
+        configured = os.environ.get("CLAUDE_CONFIG_DIR")
+        root = Path(configured).expanduser() if configured else Path.home() / ".claude"
+        return root / "projects"
+
+    @staticmethod
+    def claude_slug(working_dir: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "-", working_dir)
+
+    @staticmethod
+    def claude(reference: str, working_dir: str) -> bool | None:
+        if not ConversationProbe.UUID_RE.fullmatch(reference):
+            return None
+        root = ConversationProbe.claude_root()
+        if not root.is_dir():
+            return None
+        name = f"{reference}.jsonl"
+        if (root / ConversationProbe.claude_slug(working_dir) / name).is_file():
+            return True
+        if any(root.glob(f"*/{name}")):
+            # Present, but under another project: `claude --resume` from this
+            # working dir cannot find it, yet it is not gone either.
+            return None
+        return False
+
+    @staticmethod
+    def codex_root() -> Path:
+        configured = os.environ.get("CODEX_HOME")
+        return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+    @staticmethod
+    def codex(reference: str) -> bool | None:
+        # `codex resume` also accepts a session name, which no file lookup can check.
+        if not ConversationProbe.UUID_RE.fullmatch(reference):
+            return None
+        root = ConversationProbe.codex_root()
+        sessions = root / "sessions"
+        if not sessions.is_dir():
+            return None
+        pattern = f"rollout-*-{reference}.jsonl"
+        if any(sessions.glob(f"*/*/*/{pattern}")):
+            return True
+        if any((root / "archived_sessions").glob(pattern)):
+            # Archived rollouts still exist; whether resume accepts them is unverified.
+            return None
+        return False
+
+
 def bundled_drivers() -> dict[str, AgentDriver]:
     shell = os.environ.get("SHELL") or "/bin/sh"
     return {
@@ -121,6 +192,7 @@ def bundled_drivers() -> dict[str, AgentDriver]:
             resume_argv=["claude", "--resume"],
             name_argv=["--name"],
             capabilities=("launch", "resume", "status", "conversation_check"),
+            conversation_probe="claude",
         ),
         "codex": CommandDriver(
             "codex",
@@ -130,6 +202,7 @@ def bundled_drivers() -> dict[str, AgentDriver]:
             resume_argv=["codex", "resume"],
             resume_cwd_flag="-C",
             capabilities=("launch", "resume", "status", "conversation_check"),
+            conversation_probe="codex",
         ),
         "antigravity": CommandDriver(
             "antigravity",
