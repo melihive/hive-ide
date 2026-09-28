@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.84] - 2026-09-28
+
 ### Fixed
 
 - The session options menu opened from the sidebar crashed as soon as it drew,
