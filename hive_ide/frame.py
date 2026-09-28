@@ -14,6 +14,7 @@ from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
+from .conversation import ConversationGuard
 from .errors import HiveIdeError, UsageError
 from .layout import IdeLayout
 from .python_cmd import PythonCommand
@@ -897,7 +898,18 @@ class Frame:
         raw = result.stdout.strip()
         return int(raw) if raw.isdigit() else None
 
+    def prepare_agent_launch(self, record: dict[str, Any]) -> None:
+        """Drop confirmed-gone conversation refs before a driver launches."""
+        try:
+            ConversationGuard(self.store).check(
+                record, working_dir=self.safe_working_dir(record), apply=True
+            )
+        except (HiveIdeError, OSError):
+            # A failed reconcile must never stop a window from opening.
+            pass
+
     def respawn_agent(self, record: dict[str, Any], pane_id: str) -> None:
+        self.prepare_agent_launch(record)
         result = self.tmux(
             [
                 "respawn-pane",
@@ -1214,6 +1226,7 @@ class Frame:
         target = created.stdout.strip()
         if not target:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
+        self.prepare_agent_launch(record)
         agent_command = (
             self._sleeping_agent_command()
             if self._is_sleeping(record)

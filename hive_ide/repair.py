@@ -7,6 +7,7 @@ from typing import Any
 
 from . import SCHEMA_VERSION
 from .agents import AgentResumeState
+from .conversation import ConversationGuard
 from .drivers import DriverRegistry
 from .errors import HiveIdeError
 from .frame import Frame
@@ -62,6 +63,11 @@ class SessionRepair:
                 self.store.write("sessions", session_id, repaired)
 
         self._remove_duplicate_conversation_refs(repaired, actions, warnings, apply=apply)
+        checked = ConversationGuard(self.store, registry=self.registry).check(
+            repaired, working_dir=self.frame.safe_working_dir(repaired), apply=apply
+        )
+        actions.extend(checked["actions"])
+        warnings.extend(checked["warnings"])
         self.refresh_driver(repaired, actions, apply=apply)
 
         source = repaired.get("source") or {}

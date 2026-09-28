@@ -14,11 +14,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
-- The Claude and Codex drivers now really check whether a conversation still
-  exists, instead of always answering "unknown". The check has three outcomes:
-  it exists, it is confirmed gone, or it cannot be determined. Only a confirmed
-  gone answer is acted on, so `attach-conversation` now refuses a Claude
-  transcript or Codex rollout that no longer exists.
+- A session whose saved Claude or Codex conversation no longer exists now
+  starts a fresh conversation when its agent pane opens, instead of a pane
+  that exits on `--resume`. The same check runs in `repair`, whose preview
+  reports the change without writing it. Only a conversation the driver's own
+  store confirms is gone is dropped; an unreadable or unrecognised reference
+  is left alone.
+- An archived Codex conversation is kept and reported with the
+  `codex unarchive <id>` remedy, since Codex refuses to resume it as-is.
+- `attach-conversation` refuses a gone or archived conversation, and a
+  conversation already owned by a session in any other workspace.
 - Renaming a session now retitles the agent pane titlebar, not just the window.
 - Changing or clearing a session plan with `plan-set` now reloads the plan pane
   and its title instead of leaving the previous plan on screen.

@@ -8,6 +8,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 
 PYTEST_TMP_ROOT = Path(tempfile.gettempdir()) / f"pytest-of-{getpass.getuser()}"
 LEAK_PATTERNS = (
@@ -80,3 +82,24 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
         )
     time.sleep(0.2)
     _kill_processes([pid for pid, _command in _pytest_tmp_processes()])
+
+
+@pytest.fixture(autouse=True)
+def _isolated_agent_stores(tmp_path_factory):
+    """Keep conversation probes off this machine's real Claude and Codex stores.
+
+    Both point at a dir that does not exist, so every probe answers unknown
+    unless a test builds a store of its own. Plain os.environ, not monkeypatch:
+    requesting monkeypatch here would reorder its teardown after other files'
+    cleanup fixtures and leave their patches active during cleanup.
+    """
+    missing = tmp_path_factory.mktemp("agent-stores") / "absent"
+    keys = {"CLAUDE_CONFIG_DIR": missing / "claude", "CODEX_HOME": missing / "codex"}
+    saved = {key: os.environ.get(key) for key in keys}
+    os.environ.update({key: str(value) for key, value in keys.items()})
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value

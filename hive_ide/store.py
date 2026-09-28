@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import SCHEMA_VERSION
 from .agents import AgentResumeState
@@ -255,10 +255,14 @@ class StateStore:
         another session's chat, so callers must treat an owner as a conflict.
         Archived sessions are excluded so users can intentionally adopt an old
         conversation after archiving its IDE wrapper.
+
+        Every workspace under the state home is searched, this one first:
+        conversation ids are global to the driver, so an owner in another
+        workspace is just as much a conflict.
         """
         if not driver_id or not reference:
             return None
-        for record in self.list("sessions"):
+        for record in self._sessions_in_every_workspace():
             if record.get("id") == exclude_session_id:
                 continue
             driver = record.get("driver") if isinstance(record, dict) else None
@@ -275,6 +279,42 @@ class StateStore:
             if isinstance(resume_ids, dict) and resume_ids.get(driver_id) == reference:
                 return record
         return None
+
+    def _sessions_in_every_workspace(self) -> Iterator[dict[str, Any]]:
+        yield from self.list("sessions")
+        try:
+            others = sorted(
+                path
+                for path in (self.home / "workspaces").iterdir()
+                if path.is_dir() and path.name != self.workspace_hash
+            )
+        except OSError:
+            return
+        for workspace_dir in others:
+            try:
+                paths = sorted((workspace_dir / "sessions").glob("*.json"))
+            except OSError:
+                continue
+            for path in paths:
+                record = self._read_foreign_session(path)
+                if record is not None:
+                    yield record
+
+    @staticmethod
+    def _read_foreign_session(path: Path) -> dict[str, Any] | None:
+        """Read another workspace's session for ownership checks only.
+
+        `read_path` rejects any record whose workspace differs from this store's,
+        so foreign records get a lighter check: an object at the current schema.
+        An unreadable file is skipped, which only loses the extra protection.
+        """
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
+            return None
+        return data
 
     def create_session(
         self,

@@ -20,6 +20,28 @@ class DriverAvailability:
     detail: str = ""
 
 
+class ConversationState:
+    """Where a driver conversation stands, as seen from one working dir."""
+
+    EXISTS = "exists"  # resumable from the working dir
+    GONE = "gone"  # the driver's own store confirms it no longer exists
+    UNKNOWN = "unknown"  # no answer; never evidence of absence
+    ARCHIVED = "archived"  # exists, but the driver refuses to resume it as-is
+
+
+@dataclass(frozen=True)
+class ConversationStatus:
+    state: str
+    detail: str = ""
+
+    def exists(self) -> bool | None:
+        if self.state == ConversationState.EXISTS:
+            return True
+        if self.state == ConversationState.GONE:
+            return False
+        return None
+
+
 class AgentDriver(Protocol):
     id: str
     label: str
@@ -97,21 +119,23 @@ class CommandDriver:
         return [*self.name_argv, clean]
 
     def conversation_exists(self, reference: str, working_dir: str) -> bool | None:
-        """Three states: True resumable here, False confirmed gone, None unknown.
+        """True resumable here, False confirmed gone, None for anything else.
 
-        None is never evidence of absence. A missing or unreadable store, an
-        unrecognised reference, or a conversation that lives somewhere this
-        working dir cannot resume it from all answer None, so a caller that
-        drops references acts only on a confirmed False.
+        None is never evidence of absence, so a caller that drops references
+        acts only on a confirmed False. `conversation_status` also tells an
+        archived conversation apart from an unknown one.
         """
+        return self.conversation_status(reference, working_dir).exists()
+
+    def conversation_status(self, reference: str, working_dir: str) -> ConversationStatus:
         try:
             if self.conversation_probe == "claude":
-                return ConversationProbe.claude(reference, working_dir)
+                return ConversationProbe.claude(reference)
             if self.conversation_probe == "codex":
                 return ConversationProbe.codex(reference)
-        except OSError:
-            return None
-        return None
+        except OSError as exc:
+            return ConversationStatus(ConversationState.UNKNOWN, detail=str(exc))
+        return ConversationStatus(ConversationState.UNKNOWN)
 
     def translate_status(
         self, payload: dict[str, Any], requested_state: str
@@ -139,24 +163,19 @@ class ConversationProbe:
         return root / "projects"
 
     @staticmethod
-    def claude_slug(working_dir: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]", "-", working_dir)
-
-    @staticmethod
-    def claude(reference: str, working_dir: str) -> bool | None:
+    def claude(reference: str) -> ConversationStatus:
+        # `claude --resume <id>` finds a transcript from any working dir, not only
+        # the project it was recorded under (verified with Claude Code 2026-09),
+        # so any project dir holding it means it exists.
+        unknown = ConversationStatus(ConversationState.UNKNOWN)
         if not ConversationProbe.UUID_RE.fullmatch(reference):
-            return None
+            return unknown
         root = ConversationProbe.claude_root()
         if not root.is_dir():
-            return None
-        name = f"{reference}.jsonl"
-        if (root / ConversationProbe.claude_slug(working_dir) / name).is_file():
-            return True
-        if any(root.glob(f"*/{name}")):
-            # Present, but under another project: `claude --resume` from this
-            # working dir cannot find it, yet it is not gone either.
-            return None
-        return False
+            return unknown
+        if any(root.glob(f"*/{reference}.jsonl")):
+            return ConversationStatus(ConversationState.EXISTS)
+        return ConversationStatus(ConversationState.GONE)
 
     @staticmethod
     def codex_root() -> Path:
@@ -164,21 +183,26 @@ class ConversationProbe:
         return Path(configured).expanduser() if configured else Path.home() / ".codex"
 
     @staticmethod
-    def codex(reference: str) -> bool | None:
+    def codex(reference: str) -> ConversationStatus:
+        unknown = ConversationStatus(ConversationState.UNKNOWN)
         # `codex resume` also accepts a session name, which no file lookup can check.
         if not ConversationProbe.UUID_RE.fullmatch(reference):
-            return None
+            return unknown
         root = ConversationProbe.codex_root()
         sessions = root / "sessions"
         if not sessions.is_dir():
-            return None
+            return unknown
         pattern = f"rollout-*-{reference}.jsonl"
         if any(sessions.glob(f"*/*/*/{pattern}")):
-            return True
+            return ConversationStatus(ConversationState.EXISTS)
         if any((root / "archived_sessions").glob(pattern)):
-            # Archived rollouts still exist; whether resume accepts them is unverified.
-            return None
-        return False
+            # Verified against codex-cli 0.157: resume refuses an archived
+            # session until `codex unarchive <id>` restores it.
+            return ConversationStatus(
+                ConversationState.ARCHIVED,
+                detail=f"run `codex unarchive {reference}` to resume it",
+            )
+        return ConversationStatus(ConversationState.GONE)
 
 
 def bundled_drivers() -> dict[str, AgentDriver]:

@@ -15,6 +15,8 @@ from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .adoption import AdoptableConversation, ConversationAdopter
 from .agents import AgentResumeState
 from .config import configured_registry, load_config, normalized_snapshot
+from .conversation import ConversationGuard
+from .drivers import ConversationState
 from .errors import HiveIdeError, UsageError
 from .environments import EnvironmentManager
 from .frame import Frame
@@ -530,11 +532,19 @@ def cmd_attach_conversation(args: argparse.Namespace) -> dict[str, Any]:
             f"Driver {driver_id!r} conversation {args.reference!r} is already "
             f"attached to session {owner.get('name')!r} ({owner.get('id')})."
         )
-    driver = configured_registry(config).get(driver_id)
-    exists = driver.conversation_exists(args.reference, record["working_dir"])
-    if exists is False:
+    registry = configured_registry(config)
+    driver = registry.get(driver_id)
+    status = ConversationGuard(store, registry=registry).status(
+        driver_id, args.reference, record["working_dir"]
+    )
+    if status.state == ConversationState.GONE:
         raise UsageError(
             f"Driver {driver_id!r} cannot find conversation {args.reference!r}."
+        )
+    if status.state == ConversationState.ARCHIVED:
+        raise UsageError(
+            f"Driver {driver_id!r} conversation {args.reference!r} is archived; "
+            f"{status.detail}."
         )
     agents = AgentResumeState(record)
     agents.remember(driver_id, args.reference)

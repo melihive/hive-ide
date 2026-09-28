@@ -46,9 +46,10 @@ def test_claude_without_a_store_is_unknown(home):
     assert _claude() is None
 
 
-def test_claude_transcript_under_another_project_is_unknown_not_gone(home):
+def test_claude_transcript_under_another_project_exists(home):
+    # `claude --resume <id>` finds a transcript from any working dir.
     _touch(home / ".claude/projects/-work-elsewhere" / f"{REF}.jsonl")
-    assert _claude() is None
+    assert _claude() is True
 
 
 def test_claude_non_uuid_reference_is_unknown(home):
@@ -69,7 +70,7 @@ def test_claude_unreadable_store_is_unknown(home, monkeypatch):
     def boom(*_args, **_kwargs):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(Path, "is_file", boom)
+    monkeypatch.setattr(Path, "glob", boom)
     assert _claude() is None
 
 
@@ -109,15 +110,3 @@ def test_drivers_without_a_probe_are_unknown(home):
     drivers = bundled_drivers()
     assert drivers["term"].conversation_exists(REF, WORKDIR) is None
     assert drivers["antigravity"].conversation_exists(REF, WORKDIR) is None
-
-
-def test_claude_slug_replaces_every_non_alphanumeric(home):
-    _touch(home / ".claude/projects/-work-my-app-v2" / f"{REF}.jsonl")
-    assert _claude(working_dir="/work/my.app_v2") is True
-
-
-def test_claude_wrong_slug_degrades_to_unknown_never_gone(home):
-    # Should Claude Code change its slug rule, the transcript is still found
-    # under some project and must not be reported as gone.
-    _touch(home / ".claude/projects/-work-my.app_v2" / f"{REF}.jsonl")
-    assert _claude(working_dir="/work/my.app_v2") is None
