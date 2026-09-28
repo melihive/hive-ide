@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.83] - 2026-09-28
+
 ### Added
 
 - The session options rename prompt now has an "also rename driver" checkbox
