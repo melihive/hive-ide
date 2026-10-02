@@ -35,6 +35,7 @@ WORKSPACE_MUTATIONS = frozenset(
     {
         "archive",
         "adopt",
+        "plan",
         "attach-conversation",
         "clear-error",
         "create",
@@ -584,15 +585,35 @@ def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     record = _session(store, args.session_id, None)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    window_id = frame.windows().get(record["id"])
+    if window_id and frame.caller_location(window_id) is not False:
+        raise UsageError(
+            f"force-rebuild would kill the window this command runs in ({window_id}); "
+            "run it from another pane or a plain terminal outside the session window."
+        )
     repair = SessionRepair(
         store, frame, registry=configured_registry(config)
     ).repair(record)
     if not repair["ok"]:
-        return {"session_id": record["id"], "rebuilt": False, "repair": repair}
+        return {
+            "session_id": record["id"],
+            "rebuilt": False,
+            "deferred": False,
+            "repair": repair,
+        }
     record = _session(store, args.session_id, None)
-    frame.rebuild(record)
+    result = frame.rebuild(record)
+    if result.get("rebuilt"):
+        # A forced rebuild from the record satisfies any deferred rebuild owed.
+        SessionRepair.clear_deferred_rebuild(store, record)
     frame.bind_keys()
-    return {"session_id": record["id"], "rebuilt": True, "repair": repair}
+    return {
+        "session_id": record["id"],
+        "rebuilt": bool(result.get("rebuilt")),
+        "deferred": bool(result.get("deferred")),
+        "window": result.get("window"),
+        "repair": repair,
+    }
 
 
 def cmd_relayout(args: argparse.Namespace) -> dict[str, Any]:
@@ -818,8 +839,38 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     else:
         record.pop("handoff", None)
     store.write("sessions", record["id"], record)
-    Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
-    return record
+    rebuild = Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
+    if rebuild.get("deferred"):
+        # The record is switched; the window still runs the previous driver. Leave
+        # a marker naming the requested driver: a repair run from outside the
+        # window rebuilds on the strength of that marker while the record still
+        # names this driver (the one marker-driven rebuild; see SessionRepair).
+        SessionRepair.mark_deferred_rebuild(
+            store,
+            record,
+            reason="driver-switch",
+            op_id=StateStore.new_session_id()[:12],
+            requested_driver=args.driver,
+        )
+        command = f"hive-ide repair --session-id {record['id']}"
+        if args.tmux_socket:
+            command += f" --tmux-socket {args.tmux_socket}"
+        return {
+            **record,
+            "rebuild": {
+                **rebuild,
+                "next_step": (
+                    f"run `{command}` from outside the session window (another "
+                    "pane or a plain terminal) to relaunch the new driver"
+                ),
+            },
+        }
+    if rebuild.get("rebuilt"):
+        # The window was just rebuilt from the record: any rebuild still owed by
+        # an earlier deferral (a previous inside switch included) is satisfied,
+        # and a stale driver-switch marker would otherwise rebuild it again.
+        SessionRepair.clear_deferred_rebuild(store, record)
+    return {**record, "rebuild": rebuild}
 
 
 def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:

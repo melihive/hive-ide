@@ -153,25 +153,198 @@ class Frame:
                 rows[session_id] = window_id
         return rows
 
-    def role_panes(self, session_id: str) -> dict[str, str]:
+    def role_panes(self, session_id: str) -> dict[str, str] | None:
+        """Role -> pane id for the session's window.
+
+        `{}` means the window is absent or carries no tagged panes. `None` means the
+        panes could not be observed (`list-panes` failed); callers must treat that as
+        unknown and never destroy anything on the strength of it.
+        """
         window_id = self.windows().get(session_id)
         if not window_id:
             return {}
         return self._role_panes_in_window(window_id)
 
-    def pane_hive_ide_env(self, pane_id: str) -> dict[str, str]:
+    # -- caller identity ---------------------------------------------------
+    #
+    # Three environment inputs describe where the calling process lives:
+    # `TMUX_PANE` (the pane, set by tmux), `TMUX` (`<socket-path>,<pid>,<session>`,
+    # set by tmux) and the IDE marker `HIVE_IDE_TMUX_SOCKET` (the `-L` name the
+    # frame spawned the pane with). A pane id is unique only within one server, so
+    # the pane means nothing until the server is known. Every verdict below is
+    # tri-state and fails CLOSED: incomplete or self-contradictory evidence is
+    # `None`, never "outside", because "outside" is what authorizes a kill.
+
+    @staticmethod
+    def caller_pane() -> str | None:
+        """The tmux pane this process runs in, if any (`$TMUX_PANE`)."""
+        return os.environ.get("TMUX_PANE") or None
+
+    def socket_path(self) -> str:
+        """The socket path `tmux -L <self.socket>` resolves to for this process."""
+        base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+        return os.path.join(base, f"tmux-{os.getuid()}", self.socket)
+
+    @staticmethod
+    def tmux_var_socket_path(value: str | None) -> str | None:
+        """The socket path from a well-formed `$TMUX` (`<abs-path>,<pid>,<session>`).
+
+        Anything else — a missing field, a non-numeric pid or session, a relative
+        or empty path — is malformed and yields None: malformed evidence is
+        unknown, never a claim about which server the caller is on.
+        """
+        if not value:
+            return None
+        parts = value.split(",")
+        if len(parts) != 3:
+            return None
+        path, pid, session = parts
+        if not path or not os.path.isabs(path) or not pid.isdigit() or not session.isdigit():
+            return None
+        return path
+
+    def _tmux_var_verdict(self) -> bool | None:
+        """Does `$TMUX` name this server? `None` when absent or malformed."""
+        path = self.tmux_var_socket_path(os.environ.get("TMUX"))
+        if path is None:
+            return None
+        expected = self.socket_path()
+        if os.path.normpath(path) == os.path.normpath(expected):
+            return True
+        try:
+            return os.path.realpath(path) == os.path.realpath(expected)
+        except OSError:
+            return None
+
+    def caller_server(self) -> bool | None:
+        """Is the caller on THIS frame's tmux server? Tri-state.
+
+        `False` only when there is no tmux evidence at all (a plain terminal, a
+        daemon) or when the marker and a well-formed `$TMUX` BOTH name a different
+        server. `True` only when the evidence present agrees the caller is on this
+        server. Anything else — a pane with no server evidence, a marker without
+        `$TMUX` that names another server, a marker and `$TMUX` that disagree, a
+        `$TMUX` that does not parse — is `None`.
+        """
+        pane = self.caller_pane()
+        marker = os.environ.get("HIVE_IDE_TMUX_SOCKET") or None
+        tmux = os.environ.get("TMUX") or None
+        if not pane and not marker and not tmux:
+            return False
+        by_marker = (marker == self.socket) if marker else None
+        by_tmux = self._tmux_var_verdict() if tmux else None
+        if tmux and by_tmux is None:
+            # Present but malformed: evidence that cannot be read is not evidence
+            # of another server, and it leaves the marker unconfirmed.
+            return None
+        if by_marker is None and by_tmux is None:
+            return None
+        if by_marker is None:
+            return True if by_tmux else None
+        if by_tmux is None:
+            return True if by_marker else None
+        if by_marker and by_tmux:
+            return True
+        if not by_marker and not by_tmux:
+            return False
+        return None
+
+    def pane_is_caller(self, pane_id: str) -> bool | None:
+        """Is `pane_id` the pane this process runs in? Tri-state.
+
+        Destructive pane helpers act only on an exact `False`.
+        """
+        server = self.caller_server()
+        if server is False:
+            return False
+        pane = self.caller_pane()
+        if server is None or not pane:
+            return None
+        return pane == pane_id
+
+    def pane_ids(self, window_id: str) -> list[str] | None:
+        """Every pane id in the window, or `None` when they cannot be observed."""
+        result = self.tmux(["list-panes", "-t", window_id, "-F", "#{pane_id}"])
+        if result.returncode != 0:
+            return None
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def caller_location(self, window_id: str) -> bool | None:
+        """Is the caller inside `window_id`? Tri-state.
+
+        `False` is a verdict: the caller is provably outside — not in tmux at all,
+        on a server that both the marker and `$TMUX` say is a different one, or in
+        a listed pane of some other window on this server. `True` is a verdict the
+        other way. `None` covers everything that cannot be settled: partial or
+        conflicting server evidence, a server match without a pane id, or a
+        window whose panes could not be listed. A destructive caller treats `None`
+        as "possibly inside".
+        """
+        server = self.caller_server()
+        if server is False:
+            return False
+        caller = self.caller_pane()
+        if server is None or not caller:
+            return None
+        panes = self.pane_ids(window_id)
+        if panes is None:
+            return None
+        return caller in panes
+
+    def caller_in_window(self, window_id: str) -> bool:
+        """True only when the caller pane is listed in `window_id` on this server."""
+        return self.caller_location(window_id) is True
+
+    def pane_hive_ide_env(self, pane_id: str) -> dict[str, str] | None:
+        """The `HIVE_IDE_*` environment of the pane's own root process.
+
+        The pane's identity is what tmux spawned it with: the `-e` values live in
+        the environment of `#{pane_pid}`, the `sh -c` wrapper. Descendants are
+        not evidence — an agent runs background jobs that drop or override
+        `HIVE_IDE_SESSION_ID` for their own subprocesses, so a deeper process
+        can both mask a genuine mismatch of the pane and fake one on a healthy
+        pane. The root's environ is therefore the answer whenever it is
+        readable, HIVE_IDE_ keys or not. Only when it cannot be read do the
+        root's DIRECT children stand in, in pid order and never deeper: the
+        first with an IDE key answers, else `{}` if any was readable.
+
+        `{}` means an environment was read and carries no IDE identity. `None`
+        means nothing could be observed: the pane's pid did not resolve, or
+        neither the root nor any direct child had a readable environment.
+        """
         pid = self._pane_pid(pane_id)
         if pid is None:
-            return {}
-        for candidate in reversed(self._process_tree(pid)):
-            env = self._process_env(candidate)
-            if any(key.startswith("HIVE_IDE_") for key in env):
-                return {
-                    key: value
-                    for key, value in env.items()
-                    if key.startswith("HIVE_IDE_")
-                }
-        return {}
+            return None
+        root = self._process_env(pid)
+        if root:
+            return self._hive_ide_keys(root)
+        readable = False
+        for child in sorted(self._child_pids(pid)):
+            env = self._process_env(child)
+            if not env:
+                continue
+            readable = True
+            identity = self._hive_ide_keys(env)
+            if identity:
+                return identity
+        return {} if readable else None
+
+    @staticmethod
+    def _hive_ide_keys(env: dict[str, str]) -> dict[str, str]:
+        return {key: value for key, value in env.items() if key.startswith("HIVE_IDE_")}
+
+    @staticmethod
+    def _child_pids(pid: int) -> list[int]:
+        """Direct children of `pid` (from procfs), unordered; `[]` when unreadable."""
+        children = Path(f"/proc/{pid}/task/{pid}/children")
+        try:
+            return [
+                int(item)
+                for item in children.read_text(encoding="utf-8").split()
+                if item.isdigit()
+            ]
+        except OSError:
+            return []
 
     def _pane_pid(self, pane_id: str) -> int | None:
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
@@ -191,16 +364,7 @@ class Frame:
                 continue
             seen.add(current)
             ordered.append(current)
-            children = Path(f"/proc/{current}/task/{current}/children")
-            try:
-                child_ids = [
-                    int(item)
-                    for item in children.read_text(encoding="utf-8").split()
-                    if item.isdigit()
-                ]
-            except OSError:
-                child_ids = []
-            stack.extend(child_ids)
+            stack.extend(Frame._child_pids(current))
         return ordered
 
     @staticmethod
@@ -220,7 +384,7 @@ class Frame:
                 continue
         return env
 
-    def _role_panes_in_window(self, window_id: str) -> dict[str, str]:
+    def _role_panes_in_window(self, window_id: str) -> dict[str, str] | None:
         result = self.tmux(
             [
                 "list-panes",
@@ -231,7 +395,9 @@ class Frame:
             ]
         )
         if result.returncode != 0:
-            return {}
+            # Unobservable is not "no panes": a failed listing must never read as
+            # "every role is missing" and license a rebuild.
+            return None
         return {
             role: pane_id
             for line in result.stdout.splitlines()
@@ -310,7 +476,7 @@ class Frame:
                 break
             if not changed:
                 break
-        return self._role_panes_in_window(window_id)
+        return self._role_panes_in_window(window_id) or {}
 
     def _module(
         self, module: str, args: list[str], *, interpreter: str | None = None
@@ -768,8 +934,12 @@ class Frame:
     ) -> dict[str, Any]:
         path = self.plan_path(record)
         line = self.plan_focus_line(path) if focus else None
-        pane_id = self.role_panes(record["id"]).get("plan")
-        if pane_id and os.environ.get("TMUX_PANE") != pane_id:
+        pane_id = (self.role_panes(record["id"]) or {}).get("plan")
+        # Steering a live micro is harmless, so it only needs "not provably the
+        # caller's pane"; the respawn below kills the pane, so it needs a settled
+        # "not the caller's pane" and otherwise falls back to a terminal editor.
+        verdict = self.pane_is_caller(pane_id) if pane_id else None
+        if pane_id and verdict is not True:
             if self._pane_has_micro(pane_id):
                 self._send_micro_command(pane_id, "set readonly true")
                 if focus:
@@ -781,6 +951,7 @@ class Frame:
                     "line": line,
                     "opened": "plan-pane",
                 }
+        if pane_id and verdict is False:
             result = self.tmux(
                 [
                     "respawn-pane",
@@ -789,6 +960,7 @@ class Frame:
                     pane_id,
                     "-c",
                     self.safe_working_dir(record),
+                    *self._environment(record),
                     "sh",
                     "-c",
                     self._plan_command(record, line=line),
@@ -823,13 +995,21 @@ class Frame:
         argv = list(driver.get("launch_argv") or [])
         if not argv:
             raise UsageError("The session has no agent command to resume.")
-        pane_id = self.role_panes(record["id"]).get("agent")
-        if pane_id and os.environ.get("TMUX_PANE") != pane_id:
+        pane_id = (self.role_panes(record["id"]) or {}).get("agent")
+        verdict = self.pane_is_caller(pane_id) if pane_id else None
+        if pane_id and verdict is not True:
             current = self.tmux(
                 ["display-message", "-p", "-t", pane_id, "#{pane_current_command}"]
             ).stdout.strip()
             if self.is_shell_agent_pane(record, current):
-                self.respawn_agent(record, pane_id)
+                if not self.respawn_agent(record, pane_id):
+                    # Relaunching kills the pane's shell, which may be this very
+                    # terminal: the caller's location is not settled.
+                    raise UsageError(
+                        "The agent pane is idle but this command may be running "
+                        "inside it; run `hive-ide chat` from another pane or a "
+                        "plain terminal to relaunch the agent."
+                    )
                 self._clear_consumed_handoff(record)
                 self.clear_sleep(record)
                 self.tmux(["select-pane", "-t", pane_id])
@@ -888,7 +1068,7 @@ class Frame:
         return driver.get("id") != "term" and Path(current_command).name in cls.SHELL_COMMANDS
 
     def agent_pane_command(self, record: dict[str, Any]) -> str | None:
-        pane_id = self.role_panes(record["id"]).get("agent")
+        pane_id = (self.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             return None
         result = self.tmux(
@@ -899,7 +1079,7 @@ class Frame:
         return result.stdout.strip()
 
     def agent_pane_pid(self, record: dict[str, Any]) -> int | None:
-        pane_id = self.role_panes(record["id"]).get("agent")
+        pane_id = (self.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             return None
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
@@ -918,7 +1098,13 @@ class Frame:
             # A failed reconcile must never stop a window from opening.
             pass
 
-    def respawn_agent(self, record: dict[str, Any], pane_id: str) -> None:
+    def respawn_agent(self, record: dict[str, Any], pane_id: str) -> bool:
+        """Relaunch the driver in the agent pane.
+
+        False, and nothing killed, unless the pane is provably not the caller's.
+        """
+        if self.pane_is_caller(pane_id) is not False:
+            return False
         self.prepare_agent_launch(record)
         result = self.tmux(
             [
@@ -928,6 +1114,7 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
+                *self._environment(record),
                 "sh",
                 "-c",
                 self._agent_command(record),
@@ -935,12 +1122,13 @@ class Frame:
         )
         if result.returncode != 0:
             raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
+        return True
 
     def sleep_agent(self, record: dict[str, Any]) -> dict[str, Any]:
         driver = record.get("driver") or {}
         if driver.get("id") == "term":
             raise UsageError("Terminal sessions do not have an agent to sleep.")
-        pane_id = self.role_panes(record["id"]).get("agent")
+        pane_id = (self.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             return {
                 "session_id": record["id"],
@@ -974,9 +1162,40 @@ class Frame:
             "memory_released": True,
         }
 
+    def sidebar_refresh_target(self, record: dict[str, Any]) -> str | None:
+        """The sidebar pane that a refresh would respawn, or None when no respawn
+        is needed or allowed. Read-only, so a caller can announce the respawn
+        before `refresh_sidebar_if_needed` performs it."""
+        pane_id = (self.role_panes(record["id"]) or {}).get("sidebar")
+        if not pane_id or self.pane_is_caller(pane_id) is not False:
+            return None
+        if not self._sidebar_needs_refresh(pane_id, record):
+            return None
+        return pane_id
+
     def refresh_sidebar_if_needed(self, record: dict[str, Any]) -> bool:
-        pane_id = self.role_panes(record["id"]).get("sidebar")
-        if not pane_id or not self._sidebar_needs_refresh(pane_id, record):
+        pane_id = self.sidebar_refresh_target(record)
+        if not pane_id:
+            return False
+        return self.respawn_role_pane(record, "sidebar", pane_id)
+
+    def respawn_role_pane(
+        self, record: dict[str, Any], role: str, pane_id: str
+    ) -> bool:
+        """Relaunch one sidebar/plan pane in place, in the session's own environment.
+
+        The pane keeps its id and position; only its process is replaced, and the
+        replacement is spawned with this record's `HIVE_IDE_*` variables rather
+        than whatever the tmux session environment inherited from the first window.
+        Returns False (does nothing) unless the pane is provably not the caller's
+        own and the role has an in-place command.
+        """
+        commands = {
+            "sidebar": self._sidebar_command,
+            "plan": self._plan_command,
+        }
+        builder = commands.get(role)
+        if builder is None or self.pane_is_caller(pane_id) is not False:
             return False
         result = self.tmux(
             [
@@ -986,16 +1205,22 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
+                *self._environment(record),
                 "sh",
                 "-c",
-                self._sidebar_command(record),
+                builder(record),
             ]
         )
         if result.returncode != 0:
-            raise HiveIdeError(result.stderr.strip() or "Could not refresh the sidebar pane.")
-        self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", "sidebar"])
-        self._tag_sidebar_source(pane_id, record)
-        self.tmux(["select-pane", "-T", self._pane_titles(record)["sidebar"], "-t", pane_id])
+            raise HiveIdeError(
+                result.stderr.strip() or f"Could not respawn the {role} pane."
+            )
+        self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", role])
+        if role == "sidebar":
+            self._tag_sidebar_source(pane_id, record)
+        title = self._pane_titles(record)[role]
+        self.tmux(["select-pane", "-T", title, "-t", pane_id])
+        self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_title", title])
         return True
 
     def _sidebar_needs_refresh(self, pane_id: str, record: dict[str, Any]) -> bool:
@@ -1048,7 +1273,7 @@ class Frame:
             raise UsageError(
                 "Interactive driver rename is currently supported only for Claude and Codex."
             )
-        pane_id = self.role_panes(record["id"]).get("agent")
+        pane_id = (self.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             raise UsageError("The session has no live agent pane to rename.")
         result = self.tmux(
@@ -1331,8 +1556,31 @@ class Frame:
         self.tmux(["select-pane", "-t", pane_target])
         return True
 
-    def rebuild(self, record: dict[str, Any]) -> None:
+    def rebuild(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Replace the session's window with one built from its record.
+
+        Returns `{"rebuilt", "deferred", "reason", "window"}`. A rebuild kills the
+        old window, so when the calling process lives in one of its panes (the
+        Hive skill runs repair from the agent pane) nothing happens and the result
+        is `deferred`: the caller must run the rebuild from outside the window.
+        """
         existing = self.windows().get(record["id"])
+        if existing:
+            location = self.caller_location(existing)
+            if location is True:
+                return {
+                    "rebuilt": False,
+                    "deferred": True,
+                    "reason": "caller-inside-window",
+                    "window": existing,
+                }
+            if location is None:
+                return {
+                    "rebuilt": False,
+                    "deferred": True,
+                    "reason": "caller-location-unknown",
+                    "window": existing,
+                }
         previous_index = None
         selected = False
         active_before = self.tmux(
@@ -1350,7 +1598,14 @@ class Frame:
             )
         replacement = self.build(record)
         if existing:
-            self.tmux(["kill-window", "-t", existing])
+            killed = self.tmux(["kill-window", "-t", existing])
+            if killed.returncode != 0:
+                raise HiveIdeError(
+                    f"Built replacement window {replacement} for {record['name']} but "
+                    f"could not kill the old window {existing}: "
+                    f"{killed.stderr.strip() or 'kill-window failed'}. Both windows "
+                    "are still open; close the old one by hand."
+                )
         if previous_index and replacement:
             current_index = self.tmux(
                 ["display-message", "-p", "-t", replacement, "#{window_index}"]
@@ -1380,6 +1635,12 @@ class Frame:
             self.tmux(["send-keys", "-t", f"{replacement}.1", "C-l"])
             if active_before:
                 self.tmux(["select-pane", "-t", active_before])
+        return {
+            "rebuilt": True,
+            "deferred": False,
+            "reason": None,
+            "window": replacement or None,
+        }
 
     def close(self, session_id: str) -> bool:
         window_id = self.windows().get(session_id)
@@ -1403,26 +1664,13 @@ class Frame:
 
     def refresh_plan_pane(self, record: dict[str, Any]) -> bool:
         """Reload the plan pane after the linked plan changes or is cleared."""
-        pane_id = self.role_panes(record["id"]).get("plan")
-        if not pane_id or os.environ.get("TMUX_PANE") == pane_id:
+        pane_id = (self.role_panes(record["id"]) or {}).get("plan")
+        if not pane_id or self.pane_is_caller(pane_id) is not False:
             return False
-        result = self.tmux(
-            [
-                "respawn-pane",
-                "-k",
-                "-t",
-                pane_id,
-                "-c",
-                self.safe_working_dir(record),
-                "sh",
-                "-c",
-                self._plan_command(record),
-            ]
-        )
-        title = self._plan_title(record)
-        self.tmux(["select-pane", "-T", title, "-t", pane_id])
-        self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_title", title])
-        return result.returncode == 0
+        try:
+            return self.respawn_role_pane(record, "plan", pane_id)
+        except HiveIdeError:
+            return False
 
     def _key_bindings(self) -> dict[str, str | None]:
         settings = self.settings.get("keys") or {}

@@ -103,3 +103,29 @@ def _isolated_agent_stores(tmp_path_factory):
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+
+CALLER_IDENTITY_KEYS = ("TMUX_PANE", "TMUX", "HIVE_IDE_TMUX_SOCKET")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_caller_identity():
+    """Start every test as a caller with NO tmux identity.
+
+    The frame's caller guard is tri-state and fails closed: a pane id without a
+    server, or a server marker that disagrees with `$TMUX`, is "unknown" and
+    defers every destructive step. pytest itself often runs inside a tmux pane
+    (an IDE session), and that inherited identity would turn into deferrals in
+    tests that never asked about the caller. Tests that need an identity set it
+    explicitly with monkeypatch. Plain os.environ for the same teardown-order
+    reason as `_isolated_agent_stores`.
+    """
+    saved = {key: os.environ.get(key) for key in CALLER_IDENTITY_KEYS}
+    for key in CALLER_IDENTITY_KEYS:
+        os.environ.pop(key, None)
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value

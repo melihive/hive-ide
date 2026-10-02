@@ -4,6 +4,127 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Repair could kill the agent that invoked it. `repair` runs from inside the
+  session's own window when the Hive skill calls it from the agent pane, and
+  three of its branches (agent pane missing, agent environment belonging to
+  another session, any pane cwd deleted) rebuilt the window: build a replacement,
+  `kill-window` the old one, agent dead with exit 137. `Frame.rebuild` now asks
+  where the calling process lives before it builds anything, and the answer is
+  tri-state and fails closed. `$TMUX_PANE`, `$TMUX` and the IDE marker
+  `HIVE_IDE_TMUX_SOCKET` are combined: "outside" (the only verdict that permits
+  a kill) requires either no tmux evidence at all or the marker and `$TMUX`
+  agreeing on a different server (compared by full socket path, honouring
+  `TMUX_TMPDIR`), "inside" requires the evidence to agree on this server and the
+  pane to be listed in the window, and every partial or contradictory reading —
+  a pane id with no server evidence, a server marker without a pane id, a
+  marker that disagrees with `$TMUX`, a `$TMUX` that does not parse as
+  `<absolute-socket-path>,<pid>,<session>`, a window whose panes cannot be
+  listed — is unknown and defers. A deferred rebuild destroys nothing and is reported as
+  `deferred`. When `SessionRepair` defers it also leaves a
+  `host.repair.deferred_rebuild` marker on the record and names the command to
+  run from outside the window. `force-rebuild` from inside (or from an unknown
+  location) refuses with an error rather than deferring silently.
+- A deferred rebuild could be forgotten or finished too early. The marker is now
+  cleared only by an apply-mode repair run from outside the window that was
+  conclusive: every observation the rebuild checks depend on succeeded (pane
+  roles listed, pane cwds listed, agent pane environment read), no error was
+  recorded, and either the rebuild the marker was for completed or none of the
+  observations wants a rebuild any more. A run that could not observe
+  something, hit an error, rebuilt for a different reason, or found the owed
+  condition still present but was pre-empted by another branch keeps the marker
+  and says exactly why. A marker written by repair never triggers a rebuild on
+  its own: the outside run re-evaluates the live checks and rebuilds only on
+  their evidence.
+- `switch-driver` from inside the window left the previous driver running with
+  nothing to finish the job: it persisted the new driver, `rebuild` deferred,
+  and ordinary repair had no way to notice the window still ran the old one. No
+  live observation can tell a running driver's identity reliably (a launch and
+  a resume may be different executables, and a driver can be a module behind
+  one interpreter), so `switch-driver` now records the request itself: the
+  deferred-rebuild marker carries `reason: driver-switch` and
+  `requested_driver`, and names the exact command to run from outside. This is
+  the one marker-driven rebuild: an apply-mode repair run from provably outside
+  the window, while the record still names the requested driver, rebuilds on
+  the strength of that marker (branch `driver-switch`) and clears it on
+  completion. If the record names another driver again the switch was
+  superseded and the marker is simply retired. From inside or from an unknown
+  location the marker is kept and the same next step is reported. A pending
+  switch survives unrelated deferrals: a later inside repair that has to defer
+  for, say, a stale agent environment records that cause in the marker's
+  `also_pending` list instead of replacing the switch, and settling prunes
+  those causes on their own evidence while the switch itself is retired only by
+  completion or supersession. A `switch-driver` or `force-rebuild` that does
+  rebuild the window (run from outside) retires any marker still pending, since
+  the rebuild it just performed satisfies it; otherwise the stale marker would
+  rebuild the healthy window again on the next repair.
+- The agent pane's identity was read from the deepest process in the pane that
+  carried any `HIVE_IDE_*` variable. Agents spawn background jobs that drop or
+  override `HIVE_IDE_SESSION_ID` for their subprocesses, so such a descendant
+  could mask a genuine mismatch of the pane (a job without the id hid a wrapper
+  that belonged to another session) and, worse, fake one — a job launched with
+  another session's id would have had an outside repair rebuild a healthy
+  window. The identity is now the environment of the pane's own root process
+  (`#{pane_pid}`, the wrapper tmux spawned with the window's `-e` values);
+  only when that environ is unreadable do the root's direct children stand in,
+  in pid order and never deeper.
+- A deleted sidebar or plan cwd rebuilt the whole window. The incident trigger
+  was exactly this: `plan-set` had respawned the plan pane with the worktree as
+  its cwd, the worktree was deleted by merge cleanup, and the plan pane's dead
+  cwd took the agent pane down with it. Repair now observes which pane lost its
+  cwd and respawns only sidebar/plan panes in place; a rebuild is reserved for
+  the agent pane or an untagged pane nothing can relaunch.
+- Respawned panes inherited the tmux session environment, which keeps the
+  `HIVE_IDE_SESSION_ID` of whichever window first started the server, so a pane
+  relaunched by `respawn_agent`, the sidebar refresh, the plan refresh or
+  `current_plan` carried another session's identity and later tripped the
+  stale-environment rebuild. Every `respawn-pane` and `split-window` the frame
+  issues now passes the record's own `HIVE_IDE_*` environment (`sleep_agent`
+  already did). The repair-driven respawn helpers (`respawn_agent`,
+  `respawn_role_pane` and the sidebar/plan refreshes built on it, and the
+  `current_plan` reopen) kill a pane only when it is provably not the caller's
+  own; `sleep_agent` is deliberately exempt, because sleeping the agent from its
+  own pane is the explicit request.
+- A failed `list-panes` read as "every pane role is missing" and could authorize
+  a rebuild. Pane observation now distinguishes unobservable (`None`) from
+  absent (`{}`); when the roles cannot be observed repair warns "could not
+  observe panes of window X; no rebuild" and skips every rebuild and respawn
+  branch for that window (the sidebar refresh still runs its own, separate
+  observation and respawns only on a successful one).
+- A `kill-window` that failed after the replacement was built went unnoticed.
+  `rebuild` now raises, naming both windows, so the caller never believes the
+  old window is gone.
+
+### Added
+
+- A per-session repair log in the `repairs` state collection (newest 50 entries):
+  every destructive repair step — a rebuild, a deleted-cwd respawn, an exited
+  driver respawn, a stale sidebar refresh — is recorded as `planned` before its
+  tmux call and then once more as `completed`, `deferred`, `failed` or `skipped`,
+  with the caller pane, the caller-location verdict, the observed pane roles and
+  cwds, and the run's actions, warnings and errors. A run with no destructive
+  step records one `skipped` entry. Only identity environment keys are ever
+  logged. The append runs under the workspace mutation lock, which is now
+  owner-aware and fork-safe: the thread holding it may nest, any other thread
+  waits for the real `flock`, a forked child gets a fresh guard and table (an
+  `os.register_at_fork` hook, so a guard a sibling thread held at fork time
+  cannot deadlock the child), and a child that unwinds out of a context the
+  parent entered closes only its own fd copy — never `LOCK_UN`, which would
+  release the parent's lock. `plan` joined the commands that hold it.
+- `repair` results gain `deferred` (the reasons a rebuild was put off) and
+  `rebuilt`.
+
+### Changed
+
+- Python API, for callers outside this package: `Frame.rebuild()` now returns
+  `{"rebuilt", "deferred", "reason", "window"}` instead of `None`, and
+  `Frame.role_panes()` returns `None` (not `{}`) when the window's panes cannot
+  be listed. Older Hive skill wrappers keep working on the JSON surface, but a
+  wrapper that treats a missing `rebuilt` key as "not rebuilt" reports an older
+  package's completed rebuilds as not rebuilt; read `actions` when `rebuilt` is
+  absent.
+
 ## [1.0.85] - 2026-10-02
 
 ### Fixed

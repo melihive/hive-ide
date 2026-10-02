@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -25,7 +26,9 @@ def utc_now() -> str:
 class StateStore:
     """Atomic, workspace-scoped protocol state."""
 
-    COLLECTIONS = frozenset({"sessions", "archive", "status", "activity", "errors"})
+    COLLECTIONS = frozenset(
+        {"sessions", "archive", "status", "activity", "errors", "repairs"}
+    )
 
     def __init__(self, home: str | Path, workspace_key: str):
         self.home = Path(home).expanduser().resolve()
@@ -47,20 +50,120 @@ class StateStore:
     def config_snapshot_path(self) -> Path:
         return self.workspace_dir / "config.json"
 
+    # Owner-aware, reentrant, per-path lock state for this process. `flock` locks
+    # belong to an open file description, so a nested `open() + LOCK_EX` from the
+    # thread that already holds the lock would block on itself; the owning thread
+    # therefore nests by depth, every OTHER thread waits here until the owner has
+    # released, and only then takes the real flock.
+    #
+    # Fork safety: the table and its guard are replaced in a forked child
+    # (`os.register_at_fork`, plus a lazy pid check that never touches the
+    # inherited guard first — a sibling thread may have held it at fork time, and
+    # that thread does not exist in the child). A child that leaves a context the
+    # PARENT entered must not `LOCK_UN` the inherited file description: the lock
+    # belongs to the parent, and closing the child's fd copy does not release it
+    # while the parent's fd still refers to the same description (flock(2)).
+    _LOCKS: dict[str, dict[str, Any]] = {}
+    _LOCKS_GUARD = threading.Lock()
+    _LOCKS_PID = os.getpid()
+
+    @classmethod
+    def _reset_locks_after_fork(cls) -> None:
+        cls._LOCKS_GUARD = threading.Lock()
+        cls._LOCKS = {}
+        cls._LOCKS_PID = os.getpid()
+
+    @classmethod
+    def _lock_state(cls, key: str) -> dict[str, Any]:
+        if cls._LOCKS_PID != os.getpid():
+            # Belt and braces for the at-fork hook: a fresh guard, never the one
+            # another (now nonexistent) thread may have been holding at fork.
+            cls._reset_locks_after_fork()
+        with cls._LOCKS_GUARD:
+            state = cls._LOCKS.get(key)
+            if state is None:
+                state = {
+                    "owner": None,
+                    "depth": 0,
+                    "cond": threading.Condition(cls._LOCKS_GUARD),
+                }
+                cls._LOCKS[key] = state
+            return state
+
     @contextmanager
     def mutation_lock(self, *, blocking: bool = True):
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         path = self.workspace_dir / ".mutation.lock"
+        state = self._lock_state(str(path))
+        cond: threading.Condition = state["cond"]
+        me = (os.getpid(), threading.get_ident())
+        with cond:
+            if state["owner"] == me:
+                state["depth"] += 1
+                nested = True
+            else:
+                if not blocking and state["owner"] is not None:
+                    raise StateError(
+                        f"Cannot lock workspace state {path}: held by another thread"
+                    )
+                while state["owner"] is not None:
+                    cond.wait()
+                # Claim ownership before the flock so other threads queue here.
+                state["owner"] = me
+                state["depth"] = 1
+                nested = False
+        if nested:
+            try:
+                yield
+            finally:
+                if os.getpid() == me[0]:
+                    with cond:
+                        if state["owner"] == me and state["depth"] > 1:
+                            state["depth"] -= 1
+                # In a forked child the bookkeeping (and its guard) is the
+                # parent's; the child's table was reset, so there is nothing to
+                # update and nothing safe to wait on.
+            return
+        handle = None
         try:
-            with path.open("a+", encoding="utf-8") as handle:
-                flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-                fcntl.flock(handle.fileno(), flags)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle = path.open("a+", encoding="utf-8")
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), flags)
         except OSError as exc:
+            if handle is not None:
+                handle.close()
+            with cond:
+                state["owner"] = None
+                state["depth"] = 0
+                cond.notify_all()
             raise StateError(f"Cannot lock workspace state {path}: {exc}") from exc
+        try:
+            yield
+        finally:
+            if os.getpid() != me[0]:
+                # Forked child leaving the parent's context: the flock is the
+                # parent's. Close only our copy of the fd — that does not release
+                # a lock the parent's fd still holds — and leave the parent's
+                # (inherited, possibly held) guard untouched.
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            else:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    handle.close()
+                finally:
+                    with cond:
+                        state["owner"] = None
+                        state["depth"] = 0
+                        cond.notify_all()
+
+    def mutation_lock_held(self) -> bool:
+        """Is THIS thread inside `mutation_lock` for this workspace right now?"""
+        state = self._lock_state(str(self.workspace_dir / ".mutation.lock"))
+        with StateStore._LOCKS_GUARD:
+            return state["owner"] == (os.getpid(), threading.get_ident())
 
     @staticmethod
     def new_session_id() -> str:
@@ -423,3 +526,9 @@ class StateStore:
         for collection in self.COLLECTIONS:
             self.delete(collection, session_id)
         return True
+
+
+if hasattr(os, "register_at_fork"):
+    # A forked child must not inherit lock bookkeeping, nor a guard some other
+    # thread held at fork time (that thread does not exist in the child).
+    os.register_at_fork(after_in_child=StateStore._reset_locks_after_fork)

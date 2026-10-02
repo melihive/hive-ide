@@ -47,6 +47,11 @@ def _term() -> dict:
     )
 
 
+def _rebuilt(window: str = "@8") -> dict:
+    """The dict `Frame.rebuild` returns after a real, completed rebuild."""
+    return {"rebuilt": True, "deferred": False, "reason": None, "window": window}
+
+
 def test_terminal_title_appends_local_host_name(tmp_path, monkeypatch):
     monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
@@ -2331,7 +2336,7 @@ def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypa
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
@@ -2371,7 +2376,7 @@ def test_repair_restores_missing_plan_without_rebuilding_live_agent(
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
@@ -2459,9 +2464,9 @@ def test_repair_reapplies_columns_for_healthy_existing_window(tmp_path, monkeypa
         ):
             rows = "\n".join(
                 [
-                    f"sidebar\t{workspace}",
-                    f"agent\t{workspace}",
-                    f"plan\t{workspace}",
+                    f"sidebar\t%1\t{workspace}",
+                    f"agent\t%2\t{workspace}",
+                    f"plan\t%3\t{workspace}",
                 ]
             )
             return subprocess.CompletedProcess(args, 0, rows + "\n", "")
@@ -2531,7 +2536,7 @@ def test_repair_refreshes_stale_sidebar_wrapper_without_rebuilding(
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
     monkeypatch.setattr(Frame, "retitle_panes", lambda _self, _record: False)
     monkeypatch.setattr(
@@ -2635,7 +2640,7 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
     monkeypatch.setattr(
         Frame,
@@ -2643,9 +2648,9 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{old_worktree}\n"
-                f"agent\t{old_worktree}\n"
-                f"plan\t{old_worktree}\n"
+                f"sidebar\t%1\t{old_worktree}\n"
+                f"agent\t%2\t{old_worktree}\n"
+                f"plan\t%3\t{old_worktree}\n"
             ),
             stderr="",
         ),
@@ -2708,12 +2713,12 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
-        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)) or True,
     )
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
     monkeypatch.setattr(
         Frame,
@@ -2721,9 +2726,9 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -2776,7 +2781,7 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
-        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)) or True,
     )
     monkeypatch.setattr(
         Frame,
@@ -2784,9 +2789,9 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -2832,12 +2837,12 @@ def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypat
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
-        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)) or True,
     )
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
     monkeypatch.setattr(
         Frame,
@@ -2845,9 +2850,9 @@ def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypat
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -2940,7 +2945,7 @@ def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
-        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)) or True,
     )
     monkeypatch.setattr(
         Frame,
@@ -2948,9 +2953,9 @@ def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -3017,12 +3022,12 @@ def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
-        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)) or True,
     )
     monkeypatch.setattr(
         Frame,
@@ -3030,9 +3035,9 @@ def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -3072,7 +3077,7 @@ def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypat
     monkeypatch.setattr(
         Frame,
         "respawn_agent",
-        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)),
+        lambda _self, repaired, pane_id: respawned.append((repaired["id"], pane_id)) or True,
     )
     monkeypatch.setattr(
         Frame,
@@ -3080,9 +3085,9 @@ def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypat
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -3118,7 +3123,7 @@ def test_repair_dry_run_reports_deleted_sidebar_cwd(tmp_path, monkeypatch):
         "tmux",
         lambda _self, _args: SimpleNamespace(
             returncode=0,
-            stdout=f"sidebar\t{deleted} (deleted)\nagent\t{workspace}\nplan\t{workspace}\n",
+            stdout=f"sidebar\t%1\t{deleted} (deleted)\nagent\t%2\t{workspace}\nplan\t%3\t{workspace}\n",
             stderr="",
         ),
     )
@@ -3131,11 +3136,66 @@ def test_repair_dry_run_reports_deleted_sidebar_cwd(tmp_path, monkeypatch):
     assert result["actions"] == []
     assert result["warnings"] == [
         f"sidebar pane cwd no longer exists: {deleted} (deleted); "
-        "repair will rebuild the window from the session record"
+        "repair will respawn that pane in place"
     ]
 
 
-def test_repair_rebuilds_window_with_deleted_pane_cwd(tmp_path, monkeypatch):
+def test_repair_respawns_only_the_sidebar_pane_with_deleted_cwd(tmp_path, monkeypatch):
+    """A vanished sidebar/plan cwd costs that pane, never the agent's window."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    deleted = tmp_path / "removed-worktree"
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="LIVE",
+        working_dir=workspace,
+        source=_source(),
+        driver=_term(),
+    )
+    rebuilt = []
+    respawned = []
+
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "role_panes",
+        lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    monkeypatch.setattr(
+        Frame,
+        "rebuild",
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "respawn_role_pane",
+        lambda _self, _record, role, pane_id: respawned.append((role, pane_id)) or True,
+    )
+    monkeypatch.setattr(Frame, "refresh_sidebar_if_needed", lambda _self, _record: False)
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda _self, _args: SimpleNamespace(
+            returncode=0,
+            stdout=f"sidebar\t%1\t{deleted} (deleted)\nagent\t%2\t{workspace}\nplan\t%3\t{workspace}\n",
+            stderr="",
+        ),
+    )
+
+    result = SessionRepair(store, Frame(store, socket="test")).repair(record)
+
+    assert result["ok"] is True
+    assert result["actions"] == ["sidebar pane: respawned (cwd was deleted)"]
+    assert result["rebuilt"] is False
+    assert result["deferred"] == []
+    assert respawned == [("sidebar", "%1")]
+    assert rebuilt == []
+    stages = [entry["stage"] for entry in store.read("repairs", record["id"])["entries"]]
+    assert stages == ["planned", "completed"]
+
+
+def test_repair_rebuilds_window_with_deleted_agent_cwd(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     deleted = tmp_path / "removed-worktree"
@@ -3158,14 +3218,19 @@ def test_repair_rebuilds_window_with_deleted_pane_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
+    )
+    monkeypatch.setattr(
+        Frame,
+        "respawn_role_pane",
+        lambda _self, _record, role, _pane_id: pytest.fail(f"must not respawn {role}"),
     )
     monkeypatch.setattr(
         Frame,
         "tmux",
         lambda _self, _args: SimpleNamespace(
             returncode=0,
-            stdout=f"sidebar\t{deleted} (deleted)\nagent\t{workspace}\nplan\t{workspace}\n",
+            stdout=f"sidebar\t%1\t{workspace}\nagent\t%2\t{deleted} (deleted)\nplan\t%3\t{workspace}\n",
             stderr="",
         ),
     )
@@ -3173,8 +3238,13 @@ def test_repair_rebuilds_window_with_deleted_pane_cwd(tmp_path, monkeypatch):
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
 
     assert result["ok"] is True
-    assert result["actions"] == ["window: rebuilt for deleted pane cwd"]
+    assert result["actions"] == ["window: rebuilt for deleted pane cwd: agent"]
+    assert result["rebuilt"] is True
     assert rebuilt == [record["id"]]
+    assert (
+        f"agent pane cwd no longer exists: {deleted} (deleted); "
+        "repair will rebuild the window from the session record"
+    ) in result["warnings"]
 
 
 def test_repair_rebuilds_window_with_stale_agent_environment(tmp_path, monkeypatch):
@@ -3210,7 +3280,7 @@ def test_repair_rebuilds_window_with_stale_agent_environment(tmp_path, monkeypat
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
     monkeypatch.setattr(
         Frame,
@@ -3218,9 +3288,9 @@ def test_repair_rebuilds_window_with_stale_agent_environment(tmp_path, monkeypat
         lambda _self, _args: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"sidebar\t{workspace}\n"
-                f"agent\t{workspace}\n"
-                f"plan\t{workspace}\n"
+                f"sidebar\t%1\t{workspace}\n"
+                f"agent\t%2\t{workspace}\n"
+                f"plan\t%3\t{workspace}\n"
             ),
             stderr="",
         ),
@@ -3258,16 +3328,24 @@ def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, ca
         lambda _self, _session_id: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
     )
     monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
+    monkeypatch.setattr(Frame, "caller_location", lambda _self, _window_id: False)
     monkeypatch.setattr(
         Frame,
         "rebuild",
-        lambda _self, repaired: rebuilt.append(repaired["id"]),
+        lambda _self, repaired: rebuilt.append(repaired["id"]) or _rebuilt(),
     )
 
     base = ["--state-home", str(store.home), "--workspace-key", str(workspace)]
     assert main([*base, "force-rebuild", "--session-id", record["id"]]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["rebuilt"] is True
+    assert payload["deferred"] is False
+    assert rebuilt == [record["id"]]
+
+    # From inside the window the command refuses outright instead of deferring.
+    monkeypatch.setattr(Frame, "caller_location", lambda _self, _window_id: True)
+    assert main([*base, "force-rebuild", "--session-id", record["id"]]) == 2
+    assert "outside the session window" in capsys.readouterr().err
     assert rebuilt == [record["id"]]
 
     with pytest.raises(SystemExit) as exc:
@@ -3678,7 +3756,7 @@ def test_switch_driver_rehomes_worktree_cwd_to_workspace_root(
     monkeypatch.setattr(
         "hive_ide.drivers.shutil.which", lambda command: f"/usr/bin/{command}"
     )
-    monkeypatch.setattr("hive_ide.cli.Frame.rebuild", lambda _self, _record: None)
+    monkeypatch.setattr("hive_ide.cli.Frame.rebuild", lambda _self, _record: _rebuilt())
     record = store.create_session(
         name="FEATURE",
         working_dir=worktree,
@@ -3749,7 +3827,7 @@ def test_switch_driver_handoff_records_context_and_reaches_pane_env(
     calls = []
     monkeypatch.setattr(
         "hive_ide.cli.Frame.rebuild",
-        lambda _self, rec: calls.append(rec),
+        lambda _self, rec: calls.append(rec) or _rebuilt(),
     )
     assert main(
         [
@@ -3805,7 +3883,7 @@ def test_switch_driver_handoff_prompt_is_passed_to_codex_resume(
     record["agents"]["resume_ids"]["codex"] = "codex-original"
     store.write("sessions", record["id"], record)
 
-    monkeypatch.setattr("hive_ide.cli.Frame.rebuild", lambda _self, _record: None)
+    monkeypatch.setattr("hive_ide.cli.Frame.rebuild", lambda _self, _record: _rebuilt())
     assert main(
         [
             "switch-driver",
@@ -5159,7 +5237,7 @@ def test_current_chat_wakes_sleeping_shell_pane(tmp_path, monkeypatch):
     monkeypatch.setattr(
         frame,
         "respawn_agent",
-        lambda _record, pane_id: respawned.append((_record["id"], pane_id)),
+        lambda _record, pane_id: respawned.append((_record["id"], pane_id)) or True,
     )
 
     def fake_tmux(args, **_kwargs):
@@ -5762,7 +5840,7 @@ def test_dev_flip_changes_only_the_target_session(monkeypatch, tmp_path, capsys)
     )
     monkeypatch.setattr(
         "hive_ide.cli.Frame.rebuild",
-        lambda _frame, record: rebuilt.append(record["id"]),
+        lambda _frame, record: rebuilt.append(record["id"]) or _rebuilt(),
     )
 
     common = [

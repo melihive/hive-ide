@@ -35,7 +35,7 @@ class SessionHealth:
             return []
 
         roles = self.frame.role_panes(session_id)
-        if "agent" not in roles:
+        if not roles or "agent" not in roles:
             return []
 
         status = self.store.read("status", session_id)
