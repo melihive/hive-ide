@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from types import SimpleNamespace
@@ -25,7 +26,7 @@ import pytest
 from hive_ide import __version__
 from hive_ide.cli import main
 from hive_ide.drivers import CommandDriver, DriverRegistry, bundled_drivers
-from hive_ide.errors import HiveIdeError
+from hive_ide.errors import HiveIdeError, StateError
 from hive_ide.frame import Frame
 from hive_ide.repair import SessionRepair
 from hive_ide.store import StateStore
@@ -194,8 +195,14 @@ def _tmux_var(socket: str, *, tmpdir: str = "/tmp") -> str:
         ("%3", None, _tmux_var(THIS), True, True, True),
         # Both agree on this server.
         ("%3", THIS, _tmux_var(THIS), True, True, True),
-        # $TMUX present but unparsable is treated as absent.
-        ("%3", THIS, ",1,0", True, True, True),
+        # A $TMUX that does not parse is unknown, never "another server": it
+        # cannot confirm a marker, and it cannot be the second witness against
+        # this server.
+        ("%3", THIS, ",1,0", None, None, None),
+        ("%3", OTHER, "garbage", None, None, None),
+        ("%3", OTHER, "relative/path,1,0", None, None, None),
+        ("%3", OTHER, f"/tmp/tmux-{os.getuid()}/{OTHER},x,0", None, None, None),
+        ("%3", None, "garbage", None, None, None),
     ],
 )
 def test_caller_identity_truth_table(
@@ -436,6 +443,76 @@ def test_marker_is_kept_when_the_outside_run_cannot_observe_the_panes(live, monk
     assert live.frame.windows()[live.record["id"]] == live.window
 
 
+def test_marker_is_kept_when_the_cwd_listing_fails(live, monkeypatch):
+    SessionRepair.mark_deferred_rebuild(
+        live.store, live.store.find_session(live.record["id"]), reason="earlier", op_id="op1"
+    )
+    live.outside()
+    original = Frame.tmux
+
+    def failing_cwd_listing(args, **kwargs):
+        if args[:1] == ["list-panes"] and args[-1].endswith("#{pane_current_path}"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="no server running")
+        return original(live.frame, args, **kwargs)
+
+    monkeypatch.setattr(live.frame, "tmux", failing_cwd_listing)
+
+    result = live.repair()
+
+    assert result["ok"] is True
+    assert result["rebuilt"] is False
+    assert not any("no longer warranted" in action for action in result["actions"])
+    assert any(
+        warning.startswith("deferred rebuild marker kept (deferred for: earlier)")
+        and "could not observe: pane cwds" in warning
+        for warning in result["warnings"]
+    )
+    assert _marker(live.store, live.record["id"])["reason"] == "earlier"
+
+
+def test_marker_is_kept_when_the_agent_environment_cannot_be_read(live, monkeypatch):
+    SessionRepair.mark_deferred_rebuild(
+        live.store, live.store.find_session(live.record["id"]), reason="earlier", op_id="op1"
+    )
+    live.outside()
+    monkeypatch.setattr(Frame, "pane_hive_ide_env", lambda _self, _pane_id: None)
+
+    result = live.repair()
+
+    assert result["ok"] is True
+    assert result["rebuilt"] is False
+    assert not any("no longer warranted" in action for action in result["actions"])
+    assert any(
+        "could not observe: agent pane environment" in warning
+        for warning in result["warnings"]
+    )
+    assert _marker(live.store, live.record["id"])["reason"] == "earlier"
+    assert live.frame.windows()[live.record["id"]] == live.window
+
+
+def test_marker_is_kept_when_another_branch_pre_empted_the_owed_rebuild(live, monkeypatch):
+    """A restorable gap (missing plan pane) is handled first; the stale agent
+    environment the marker is for is still observed, so the marker survives."""
+    live.inside("agent")
+    _stale_agent_env(monkeypatch)
+    assert live.repair()["deferred"] == ["stale agent environment"]
+    roles = live.frame.role_panes(live.record["id"])
+    assert live.frame.tmux(["kill-pane", "-t", roles["plan"]]).returncode == 0
+    live.outside()
+
+    result = live.repair()
+
+    assert result["ok"] is True
+    assert "window: restored panes: plan" in result["actions"]
+    assert result["rebuilt"] is False
+    assert any(
+        "still warranted (stale agent environment)" in warning
+        for warning in result["warnings"]
+    )
+    assert _marker(live.store, live.record["id"])["reason"] == "stale agent environment"
+    assert live.frame.windows()[live.record["id"]] == live.window
+
+
 def test_marker_is_kept_when_the_rebuild_itself_fails(live, monkeypatch):
     live.inside("agent")
     _stale_agent_env(monkeypatch)
@@ -649,9 +726,14 @@ def test_declined_ensure_with_absent_window_never_builds(tmp_path, monkeypatch):
 # -- deferred driver switch completes from outside ----------------------------------------
 
 
-def test_deferred_driver_switch_completes_from_outside_via_driver_mismatch(
-    live, monkeypatch, capsys
-):
+def _agent_start_command(frame: Frame, session_id: str) -> str:
+    pane_id = frame.role_panes(session_id)["agent"]
+    return frame.tmux(
+        ["display-message", "-p", "-t", pane_id, "#{pane_start_command}"]
+    ).stdout.strip()
+
+
+def _inert_codex_registry(monkeypatch) -> DriverRegistry:
     inert = DriverRegistry(
         {
             **bundled_drivers(),
@@ -666,8 +748,15 @@ def test_deferred_driver_switch_completes_from_outside_via_driver_mismatch(
         "detect",
         lambda self: SimpleNamespace(available=True, executable=self.command[0], detail=""),
     )
+    return inert
+
+
+def test_deferred_driver_switch_completes_from_outside_on_the_marker(
+    live, monkeypatch, capsys
+):
+    inert = _inert_codex_registry(monkeypatch)
     roles = live.frame.role_panes(live.record["id"])
-    assert Frame.driver_command_name(live.frame.agent_pane_start_command(live.record)) == "sh"
+    assert "hive-ide-absent-codex" not in _agent_start_command(live.frame, live.record["id"])
     live.inside("agent")
 
     assert main(
@@ -689,15 +778,19 @@ def test_deferred_driver_switch_completes_from_outside_via_driver_mismatch(
         in switched["rebuild"]["next_step"]
     )
     assert "outside the session window" in switched["rebuild"]["next_step"]
-    assert _marker(live.store, live.record["id"])["reason"] == "driver-switch"
+    marker = _marker(live.store, live.record["id"])
+    assert marker["reason"] == "driver-switch"
+    assert marker["requested_driver"] == "codex"
     assert live.frame.windows()[live.record["id"]] == live.window
     assert live.frame.role_panes(live.record["id"]) == roles
 
-    # From inside, repair sees the mismatch but still cannot act on it.
+    # From inside, repair keeps the marker and points outside; it has no live
+    # evidence of a driver change and must not act on the marker from here.
     inside = live.repair(inert)
-    assert inside["deferred"] == [
-        "driver mismatch: pane runs sh, record launches hive-ide-absent-codex"
-    ]
+    assert inside["rebuilt"] is False
+    assert inside["deferred"] == []
+    assert any("deferred window rebuild is pending" in w for w in inside["warnings"])
+    assert _marker(live.store, live.record["id"])["requested_driver"] == "codex"
     assert live.frame.windows()[live.record["id"]] == live.window
 
     live.outside()
@@ -713,25 +806,71 @@ def test_deferred_driver_switch_completes_from_outside_via_driver_mismatch(
 
     assert finished["ok"] is True
     assert finished["rebuilt"] is True
-    assert (
-        "window: rebuilt for driver mismatch: pane runs sh, record launches "
-        "hive-ide-absent-codex"
-    ) in finished["actions"]
-    # The inside repair re-deferred and refreshed the marker's reason to the
-    # latest cause, so the completion names the driver mismatch it rebuilt for.
-    assert any(
-        action.startswith("window: deferred rebuild completed (deferred for: driver mismatch")
-        for action in finished["actions"]
-    )
+    assert "window: rebuilt for deferred driver switch to codex" in finished["actions"]
+    assert "window: deferred driver switch to codex completed" in finished["actions"]
     replacement = live.frame.windows()[live.record["id"]]
     assert replacement != live.window
     assert live.window not in _window_ids(live.frame)
     assert _marker(live.store, live.record["id"]) is None
-    record = live.store.find_session(live.record["id"])
-    assert (
-        Frame.driver_command_name(live.frame.agent_pane_start_command(record))
-        == "hive-ide-absent-codex"
+    assert "hive-ide-absent-codex" in _agent_start_command(live.frame, live.record["id"])
+    entries = (live.store.read("repairs", live.record["id"]) or {})["entries"]
+    assert [entry["branch"] for entry in entries if entry["stage"] == "completed"] == [
+        "driver-switch"
+    ]
+
+    # A second outside run has nothing owed and nothing to do.
+    again = live.repair(inert)
+    assert again["rebuilt"] is False
+    assert live.frame.windows()[live.record["id"]] == replacement
+
+
+def test_superseded_driver_switch_clears_the_marker_without_rebuilding(live, monkeypatch):
+    """The user switched back before an outside repair ran: the record names the
+    driver the window already runs, so the marker is just retired."""
+    inert = _inert_codex_registry(monkeypatch)
+    SessionRepair.mark_deferred_rebuild(
+        live.store,
+        live.store.find_session(live.record["id"]),
+        reason="driver-switch",
+        op_id="op1",
+        requested_driver="codex",
     )
+    live.outside()
+
+    result = live.repair(inert)
+
+    assert result["rebuilt"] is False
+    assert (
+        "window: deferred driver switch superseded (requested codex, record now runs term)"
+        in result["actions"]
+    )
+    assert _marker(live.store, live.record["id"]) is None
+    assert live.frame.windows()[live.record["id"]] == live.window
+
+
+def test_driver_switch_marker_never_rebuilds_from_inside_or_unknown(live, monkeypatch):
+    inert = _inert_codex_registry(monkeypatch)
+    record = live.store.find_session(live.record["id"])
+    record["driver"] = inert.get("codex").resolve(
+        name=record["name"], working_dir=record["working_dir"], conversation_reference=None
+    )
+    live.store.write("sessions", record["id"], record)
+    SessionRepair.mark_deferred_rebuild(
+        live.store, record, reason="driver-switch", op_id="op1", requested_driver="codex"
+    )
+    roles = live.frame.role_panes(live.record["id"])
+
+    live.identity(pane=roles["agent"], marker=None, tmux=None)  # unknown location
+    unknown = live.repair(inert)
+    assert unknown["rebuilt"] is False
+    assert _marker(live.store, live.record["id"])["requested_driver"] == "codex"
+    assert live.frame.windows()[live.record["id"]] == live.window
+
+    live.inside("agent")
+    inside = live.repair(inert)
+    assert inside["rebuilt"] is False
+    assert _marker(live.store, live.record["id"])["requested_driver"] == "codex"
+    assert live.frame.windows()[live.record["id"]] == live.window
 
 
 # -- repair log -------------------------------------------------------------------------
@@ -762,10 +901,96 @@ def test_repair_log_append_rides_an_already_held_mutation_lock(tmp_path):
     assert store.mutation_lock_held() is False
     with store.mutation_lock():
         assert store.mutation_lock_held() is True
-        # A nested entry must not deadlock on the lock this process already holds.
+        # A nested entry must not deadlock on the lock this thread already holds.
         SessionRepair.append_repair_log(store, "s", {"at": "t0", "stage": "skipped"})
         with store.mutation_lock():
             assert store.mutation_lock_held() is True
         assert store.mutation_lock_held() is True
     assert store.mutation_lock_held() is False
     assert len(store.read("repairs", "s")["entries"]) == 1
+
+
+def test_mutation_lock_is_owned_per_thread_and_orders_contending_writes(tmp_path):
+    """Thread B must not ride thread A's lock: its append happens strictly after
+    A's context exits, and A's nested append still rides A's own lock."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    a_inside = threading.Event()
+    b_started = threading.Event()
+    release_a = threading.Event()
+    order: list[str] = []
+    errors: list[BaseException] = []
+
+    def thread_a():
+        try:
+            with store.mutation_lock():
+                assert store.mutation_lock_held() is True
+                SessionRepair.append_repair_log(store, "s", {"at": "a-nested", "stage": "skipped"})
+                order.append("a-nested")
+                a_inside.set()
+                assert b_started.wait(5)
+                assert release_a.wait(5)
+                time.sleep(0.2)  # B must still be waiting on A here
+                order.append("a-exit")
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the test thread
+            errors.append(exc)
+
+    def thread_b():
+        try:
+            assert a_inside.wait(5)
+            b_started.set()
+            assert store.mutation_lock_held() is False  # A's ownership is not B's
+            with store.mutation_lock():
+                assert store.mutation_lock_held() is True
+                order.append("b-enter")
+                SessionRepair.append_repair_log(store, "s", {"at": "b", "stage": "skipped"})
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    a = threading.Thread(target=thread_a)
+    b = threading.Thread(target=thread_b)
+    a.start()
+    b.start()
+    assert b_started.wait(5)
+    time.sleep(0.1)
+    assert "b-enter" not in order  # B is blocked while A owns the lock
+    release_a.set()
+    a.join(10)
+    b.join(10)
+
+    assert not errors, errors
+    assert order == ["a-nested", "a-exit", "b-enter"]
+    assert [entry["at"] for entry in store.read("repairs", "s")["entries"]] == ["a-nested", "b"]
+    assert store.mutation_lock_held() is False
+
+
+def test_mutation_lock_non_blocking_refuses_another_threads_hold(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    held = threading.Event()
+    release = threading.Event()
+    outcome: list[str] = []
+
+    def holder():
+        with store.mutation_lock():
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(5)
+    try:
+        with store.mutation_lock(blocking=False):
+            outcome.append("entered")
+    except StateError as exc:
+        outcome.append(f"refused: {exc}")
+    finally:
+        release.set()
+        thread.join(5)
+
+    assert outcome and outcome[0].startswith("refused:")
+    with store.mutation_lock(blocking=False):
+        outcome.append("entered after release")
+    assert outcome[-1] == "entered after release"

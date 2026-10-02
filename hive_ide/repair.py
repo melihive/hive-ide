@@ -109,20 +109,52 @@ class SessionRepair:
         cwd_observed = self._observe_pane_cwds(repaired)
         pane_cwd_warnings = cwd_observed["warnings"]
         warnings.extend(pane_cwd_warnings)
-        agent_env_warnings = self._agent_env_warnings(repaired)
+        agent_env_warnings, agent_env_observed = self._agent_env_warnings(repaired)
         warnings.extend(agent_env_warnings)
         sleeping = (repaired.get("sleep") or {}).get("state") == "sleeping"
-        driver_mismatch = None if sleeping else self._driver_mismatch(repaired)
-        if driver_mismatch:
-            observed, expected = driver_mismatch
-            warnings.append(
-                f"agent pane runs {observed} but the record's driver launches "
-                f"{expected}; repair will rebuild the window"
-            )
         live_shell_agent = self._has_live_shell_agent(repaired)
         shell_agent = self._shell_agent_pane(repaired)
 
+        # What the rebuild checks could not see this run. Any entry makes the run
+        # inconclusive for a pending deferred rebuild.
+        unobserved: list[str] = []
+        if window_id:
+            if pane_roles is None:
+                unobserved.append("pane roles")
+            if not cwd_observed["observed"]:
+                unobserved.append("pane cwds")
+            if not agent_env_observed:
+                unobserved.append("agent pane environment")
+        # Every reason this run's observations would want a whole-window rebuild,
+        # independent of which branch below gets to act on it.
+        rebuild_wanted: list[str] = []
+        if window_id and pane_roles is not None:
+            missing_now = self._missing_pane_roles(pane_roles)
+            if "agent" in missing_now and not sleeping:
+                rebuild_wanted.append("missing panes: " + ", ".join(missing_now))
+            if agent_env_warnings and not live_shell_agent and not sleeping:
+                rebuild_wanted.append("stale agent environment")
+            rebuild_roles = [
+                pane["role"]
+                for pane in cwd_observed["deleted"]
+                if pane["role"] not in self.IN_PLACE_ROLES or not pane["pane_id"]
+            ]
+            if rebuild_roles:
+                rebuild_wanted.append("deleted pane cwd: " + ", ".join(rebuild_roles))
+
         pending_marker = self.deferred_rebuild_marker(repaired)
+        requested_driver = (
+            pending_marker.get("requested_driver") if pending_marker else None
+        )
+        current_driver = (repaired.get("driver") or {}).get("id")
+        # The one marker-driven rebuild: `switch-driver` deferred from inside the
+        # window, and the record still names the driver that switch requested.
+        switch_owed = bool(
+            pending_marker
+            and pending_marker.get("reason") == "driver-switch"
+            and requested_driver
+            and requested_driver == current_driver
+        )
         if pending_marker and apply and caller_inside:
             warnings.append(
                 "a deferred window rebuild is pending; run "
@@ -144,6 +176,7 @@ class SessionRepair:
         }
         deferred: list[str] = []
         rebuilt = False
+        built = False
         conclusive = False
 
         if apply and not errors:
@@ -153,10 +186,19 @@ class SessionRepair:
                     actions.append("window: sleeping; not built")
                 elif self.frame.ensure(repaired):
                     actions.append("window: built")
+                    built = True
                 elif not window_exists:
                     # ensure() declined to build and there is no window to inspect:
                     # an absent window has no "missing panes" to rebuild for.
                     actions.append("window: absent; not built")
+                elif switch_owed and not caller_inside:
+                    rebuilt = self._rebuild(
+                        repaired,
+                        log,
+                        reason=f"deferred driver switch to {requested_driver}",
+                        branch="driver-switch",
+                        deferred=deferred,
+                    )
                 elif pane_roles is None:
                     actions.append(
                         "window: panes unobservable; nothing destructive attempted"
@@ -206,15 +248,6 @@ class SessionRepair:
                             branch="stale-agent-environment",
                             deferred=deferred,
                         )
-                elif driver_mismatch:
-                    observed, expected = driver_mismatch
-                    rebuilt = self._rebuild(
-                        repaired,
-                        log,
-                        reason=f"driver mismatch: pane runs {observed}, record launches {expected}",
-                        branch="driver-mismatch",
-                        deferred=deferred,
-                    )
                 elif shell_agent:
                     if sleeping:
                         actions.append("agent: sleeping; exited driver pane preserved")
@@ -274,9 +307,10 @@ class SessionRepair:
                     actions.append("window: retitled panes")
                 self.frame.apply_columns(repaired)
                 self._clear_repair_error(session_id)
-                # Conclusive = every rebuild check ran on observed panes (an absent
-                # window has nothing to observe and nothing to rebuild).
-                conclusive = pane_roles is not None
+                # Conclusive = every observation the rebuild checks depend on
+                # succeeded (an absent window has nothing to observe and nothing
+                # to rebuild).
+                conclusive = not unobserved
             except HiveIdeError as exc:
                 errors.append(str(exc))
                 if not log["failed_logged"]:
@@ -286,10 +320,14 @@ class SessionRepair:
             self._settle_deferred_marker(
                 repaired,
                 pending_marker,
+                log,
                 caller_inside=caller_inside,
                 conclusive=conclusive and not errors,
                 rebuilt=rebuilt,
+                built=built,
                 deferred=deferred,
+                rebuild_wanted=rebuild_wanted,
+                unobserved=unobserved,
                 actions=actions,
                 warnings=warnings,
                 errors=errors,
@@ -359,6 +397,8 @@ class SessionRepair:
             self._log(record, log, stage="deferred", reason=reason, branch=branch)
             return False
         actions.append(f"window: rebuilt for {reason}")
+        log["rebuilt_branch"] = branch
+        log["rebuilt_reason"] = reason
         self._log(record, log, stage="completed", reason=reason, branch=branch)
         return True
 
@@ -421,8 +461,18 @@ class SessionRepair:
     #
     # `host.repair.deferred_rebuild` records that a window rebuild was owed but
     # could not be performed because the caller may have been inside the window.
-    # Repair and `switch-driver` write it; only a conclusive apply-mode repair
-    # run from outside the window clears it.
+    # Repair and `switch-driver` write it; only an apply-mode repair run from
+    # outside the window clears it, and only when that run was conclusive.
+    #
+    # A marker written by repair never causes a rebuild on its own: the outside
+    # run re-evaluates the live checks and rebuilds on their evidence. The ONE
+    # exception is `reason == "driver-switch"`: that marker records an explicit
+    # user request and names `requested_driver`, the record is authoritative for
+    # which driver the session should run, and no live observation can tell a
+    # running driver's identity reliably — so while the record still names the
+    # requested driver, the outside run rebuilds on the strength of the marker.
+    # If the record names another driver again, the switch was superseded and
+    # the marker is simply cleared.
 
     @staticmethod
     def deferred_rebuild_marker(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -433,15 +483,23 @@ class SessionRepair:
 
     @staticmethod
     def mark_deferred_rebuild(
-        store: StateStore, record: dict[str, Any], *, reason: str, op_id: str
+        store: StateStore,
+        record: dict[str, Any],
+        *,
+        reason: str,
+        op_id: str,
+        requested_driver: str | None = None,
     ) -> dict[str, Any]:
         host = dict(record.get("host") or {})
         repair_meta = dict(host.get("repair") or {})
-        repair_meta["deferred_rebuild"] = {
+        marker: dict[str, Any] = {
             "reason": reason,
             "op_id": op_id,
             "requested_at": utc_now(),
         }
+        if requested_driver:
+            marker["requested_driver"] = requested_driver
+        repair_meta["deferred_rebuild"] = marker
         host["repair"] = repair_meta
         record["host"] = host
         store.write("sessions", record["id"], record)
@@ -466,38 +524,90 @@ class SessionRepair:
         self,
         record: dict[str, Any],
         pending: dict[str, Any] | None,
+        log: dict[str, Any],
         *,
         caller_inside: bool,
         conclusive: bool,
         rebuilt: bool,
+        built: bool,
         deferred: list[str],
+        rebuild_wanted: list[str],
+        unobserved: list[str],
         actions: list[str],
         warnings: list[str],
         errors: list[str],
     ) -> None:
-        """Clear a pending marker only after a conclusive pass from outside."""
+        """Clear a pending marker only after a conclusive pass from outside.
+
+        `rebuilt` clears it only when the rebuild performed is the one the marker
+        was for and no error was recorded in the run. A non-switch marker is
+        otherwise cleared only when every observation succeeded and none of them
+        wants a rebuild any more; anything short of that keeps it and says why.
+        """
         if not pending:
             return
         owed = pending.get("reason") or "unknown reason"
         if caller_inside:
             return  # the pending warning already says to run from outside
-        if rebuilt:
+        if pending.get("reason") == "driver-switch":
+            requested = pending.get("requested_driver")
+            current = (record.get("driver") or {}).get("id")
+            if not requested or requested != current:
+                self.clear_deferred_rebuild(self.store, record)
+                actions.append(
+                    "window: deferred driver switch superseded "
+                    f"(requested {requested or 'unknown'}, record now runs {current})"
+                )
+                return
+            if not errors and (
+                built or (rebuilt and log.get("rebuilt_branch") == "driver-switch")
+            ):
+                self.clear_deferred_rebuild(self.store, record)
+                actions.append(f"window: deferred driver switch to {requested} completed")
+                return
+            if deferred:
+                return  # re-deferred; _rebuild refreshed the marker and warned
+            why = "; ".join(errors) if errors else "the rebuild was not performed"
+            warnings.append(
+                f"deferred rebuild marker kept (deferred for: driver-switch to "
+                f"{requested}): {why}"
+            )
+            return
+        if rebuilt and not errors and log.get("rebuilt_reason") == owed:
             self.clear_deferred_rebuild(self.store, record)
             actions.append(f"window: deferred rebuild completed (deferred for: {owed})")
             return
         if deferred:
             return  # re-deferred; _rebuild refreshed the marker and warned
-        if conclusive:
+        if rebuilt:
+            warnings.append(
+                f"deferred rebuild marker kept (deferred for: {owed}): the window was "
+                f"rebuilt for {log.get('rebuilt_reason')} and the deferred check was "
+                "not re-evaluated; run repair again"
+            )
+            return
+        if errors:
+            why: str | None = "; ".join(errors)
+        elif unobserved:
+            why = "could not observe: " + ", ".join(unobserved)
+        elif rebuild_wanted:
+            why = (
+                "still warranted ("
+                + "; ".join(rebuild_wanted)
+                + ") but not performed this run; run repair again"
+            )
+        else:
+            why = None
+        if conclusive and why is None:
             self.clear_deferred_rebuild(self.store, record)
             actions.append(
                 "window: deferred rebuild no longer warranted; marker cleared "
                 f"(deferred for: {owed})"
             )
             return
-        why = "; ".join(errors) if errors else "panes could not be observed"
         warnings.append(
             f"deferred rebuild marker kept (deferred for: {owed}): this run was "
-            f"not conclusive — {why}"
+            f"not conclusive — {why or 'observations incomplete'}"
         )
 
     # -- repair log -------------------------------------------------------
@@ -658,24 +768,6 @@ class SessionRepair:
             "sessions": results,
         }
 
-    def _driver_mismatch(self, record: dict[str, Any]) -> tuple[str, str] | None:
-        """(observed, expected) driver program names when the agent pane runs a
-        different driver than the record names; None when they agree or when
-        either side cannot be determined."""
-        observed = Frame.driver_command_name(
-            self.frame.agent_pane_start_command(record)
-        )
-        expected = Frame.record_driver_name(record)
-        if not observed or not expected or observed == expected:
-            return None
-        if (record.get("driver") or {}).get("id") == "term":
-            # A terminal session launches `$SHELL`, which `refresh_driver` tracks;
-            # any shell in the pane is the terminal driver, whichever shell the
-            # record names today.
-            if observed in Frame.SHELL_COMMANDS:
-                return None
-        return observed, expected
-
     def _shell_agent_pane(self, record: dict[str, Any]) -> str | None:
         pane_id = (self.frame.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
@@ -747,11 +839,18 @@ class SessionRepair:
     def _observe_pane_cwds(self, record: dict[str, Any]) -> dict[str, Any]:
         """Observe every pane's cwd in the session window.
 
-        Returns `{"warnings": [str], "deleted": [pane], "panes": [pane]}` where a
-        pane is `{"role", "pane_id", "cwd"}`; `deleted` lists the panes whose cwd
-        no longer exists so the caller can repair exactly those.
+        Returns `{"observed": bool, "warnings": [str], "deleted": [pane],
+        "panes": [pane]}` where a pane is `{"role", "pane_id", "cwd"}`; `deleted`
+        lists the panes whose cwd no longer exists so the caller can repair
+        exactly those. `observed` is False when the listing itself failed — an
+        empty result from a failed listing is not "no panes".
         """
-        observed: dict[str, Any] = {"warnings": [], "deleted": [], "panes": []}
+        observed: dict[str, Any] = {
+            "observed": True,
+            "warnings": [],
+            "deleted": [],
+            "panes": [],
+        }
         target = self.frame.windows().get(record["id"])
         if not target:
             return observed
@@ -766,6 +865,7 @@ class SessionRepair:
             ]
         )
         if panes.returncode != 0:
+            observed["observed"] = False
             return observed
         for line in panes.stdout.splitlines():
             parts = line.split("\t", 2)
@@ -797,14 +897,18 @@ class SessionRepair:
                 )
         return observed
 
-    def _agent_env_warnings(self, record: dict[str, Any]) -> list[str]:
+    def _agent_env_warnings(self, record: dict[str, Any]) -> tuple[list[str], bool]:
+        """(warnings, observed). `observed` is False when the agent pane's
+        environment could not be read at all, which is unknown, not healthy."""
         pane_id = (self.frame.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
-            return []
+            return [], True  # no agent pane: nothing to observe here
         env = self.frame.pane_hive_ide_env(pane_id)
+        if env is None:
+            return [], False
         observed = env.get("HIVE_IDE_SESSION_ID")
         if not observed or observed == record["id"]:
-            return []
+            return [], True
         owner = self.store.find_session(observed)
         owner_name = owner.get("name") if owner else None
         owner_label = f"{owner_name} ({observed})" if owner_name else observed
@@ -812,7 +916,7 @@ class SessionRepair:
             "agent pane environment belongs to another IDE session: "
             f"{owner_label}; expected {record.get('name') or record['id']} "
             f"({record['id']}); repair will rebuild the window"
-        ]
+        ], True
 
     def _record_error(
         self,

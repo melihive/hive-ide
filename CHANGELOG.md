@@ -19,28 +19,38 @@ All notable changes to `hive-ide` will be documented in this file.
   `TMUX_TMPDIR`), "inside" requires the evidence to agree on this server and the
   pane to be listed in the window, and every partial or contradictory reading —
   a pane id with no server evidence, a server marker without a pane id, a
-  marker that disagrees with `$TMUX`, a window whose panes cannot be listed — is
-  unknown and defers. A deferred rebuild destroys nothing and is reported as
+  marker that disagrees with `$TMUX`, a `$TMUX` that does not parse as
+  `<absolute-socket-path>,<pid>,<session>`, a window whose panes cannot be
+  listed — is unknown and defers. A deferred rebuild destroys nothing and is reported as
   `deferred`. When `SessionRepair` defers it also leaves a
   `host.repair.deferred_rebuild` marker on the record and names the command to
   run from outside the window. `force-rebuild` from inside (or from an unknown
   location) refuses with an error rather than deferring silently.
 - A deferred rebuild could be forgotten or finished too early. The marker is now
-  cleared only by an apply-mode repair run from outside the window whose checks
-  were conclusive — panes observed, no error — and that either rebuilt or found
-  nothing to rebuild; an inconclusive or failed run keeps it and says so. A
-  marker on its own never triggers a rebuild: the outside run re-evaluates the
-  live checks and rebuilds only on their evidence.
+  cleared only by an apply-mode repair run from outside the window that was
+  conclusive: every observation the rebuild checks depend on succeeded (pane
+  roles listed, pane cwds listed, agent pane environment read), no error was
+  recorded, and either the rebuild the marker was for completed or none of the
+  observations wants a rebuild any more. A run that could not observe
+  something, hit an error, rebuilt for a different reason, or found the owed
+  condition still present but was pre-empted by another branch keeps the marker
+  and says exactly why. A marker written by repair never triggers a rebuild on
+  its own: the outside run re-evaluates the live checks and rebuilds only on
+  their evidence.
 - `switch-driver` from inside the window left the previous driver running with
-  nothing to finish the job: it persisted the new driver, `rebuild` deferred, and
-  ordinary repair had no check that noticed the window still ran the old one.
-  `switch-driver` now writes the same deferred-rebuild marker (reason
-  `driver-switch`) and names the exact command to run from outside, and repair
-  gained a `driver-mismatch` check: the driver program the agent pane was
-  spawned with (from `#{pane_start_command}`) is compared with the record's
-  `launch_argv[0]`, and a difference is a rebuild branch in its own right, so
-  the outside run rebuilds on its own evidence. A pane whose start command
-  cannot be parsed, or a sleeping agent, is unknown and left alone.
+  nothing to finish the job: it persisted the new driver, `rebuild` deferred,
+  and ordinary repair had no way to notice the window still ran the old one. No
+  live observation can tell a running driver's identity reliably (a launch and
+  a resume may be different executables, and a driver can be a module behind
+  one interpreter), so `switch-driver` now records the request itself: the
+  deferred-rebuild marker carries `reason: driver-switch` and
+  `requested_driver`, and names the exact command to run from outside. This is
+  the one marker-driven rebuild: an apply-mode repair run from provably outside
+  the window, while the record still names the requested driver, rebuilds on
+  the strength of that marker (branch `driver-switch`) and clears it on
+  completion. If the record names another driver again the switch was
+  superseded and the marker is simply retired. From inside or from an unknown
+  location the marker is kept and the same next step is reported.
 - A deleted sidebar or plan cwd rebuilt the whole window. The incident trigger
   was exactly this: `plan-set` had respawned the plan pane with the worktree as
   its cwd, the worktree was deleted by merge cleanup, and the plan pane's dead
@@ -77,8 +87,10 @@ All notable changes to `hive-ide` will be documented in this file.
   with the caller pane, the caller-location verdict, the observed pane roles and
   cwds, and the run's actions, warnings and errors. A run with no destructive
   step records one `skipped` entry. Only identity environment keys are ever
-  logged. The append runs under the workspace mutation lock (now reentrant
-  within a process), and `plan` joined the commands that hold it.
+  logged. The append runs under the workspace mutation lock, which is now
+  owner-aware: the thread holding it may nest, any other thread waits for the
+  real `flock`, and the bookkeeping resets after a fork. `plan` joined the
+  commands that hold it.
 - `repair` results gain `deferred` (the reasons a rebuild was put off) and
   `rebuilt`.
 

@@ -839,14 +839,15 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     rebuild = Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
     if rebuild.get("deferred"):
         # The record is switched; the window still runs the previous driver. Leave
-        # the same marker repair leaves, so a repair run from outside the window
-        # knows a rebuild was owed; repair's driver-mismatch check then finds the
-        # running driver differs from the record and rebuilds on its own evidence.
+        # a marker naming the requested driver: a repair run from outside the
+        # window rebuilds on the strength of that marker while the record still
+        # names this driver (the one marker-driven rebuild; see SessionRepair).
         SessionRepair.mark_deferred_rebuild(
             store,
             record,
             reason="driver-switch",
             op_id=StateStore.new_session_id()[:12],
+            requested_driver=args.driver,
         )
         command = f"hive-ide repair --session-id {record['id']}"
         if args.tmux_socket:

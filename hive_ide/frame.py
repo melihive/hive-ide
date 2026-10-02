@@ -185,13 +185,28 @@ class Frame:
         base = os.environ.get("TMUX_TMPDIR") or "/tmp"
         return os.path.join(base, f"tmux-{os.getuid()}", self.socket)
 
-    def _tmux_var_verdict(self) -> bool | None:
-        """Does `$TMUX` name this server? `None` when absent or unparsable."""
-        tmux = os.environ.get("TMUX")
-        if not tmux:
+    @staticmethod
+    def tmux_var_socket_path(value: str | None) -> str | None:
+        """The socket path from a well-formed `$TMUX` (`<abs-path>,<pid>,<session>`).
+
+        Anything else — a missing field, a non-numeric pid or session, a relative
+        or empty path — is malformed and yields None: malformed evidence is
+        unknown, never a claim about which server the caller is on.
+        """
+        if not value:
             return None
-        path = tmux.split(",", 1)[0]
-        if not path:
+        parts = value.split(",")
+        if len(parts) != 3:
+            return None
+        path, pid, session = parts
+        if not path or not os.path.isabs(path) or not pid.isdigit() or not session.isdigit():
+            return None
+        return path
+
+    def _tmux_var_verdict(self) -> bool | None:
+        """Does `$TMUX` name this server? `None` when absent or malformed."""
+        path = self.tmux_var_socket_path(os.environ.get("TMUX"))
+        if path is None:
             return None
         expected = self.socket_path()
         if os.path.normpath(path) == os.path.normpath(expected):
@@ -205,10 +220,11 @@ class Frame:
         """Is the caller on THIS frame's tmux server? Tri-state.
 
         `False` only when there is no tmux evidence at all (a plain terminal, a
-        daemon) or when the marker and `$TMUX` BOTH name a different server.
-        `True` only when the evidence present agrees the caller is on this server.
-        Anything else — a pane with no server evidence, a marker without `$TMUX`
-        that names another server, a marker and `$TMUX` that disagree — is `None`.
+        daemon) or when the marker and a well-formed `$TMUX` BOTH name a different
+        server. `True` only when the evidence present agrees the caller is on this
+        server. Anything else — a pane with no server evidence, a marker without
+        `$TMUX` that names another server, a marker and `$TMUX` that disagree, a
+        `$TMUX` that does not parse — is `None`.
         """
         pane = self.caller_pane()
         marker = os.environ.get("HIVE_IDE_TMUX_SOCKET") or None
@@ -217,6 +233,10 @@ class Frame:
             return False
         by_marker = (marker == self.socket) if marker else None
         by_tmux = self._tmux_var_verdict() if tmux else None
+        if tmux and by_tmux is None:
+            # Present but malformed: evidence that cannot be read is not evidence
+            # of another server, and it leaves the marker unconfirmed.
+            return None
         if by_marker is None and by_tmux is None:
             return None
         if by_marker is None:
@@ -275,19 +295,28 @@ class Frame:
         """True only when the caller pane is listed in `window_id` on this server."""
         return self.caller_location(window_id) is True
 
-    def pane_hive_ide_env(self, pane_id: str) -> dict[str, str]:
+    def pane_hive_ide_env(self, pane_id: str) -> dict[str, str] | None:
+        """The `HIVE_IDE_*` environment of the pane's process tree.
+
+        `{}` means the tree was read and carries no IDE identity. `None` means it
+        could not be observed: the pane's pid did not resolve, or no process
+        environment in the tree was readable.
+        """
         pid = self._pane_pid(pane_id)
         if pid is None:
-            return {}
+            return None
+        readable = False
         for candidate in reversed(self._process_tree(pid)):
             env = self._process_env(candidate)
+            if env:
+                readable = True
             if any(key.startswith("HIVE_IDE_") for key in env):
                 return {
                     key: value
                     for key, value in env.items()
                     if key.startswith("HIVE_IDE_")
                 }
-        return {}
+        return {} if readable else None
 
     def _pane_pid(self, pane_id: str) -> int | None:
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
@@ -1029,64 +1058,6 @@ class Frame:
         if result.returncode != 0:
             return None
         return result.stdout.strip()
-
-    def agent_pane_start_command(self, record: dict[str, Any]) -> str | None:
-        """The command the agent pane was spawned with (`#{pane_start_command}`)."""
-        pane_id = (self.role_panes(record["id"]) or {}).get("agent")
-        if not pane_id:
-            return None
-        result = self.tmux(
-            ["display-message", "-p", "-t", pane_id, "#{pane_start_command}"]
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip() or None
-
-    @classmethod
-    def driver_command_name(cls, start_command: str | None) -> str | None:
-        """The driver program a pane's start command launches, or None if unclear.
-
-        tmux stores the spawn command as `sh -c "<agent command>"` with shell
-        quoting. The agent command is `unset …; [printf <handoff>; ]<argv>; …`, so
-        the driver is the first token of the first segment that is not an `unset`
-        or `printf` preamble. Anything that does not fit that shape is unknown.
-        """
-        if not start_command:
-            return None
-        try:
-            outer = shlex.split(start_command)
-        except ValueError:
-            return None
-        if len(outer) != 3 or outer[0] != "sh" or outer[1] != "-c":
-            return None
-        try:
-            lexer = shlex.shlex(outer[2], posix=True, punctuation_chars=";")
-            lexer.whitespace_split = True
-            tokens = list(lexer)
-        except ValueError:
-            return None
-        segments: list[list[str]] = [[]]
-        for token in tokens:
-            if token == ";":
-                segments.append([])
-            else:
-                segments[-1].append(token)
-        for segment in segments:
-            if not segment or segment[0] in {"unset", "printf"}:
-                continue
-            if segment[0] == "exec" or "=" in segment[0]:
-                return None
-            return Path(segment[0]).name or None
-        return None
-
-    @classmethod
-    def record_driver_name(cls, record: dict[str, Any]) -> str | None:
-        """The driver program the record's agent command would launch."""
-        driver = record.get("driver") or {}
-        argv = [str(part) for part in driver.get("launch_argv") or []]
-        if not argv:
-            argv = [os.environ.get("SHELL", "/bin/sh")]
-        return Path(argv[0]).name or None
 
     def agent_pane_pid(self, record: dict[str, Any]) -> int | None:
         pane_id = (self.role_panes(record["id"]) or {}).get("agent")

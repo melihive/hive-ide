@@ -50,49 +50,92 @@ class StateStore:
     def config_snapshot_path(self) -> Path:
         return self.workspace_dir / "config.json"
 
-    # Lock depth per lock path, for this process. `flock` locks belong to an open
-    # file description, so a nested `open() + LOCK_EX` from the same process would
-    # block on its own outer lock; a nested entry therefore just rides the held one.
-    _LOCK_DEPTH: dict[str, int] = {}
-    _LOCK_DEPTH_GUARD = threading.Lock()
+    # Owner-aware, reentrant, per-path lock state for this process. `flock` locks
+    # belong to an open file description, so a nested `open() + LOCK_EX` from the
+    # thread that already holds the lock would block on itself; the owning thread
+    # therefore nests by depth, every OTHER thread waits here until the owner has
+    # released, and only then takes the real flock. The table is reset after a
+    # fork: inherited bookkeeping describes the parent's threads, not ours.
+    _LOCKS: dict[str, dict[str, Any]] = {}
+    _LOCKS_GUARD = threading.Lock()
+    _LOCKS_PID = os.getpid()
+
+    @classmethod
+    def _lock_state(cls, key: str) -> dict[str, Any]:
+        with cls._LOCKS_GUARD:
+            if cls._LOCKS_PID != os.getpid():
+                cls._LOCKS = {}
+                cls._LOCKS_PID = os.getpid()
+            state = cls._LOCKS.get(key)
+            if state is None:
+                state = {
+                    "owner": None,
+                    "depth": 0,
+                    "cond": threading.Condition(cls._LOCKS_GUARD),
+                }
+                cls._LOCKS[key] = state
+            return state
 
     @contextmanager
     def mutation_lock(self, *, blocking: bool = True):
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         path = self.workspace_dir / ".mutation.lock"
-        key = str(path)
-        with StateStore._LOCK_DEPTH_GUARD:
-            held = StateStore._LOCK_DEPTH.get(key, 0)
-            if held:
-                StateStore._LOCK_DEPTH[key] = held + 1
-        if held:
+        state = self._lock_state(str(path))
+        cond: threading.Condition = state["cond"]
+        me = (os.getpid(), threading.get_ident())
+        with cond:
+            if state["owner"] == me:
+                state["depth"] += 1
+                nested = True
+            else:
+                if not blocking and state["owner"] is not None:
+                    raise StateError(
+                        f"Cannot lock workspace state {path}: held by another thread"
+                    )
+                while state["owner"] is not None:
+                    cond.wait()
+                # Claim ownership before the flock so other threads queue here.
+                state["owner"] = me
+                state["depth"] = 1
+                nested = False
+        if nested:
             try:
                 yield
             finally:
-                with StateStore._LOCK_DEPTH_GUARD:
-                    StateStore._LOCK_DEPTH[key] -= 1
+                with cond:
+                    if state["owner"] == me and state["depth"] > 1:
+                        state["depth"] -= 1
             return
+        handle = None
         try:
-            with path.open("a+", encoding="utf-8") as handle:
-                flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-                fcntl.flock(handle.fileno(), flags)
-                with StateStore._LOCK_DEPTH_GUARD:
-                    StateStore._LOCK_DEPTH[key] = 1
-                try:
-                    yield
-                finally:
-                    with StateStore._LOCK_DEPTH_GUARD:
-                        StateStore._LOCK_DEPTH.pop(key, None)
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle = path.open("a+", encoding="utf-8")
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), flags)
         except OSError as exc:
+            if handle is not None:
+                handle.close()
+            with cond:
+                state["owner"] = None
+                state["depth"] = 0
+                cond.notify_all()
             raise StateError(f"Cannot lock workspace state {path}: {exc}") from exc
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
+            finally:
+                with cond:
+                    state["owner"] = None
+                    state["depth"] = 0
+                    cond.notify_all()
 
     def mutation_lock_held(self) -> bool:
-        """Is this process inside `mutation_lock` for this workspace right now?"""
-        with StateStore._LOCK_DEPTH_GUARD:
-            return StateStore._LOCK_DEPTH.get(
-                str(self.workspace_dir / ".mutation.lock"), 0
-            ) > 0
+        """Is THIS thread inside `mutation_lock` for this workspace right now?"""
+        state = self._lock_state(str(self.workspace_dir / ".mutation.lock"))
+        with StateStore._LOCKS_GUARD:
+            return state["owner"] == (os.getpid(), threading.get_ident())
 
     @staticmethod
     def new_session_id() -> str:
