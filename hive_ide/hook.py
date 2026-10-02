@@ -71,28 +71,55 @@ class IdeHook:
         return {}
 
     @staticmethod
-    def _ide_context_from_environment() -> tuple[str | None, str | None]:
+    def _tmux_server_matches_marker(socket: str) -> bool:
+        """Is this process attached to the tmux server named by the IDE marker?
+
+        `$TMUX` is `<socket-path>,<pid>,<session>`. A pane id like `%5` is only
+        unique WITHIN one tmux server, and every IDE workspace runs its own server
+        (`hive-ide-next-<hash>`). So a `TMUX_PANE` inherited from a different
+        server's pane names a real-but-unrelated window here, and resolving it
+        would attribute the event to another workspace's session. Treat a pane id
+        as addressable only when the server it came from is the marker's server.
+        """
+        tmux = os.environ.get("TMUX")
+        if not tmux:
+            return False
+        socket_path = tmux.split(",", 1)[0]
+        return bool(socket_path) and os.path.basename(socket_path) == socket
+
+    @staticmethod
+    def _ide_context_from_environment(*, relayed: bool = False) -> tuple[str | None, str | None]:
         """Resolve the IDE workspace/session for a hook event.
 
         New agent panes inherit explicit `HIVE_IDE_*` variables from the frame, but
         tmux also has a session-level environment that can stay pinned to the first
-        window created in that server. When the IDE tmux socket marker is present,
-        the tagged tmux window is the authority. Otherwise, explicit environment
-        values are trusted so tests, relayed writes, and one-off invocations running
-        under an unrelated outer tmux pane are not misdirected. This keeps `/clear`
-        and restarted-in-place chats attached to the visible IDE session without
-        rebuilding the pane.
+        window created in that server. When the IDE tmux socket marker is present
+        AND the pane id is addressable on that server, the tagged tmux window is the
+        authority. Otherwise, explicit environment values are trusted so tests,
+        relayed writes, and one-off invocations running under an unrelated outer
+        tmux pane are not misdirected. This keeps `/clear` and restarted-in-place
+        chats attached to the visible IDE session without rebuilding the pane.
+
+        A relayed event never rediscovers: `_relay` already resolved identity on the
+        originating hop and passes it explicitly. The relayed hop runs under
+        `tmux run-shell` on the IDE server, where the server's own environment can
+        carry an unrelated `TMUX_PANE`; rediscovering there lets that stale pane
+        override the identity the relay was told to write.
         """
         workspace = os.environ.get(IdeHook.ENV_WORKSPACE)
         session_id = os.environ.get(IdeHook.ENV_SESSION_ID)
-        pane = os.environ.get("TMUX_PANE")
-        if workspace and session_id and not os.environ.get(IdeHook.ENV_TMUX_SOCKET):
+        if relayed:
             return workspace, session_id
-        if pane:
+        pane = os.environ.get("TMUX_PANE")
+        socket = os.environ.get(IdeHook.ENV_TMUX_SOCKET)
+        if workspace and session_id and not socket:
+            return workspace, session_id
+        if pane and (not socket or IdeHook._tmux_server_matches_marker(socket)):
             try:
                 result = subprocess.run(
                     [
                         "tmux",
+                        *(["-L", socket] if socket else []),
                         "display-message",
                         "-p",
                         "-t",
@@ -136,7 +163,9 @@ class IdeHook:
             parser.add_argument("--relayed", action="store_true")
             parser.add_argument("payload", nargs="?")
             parsed = parser.parse_args(args)
-            workspace, session_id = IdeHook._ide_context_from_environment()
+            workspace, session_id = IdeHook._ide_context_from_environment(
+                relayed=parsed.relayed
+            )
             if not workspace or not session_id:
                 return 0
             payload = {}

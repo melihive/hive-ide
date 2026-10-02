@@ -360,10 +360,20 @@ class Frame:
         if handshake["package_version"] == source.get("version"):
             return
         if (
-            source.get("kind") == "stable"
+            source.get("kind") in ("stable", "dev")
             and handshake.get("protocol_version") == PROTOCOL_VERSION
             and handshake.get("schema_version") == SCHEMA_VERSION
         ):
+            # A `dev` source floats like a stable one. It points at an editable
+            # checkout whose code is loaded live from the source tree, while
+            # `__version__` comes from the INSTALLED metadata — and an editable
+            # install does not restamp its metadata when the checkout's version
+            # changes. So the pinned version drifts on its own, with nothing about
+            # the interpreter actually broken, and refusing to open the window left
+            # the one dev-pinned session permanently unopenable until a human
+            # re-ran `pip install -e .`. Compatibility is carried by protocol and
+            # schema, which are still checked above; the version is a label.
+            # An explicit source stays strict — its version was chosen, not derived.
             record["source"] = {**source, "version": handshake["package_version"]}
             self.store.write("sessions", record["id"], record)
             return

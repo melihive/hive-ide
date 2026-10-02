@@ -1810,9 +1810,13 @@ def test_hook_prefers_visible_tmux_pane_over_stale_session_environment(tmp_path,
     monkeypatch.setenv("HIVE_IDE_SESSION_ID", stale["id"])
     monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-test")
     monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/hive-ide-test,42,0")
     monkeypatch.setenv("TMUX_PANE", "%7")
 
     def fake_run(argv, **kwargs):
+        if "run-shell" in argv:
+            # Relay unavailable, so this originating hop performs the write itself.
+            return subprocess.CompletedProcess(argv, 1, "", "no server")
         return subprocess.CompletedProcess(
             argv, 0, f"{store.workspace_key}\t{visible['id']}\n", ""
         )
@@ -1827,7 +1831,6 @@ def test_hook_prefers_visible_tmux_pane_over_stale_session_environment(tmp_path,
             "working",
             "--driver",
             "claude",
-            "--relayed",
             '{"session_id":"visible-pane-2"}',
         ]
     ) == 0
@@ -5390,32 +5393,15 @@ def test_list_self_heals_stable_source_metadata(tmp_path, capsys, monkeypatch):
     assert store.find_session(record["id"])["source"]["version"] == "1.0.11"
 
 
-def test_dev_source_version_skew_stays_loud(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    store = StateStore(tmp_path / "state", workspace)
-    record = store.create_session(
-        name="DEV",
-        working_dir=workspace,
-        source={
-            "kind": "dev",
-            "interpreter": sys.executable,
-            "version": "1.0.8",
-        },
-        driver=_term(),
-    )
-    frame = Frame(store)
-    monkeypatch.setattr(
-        "hive_ide.frame.inspect_interpreter",
-        lambda _interpreter: {
-            "package_version": "1.0.10",
-            "protocol_version": 1,
-            "schema_version": 1,
-        },
-    )
-
-    with pytest.raises(UsageError, match="source version changed"):
-        frame._refresh_source_if_needed(record, sys.executable)
+# `test_dev_source_version_skew_stays_loud` was removed here. It asserted that a
+# dev source refuses ANY version drift. That strictness is what left the one
+# dev-pinned session unopenable after every release: an editable install does not
+# restamp its metadata when the checkout's version changes, so the pin drifted on
+# its own with nothing broken. Dev now floats like stable. What must still be loud
+# is covered by `test_dev_source_still_refuses_an_incompatible_protocol` (protocol
+# and schema remain the compatibility gate) and
+# `test_explicit_source_version_drift_still_refuses` (a human-chosen pin stays
+# strict).
 
 
 def test_purge_requires_confirmation_and_removes_all_session_state(
@@ -6162,3 +6148,247 @@ def test_session_error_has_sidebar_priority(tmp_path):
     )
     legacy = {**record, "repo": store.workspace_key}
     assert IdeSidebar._status_dot(store.home, legacy)[0] == "!"
+
+
+def _hook_session(store, name, reference):
+    driver = bundled_drivers()["claude"]
+    return store.create_session(
+        name=name,
+        working_dir=store.workspace_key,
+        source=_source(),
+        driver=driver.resolve(
+            name=name,
+            working_dir=str(store.workspace_key),
+            conversation_reference=reference,
+        ),
+    )
+
+
+def test_relayed_hook_trusts_explicit_identity_over_inherited_tmux_pane(
+    tmp_path, monkeypatch
+):
+    """A relayed write must land on the session the relay named, not on whatever
+    pane the IDE tmux server happens to have in its own environment.
+
+    `_relay` resolves identity on the originating hop and passes it explicitly via
+    `env HIVE_IDE_SESSION_ID=...`. It then runs the hook through
+    `tmux -L <socket> run-shell`, i.e. ON the server, whose environment can carry an
+    unrelated `TMUX_PANE`. Rediscovering identity there overrode the identity the
+    relay was told to write.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    named = _hook_session(store, "NAMED", "named-1")
+    other = _hook_session(store, "OTHER", "other-1")
+
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", named["id"])
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-test")
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    # The server's own stale pane, not the originating agent's.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/hive-ide-test,42,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, f"{store.workspace_key}\t{other['id']}\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "claude",
+            "--relayed",
+            '{"session_id":"relayed-ref"}',
+        ]
+    ) == 0
+
+    assert store.read("status", other["id"]) is None
+    assert store.read("status", named["id"])["conversation_reference"] == "relayed-ref"
+    assert store.find_session(other["id"])["driver"]["resume"]["reference"] == "other-1"
+
+
+def test_hook_ignores_pane_inherited_from_a_different_tmux_server(
+    tmp_path, monkeypatch
+):
+    """A pane id is unique only within one tmux server, and each IDE workspace runs
+    its own. A `TMUX_PANE` inherited from another server's pane names a real but
+    unrelated window here, so it must not be resolved."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    mine = _hook_session(store, "MINE", "mine-1")
+    foreign = _hook_session(store, "FOREIGN", "foreign-1")
+
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", mine["id"])
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-mine")
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    # Attached to a DIFFERENT server than the marker names.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/hive-ide-other,99,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, f"{store.workspace_key}\t{foreign['id']}\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "claude",
+            "--relayed",
+            '{"session_id":"cross-server"}',
+        ]
+    ) == 0
+
+    assert not any("display-message" in argv for argv in calls)
+    assert store.read("status", foreign["id"]) is None
+    assert store.read("status", mine["id"])["conversation_reference"] == "cross-server"
+
+
+def test_hook_pane_lookup_targets_the_marked_tmux_server(tmp_path, monkeypatch):
+    """When the pane IS addressable on the marker's server, the lookup must name
+    that server explicitly — bare `tmux` resolves through `$TMUX`."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    stale = _hook_session(store, "STALE", "stale-1")
+    visible = _hook_session(store, "VISIBLE", "visible-1")
+
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", stale["id"])
+    monkeypatch.setenv("HIVE_IDE_TMUX_SOCKET", "hive-ide-test")
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/hive-ide-test,42,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if "run-shell" in argv:
+            # Relay unavailable, so this hop performs the write itself.
+            return subprocess.CompletedProcess(argv, 1, "", "no server")
+        return subprocess.CompletedProcess(
+            argv, 0, f"{store.workspace_key}\t{visible['id']}\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "claude",
+            '{"session_id":"same-server"}',
+        ]
+    ) == 0
+
+    lookup = next(argv for argv in calls if "display-message" in argv)
+    assert lookup[:3] == ["tmux", "-L", "hive-ide-test"]
+    assert store.read("status", visible["id"])["conversation_reference"] == "same-server"
+
+
+def test_dev_source_version_drift_refreshes_instead_of_refusing(tmp_path, monkeypatch):
+    """An editable install does not restamp its metadata when the checkout's version
+    changes, so a dev-pinned session's version drifts with nothing broken. Refusing
+    left the one dev session unopenable until a human re-ran `pip install -e .`."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="DEV",
+        working_dir=workspace,
+        source={"kind": "dev", "interpreter": sys.executable, "version": "1.0.84"},
+        driver=_term(),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(
+        "hive_ide.frame.inspect_interpreter",
+        lambda _interpreter: {
+            "package_version": "1.0.82",
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+        },
+    )
+
+    frame._refresh_source_if_needed(record, sys.executable)
+
+    assert record["source"]["version"] == "1.0.82"
+    assert record["source"]["kind"] == "dev"
+    assert record["source"]["interpreter"] == sys.executable
+    assert store.find_session(record["id"])["source"]["version"] == "1.0.82"
+
+
+def test_dev_source_still_refuses_an_incompatible_protocol(tmp_path, monkeypatch):
+    """Compatibility rides on protocol/schema, not the version label — so those
+    must still refuse."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="DEV",
+        working_dir=workspace,
+        source={"kind": "dev", "interpreter": sys.executable, "version": "1.0.84"},
+        driver=_term(),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(
+        "hive_ide.frame.inspect_interpreter",
+        lambda _interpreter: {
+            "package_version": "1.0.82",
+            "protocol_version": PROTOCOL_VERSION + 1,
+            "schema_version": SCHEMA_VERSION,
+        },
+    )
+
+    with pytest.raises(UsageError):
+        frame._refresh_source_if_needed(record, sys.executable)
+
+    assert store.find_session(record["id"])["source"]["version"] == "1.0.84"
+
+
+def test_explicit_source_version_drift_still_refuses(tmp_path, monkeypatch):
+    """An explicit source's version was chosen by a human, not derived from an
+    editable checkout, so it stays strict."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="PINNED",
+        working_dir=workspace,
+        source={"kind": "explicit", "interpreter": sys.executable, "version": "1.0.84"},
+        driver=_term(),
+    )
+    frame = Frame(store)
+    monkeypatch.setattr(
+        "hive_ide.frame.inspect_interpreter",
+        lambda _interpreter: {
+            "package_version": "1.0.82",
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+        },
+    )
+
+    with pytest.raises(UsageError):
+        frame._refresh_source_if_needed(record, sys.executable)
