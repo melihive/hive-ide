@@ -4,6 +4,41 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.85] - 2026-10-02
+
+### Fixed
+
+- A session's activity, status dot and conversation id could land on a session
+  in a different workspace. A hook's `HIVE_IDE_*` identity is inherited from the
+  process that starts the agent, and Codex runs every TUI's commands and hooks
+  as children of one shared `app-server --managed-daemon` that keeps the
+  environment of whichever pane first started it. An event is now routed by its
+  conversation reference, which the agent mints per event: an event for a
+  conversation some session already owns goes to that owner, in whatever
+  workspace it lives, and a new conversation whose recorded origin lies outside
+  the named session's workspace is refused rather than claimed. An unknown
+  origin changes nothing.
+- A relayed hook re-ran identity discovery. The relay resolves identity on the
+  originating hop and passes it explicitly, then runs the hook through
+  `tmux run-shell` on the IDE server, whose own environment can carry an
+  unrelated `TMUX_PANE` — which then overrode the identity the relay was told to
+  write. Relayed events use the explicit identity only.
+- The hook's pane lookup named no tmux server. A pane id is unique only within
+  one server and every workspace runs its own, so a `TMUX_PANE` inherited from
+  another server's pane resolved to a real but unrelated window. The lookup now
+  targets the marked server, and a pane id is addressable only when the process
+  is attached to that same server.
+- A `dev` source refused any package-version drift, which left a dev-pinned
+  session unopenable after every release: an editable install does not restamp
+  its metadata when the checkout's version changes, so the pin drifted with
+  nothing broken. A dev source now floats like a stable one. Protocol and schema
+  remain the compatibility gate, and an explicit source stays strict.
+- Adoption searched only the local workspace, and only each record's active
+  driver reference, so it could create a second wrapper for a conversation
+  another workspace already owned or that was parked on a session which had
+  since switched driver. It now asks the same question the ownership check does,
+  over the same ground.
+
 ## [1.0.84] - 2026-09-28
 
 ### Fixed
