@@ -281,7 +281,10 @@ class StateStore:
         return None
 
     def _sessions_in_every_workspace(self) -> Iterator[dict[str, Any]]:
-        yield from self.list("sessions")
+        yield from self._records_in_every_workspace("sessions")
+
+    def _records_in_every_workspace(self, collection: str) -> Iterator[dict[str, Any]]:
+        yield from self.list(collection)
         try:
             others = sorted(
                 path
@@ -292,13 +295,44 @@ class StateStore:
             return
         for workspace_dir in others:
             try:
-                paths = sorted((workspace_dir / "sessions").glob("*.json"))
+                paths = sorted((workspace_dir / collection).glob("*.json"))
             except OSError:
                 continue
             for path in paths:
                 record = self._read_foreign_session(path)
                 if record is not None:
                     yield record
+
+    def conversation_references(self, *, driver_id: str) -> set[str]:
+        """Every conversation a wrapper already references, in any workspace.
+
+        Adoption asks "is this conversation already wrapped?", which is the same
+        question `find_conversation_owner` asks and must be answered over the same
+        ground: conversation ids are global to the driver, so a wrapper in another
+        workspace counts, and a PARKED reference counts too — a session that has
+        switched driver still owns the conversation it switched away from.
+
+        Unlike `find_conversation_owner` this includes archived wrappers, because
+        adoption is about creating a NEW wrapper for a conversation rather than
+        resolving a conflict between two live ones.
+        """
+        references: set[str] = set()
+        if not driver_id:
+            return references
+        for collection in ("sessions", "archive"):
+            for record in self._records_in_every_workspace(collection):
+                driver = record.get("driver")
+                if isinstance(driver, dict) and driver.get("id") == driver_id:
+                    resume = driver.get("resume")
+                    reference = resume.get("reference") if isinstance(resume, dict) else None
+                    if isinstance(reference, str) and reference:
+                        references.add(reference)
+                agents = record.get("agents")
+                resume_ids = agents.get("resume_ids") if isinstance(agents, dict) else None
+                parked = resume_ids.get(driver_id) if isinstance(resume_ids, dict) else None
+                if isinstance(parked, str) and parked:
+                    references.add(parked)
+        return references
 
     @staticmethod
     def _read_foreign_session(path: Path) -> dict[str, Any] | None:

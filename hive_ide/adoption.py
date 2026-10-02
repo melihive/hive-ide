@@ -230,12 +230,9 @@ class ConversationAdopter:
         )
 
     def existing_references(self, *, driver_id: str) -> set[str]:
-        references: set[str] = set()
-        for collection in ("sessions", "archive"):
-            for record in self.store.list(collection):
-                driver = record.get("driver") or {}
-                resume = driver.get("resume") or {}
-                reference = resume.get("reference")
-                if driver.get("id") == driver_id and isinstance(reference, str):
-                    references.add(reference)
-        return references
+        # Delegated so adoption sees the same ground the ownership check does:
+        # every workspace, and parked references as well as the active one. This
+        # scan used to be local-workspace-only and active-reference-only, so
+        # adoption could mint a second wrapper for a conversation another
+        # workspace already owned.
+        return self.store.conversation_references(driver_id=driver_id)

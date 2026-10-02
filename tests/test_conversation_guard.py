@@ -288,3 +288,41 @@ def test_owner_search_skips_an_unreadable_foreign_record(tmp_path):
     broken.write_text("{not json", encoding="utf-8")
 
     assert store.find_conversation_owner(driver_id="codex", reference=REF) is None
+
+
+def test_adoption_sees_a_reference_owned_in_another_workspace(tmp_path):
+    """Adoption asks "is this conversation already wrapped?" — the same question
+    `find_conversation_owner` answers, so it must cover the same ground. A
+    local-workspace-only scan let adoption mint a second wrapper for a
+    conversation another workspace already owned."""
+    from hive_ide.adoption import ConversationAdopter
+
+    store, _record, _workspace = _session(tmp_path, driver_id="codex", reference=None)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    foreign = StateStore(tmp_path / "state", elsewhere)
+    foreign.create_session(
+        name="FLEET",
+        working_dir=elsewhere,
+        source=_source(),
+        driver=bundled_drivers()["codex"].resolve(
+            name="FLEET", working_dir=str(elsewhere), conversation_reference=REF
+        ),
+    )
+
+    adopter = ConversationAdopter(store, {})
+    assert REF in adopter.existing_references(driver_id="codex")
+
+
+def test_adoption_sees_a_parked_reference(tmp_path):
+    """A session that switched driver still owns the conversation it switched away
+    from; that reference lives in `agents.resume_ids`, not in the active driver."""
+    from hive_ide.adoption import ConversationAdopter
+
+    store, record, workspace = _session(tmp_path, driver_id="claude", reference=OTHER)
+    record["agents"] = {"active": "claude", "resume_ids": {"claude": OTHER, "codex": REF}}
+    store.write("sessions", record["id"], record)
+
+    adopter = ConversationAdopter(store, {})
+    assert REF in adopter.existing_references(driver_id="codex")
+    assert OTHER in adopter.existing_references(driver_id="claude")
