@@ -4,6 +4,53 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Repair could kill the agent that invoked it. `repair` runs from inside the
+  session's own window when the Hive skill calls it from the agent pane, and
+  three of its branches (agent pane missing, agent environment belonging to
+  another session, any pane cwd deleted) rebuilt the window: build a replacement,
+  `kill-window` the old one, agent dead with exit 137. `Frame.rebuild` now checks
+  whether the calling process lives in a pane of the window it is about to kill
+  (`$TMUX_PANE`, addressable only on this frame's tmux server) and defers instead:
+  nothing is destroyed, the session record carries a
+  `host.repair.deferred_rebuild` marker, and repair reports the rebuild as
+  deferred with the command to run from outside the window. The next apply-mode
+  repair from outside re-evaluates the checks, rebuilds only if still warranted,
+  and clears the marker either way; a marker alone never rebuilds.
+  `force-rebuild` from inside the window refuses with an error rather than
+  deferring silently, and `switch-driver` reports a deferred relaunch.
+- A deleted sidebar or plan cwd rebuilt the whole window. The incident trigger
+  was exactly this: `plan-set` had respawned the plan pane with the worktree as
+  its cwd, the worktree was deleted by merge cleanup, and the plan pane's dead
+  cwd took the agent pane down with it. Repair now observes which pane lost its
+  cwd and respawns only sidebar/plan panes in place; a rebuild is reserved for
+  the agent pane or an untagged pane nothing can relaunch.
+- Respawned panes inherited the tmux session environment, which keeps the
+  `HIVE_IDE_SESSION_ID` of whichever window first started the server, so a pane
+  relaunched by `respawn_agent`, the sidebar refresh, the plan refresh or
+  `current_plan` carried another session's identity and later tripped the
+  stale-environment rebuild. Every `respawn-pane` and `split-window` now passes
+  the record's own `HIVE_IDE_*` environment. The respawn helpers also refuse to
+  kill the caller's own pane.
+- A failed `list-panes` read as "every pane role is missing" and could authorize
+  a rebuild. Pane observation now distinguishes unobservable (`None`) from
+  absent (`{}`); repair warns "could not observe panes of window X; no rebuild"
+  and does nothing destructive.
+- A `kill-window` that failed after the replacement was built went unnoticed.
+  `rebuild` now raises, naming both windows, so the caller never believes the
+  old window is gone.
+
+### Added
+
+- A per-session repair log in the `repairs` state collection (newest 50 entries):
+  each destructive step is recorded as `planned` before any tmux call and then
+  `completed`, `deferred`, `failed` or `skipped`, with the caller pane, whether it
+  was inside the target window, the observed pane roles and cwds, and the run's
+  actions, warnings and errors. Only identity environment keys are ever logged.
+- `repair` results gain `deferred` (reasons) and `rebuilt`; `Frame.rebuild`
+  returns `{"rebuilt", "deferred", "reason", "window"}`.
+
 ## [1.0.85] - 2026-10-02
 
 ### Fixed

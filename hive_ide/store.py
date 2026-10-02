@@ -25,7 +25,9 @@ def utc_now() -> str:
 class StateStore:
     """Atomic, workspace-scoped protocol state."""
 
-    COLLECTIONS = frozenset({"sessions", "archive", "status", "activity", "errors"})
+    COLLECTIONS = frozenset(
+        {"sessions", "archive", "status", "activity", "errors", "repairs"}
+    )
 
     def __init__(self, home: str | Path, workspace_key: str):
         self.home = Path(home).expanduser().resolve()

@@ -584,15 +584,32 @@ def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     record = _session(store, args.session_id, None)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    window_id = frame.windows().get(record["id"])
+    if window_id and frame.caller_location(window_id) is not False:
+        raise UsageError(
+            f"force-rebuild would kill the window this command runs in ({window_id}); "
+            "run it from another pane or a plain terminal outside the session window."
+        )
     repair = SessionRepair(
         store, frame, registry=configured_registry(config)
     ).repair(record)
     if not repair["ok"]:
-        return {"session_id": record["id"], "rebuilt": False, "repair": repair}
+        return {
+            "session_id": record["id"],
+            "rebuilt": False,
+            "deferred": False,
+            "repair": repair,
+        }
     record = _session(store, args.session_id, None)
-    frame.rebuild(record)
+    result = frame.rebuild(record)
     frame.bind_keys()
-    return {"session_id": record["id"], "rebuilt": True, "repair": repair}
+    return {
+        "session_id": record["id"],
+        "rebuilt": bool(result.get("rebuilt")),
+        "deferred": bool(result.get("deferred")),
+        "window": result.get("window"),
+        "repair": repair,
+    }
 
 
 def cmd_relayout(args: argparse.Namespace) -> dict[str, Any]:
@@ -818,8 +835,21 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     else:
         record.pop("handoff", None)
     store.write("sessions", record["id"], record)
-    Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
-    return record
+    rebuild = Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
+    if rebuild.get("deferred"):
+        # The record is switched; only the window relaunch waits for a repair run
+        # from outside the window (the caller lives in one of its panes).
+        return {
+            **record,
+            "rebuild": {
+                **rebuild,
+                "next_step": (
+                    f"run `hive-ide repair --session-id {record['id']}` from outside "
+                    "the session window to relaunch the new driver"
+                ),
+            },
+        }
+    return {**record, "rebuild": rebuild}
 
 
 def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:

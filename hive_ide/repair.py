@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,9 @@ class SessionRepair:
 
     COMPONENT = "repair"
     REQUIRED_PANE_ROLES = ("sidebar", "agent", "plan")
+    IN_PLACE_ROLES = ("sidebar", "plan")
+    REPAIR_LOG_LIMIT = 50
+    LOG_STAGES = ("planned", "completed", "deferred", "failed", "skipped")
 
     def __init__(
         self,
@@ -90,7 +94,19 @@ class SessionRepair:
                 warnings.append(f"plan file missing: {plan}")
 
         warnings.extend(SessionHealth(self.store, self.frame).hook_warnings(repaired))
-        pane_cwd_warnings = self._pane_cwd_warnings(repaired)
+
+        window_id = self.frame.windows().get(session_id)
+        caller_location = self.frame.caller_location(window_id) if window_id else False
+        # `None` means "on this server but the panes could not be listed": for a
+        # destructive decision that is "possibly inside", never "outside".
+        caller_inside = caller_location is not False
+        pane_roles = self.frame.role_panes(session_id) if window_id else {}
+        if window_id and pane_roles is None:
+            warnings.append(
+                f"could not observe panes of window {window_id}; no rebuild"
+            )
+        cwd_observed = self._observe_pane_cwds(repaired)
+        pane_cwd_warnings = cwd_observed["warnings"]
         warnings.extend(pane_cwd_warnings)
         agent_env_warnings = self._agent_env_warnings(repaired)
         warnings.extend(agent_env_warnings)
@@ -98,23 +114,63 @@ class SessionRepair:
         live_shell_agent = self._has_live_shell_agent(repaired)
         shell_agent = self._shell_agent_pane(repaired)
 
+        pending_marker = self._deferred_rebuild_marker(repaired)
+        if pending_marker and apply:
+            if caller_inside:
+                warnings.append(
+                    "a deferred window rebuild is pending; run "
+                    f"`hive-ide repair --session-id {session_id}` from outside the window"
+                )
+            else:
+                self._clear_deferred_rebuild(repaired)
+                actions.append(
+                    "window: deferred rebuild re-evaluated from outside the window "
+                    f"(deferred for: {pending_marker.get('reason') or 'unknown reason'})"
+                )
+
+        log = {
+            "op_id": uuid.uuid4().hex[:12],
+            "caller_pane": self.frame.caller_pane(),
+            "caller_in_window": caller_location,
+            "target_window": window_id,
+            "pane_roles": pane_roles,
+            "pane_cwds": cwd_observed["panes"],
+            "actions": actions,
+            "warnings": warnings,
+            "errors": errors,
+            "written": 0,
+        }
+        deferred: list[str] = []
+        rebuilt = False
+
         if apply and not errors:
             try:
-                window_exists = repaired["id"] in self.frame.windows()
+                window_exists = window_id is not None
                 if sleeping and not window_exists:
                     actions.append("window: sleeping; not built")
                 elif self.frame.ensure(repaired):
                     actions.append("window: built")
-                elif missing := self._missing_pane_roles(repaired):
+                elif not window_exists:
+                    # ensure() declined to build and there is no window to inspect:
+                    # an absent window has no "missing panes" to rebuild for.
+                    actions.append("window: absent; not built")
+                elif pane_roles is None:
+                    actions.append(
+                        "window: panes unobservable; nothing destructive attempted"
+                    )
+                elif missing := self._missing_pane_roles(pane_roles):
                     if "agent" in missing:
                         if sleeping:
                             warnings.append(
                                 "window missing sleeping agent pane; repair preserved sleep state"
                             )
                         else:
-                            self.frame.rebuild(repaired)
-                            actions.append(
-                                "window: rebuilt for missing panes: " + ", ".join(missing)
+                            rebuilt = self._rebuild(
+                                repaired,
+                                log,
+                                reason="missing panes: " + ", ".join(missing),
+                                branch="missing-agent-pane",
+                                deferred=deferred,
                             )
                     else:
                         restored = self.frame.restore_missing_panes(repaired, missing)
@@ -140,20 +196,50 @@ class SessionRepair:
                             "agent: sleeping; stale environment preserved until wake"
                         )
                     else:
-                        self.frame.rebuild(repaired)
-                        actions.append("window: rebuilt for stale agent environment")
+                        rebuilt = self._rebuild(
+                            repaired,
+                            log,
+                            reason="stale agent environment",
+                            branch="stale-agent-environment",
+                            deferred=deferred,
+                        )
                 elif shell_agent:
                     if sleeping:
                         actions.append("agent: sleeping; exited driver pane preserved")
                     else:
-                        self.frame.respawn_agent(repaired, shell_agent)
-                        actions.append("agent: respawned exited driver pane")
+                        self._log(
+                            repaired,
+                            log,
+                            stage="planned",
+                            reason="exited driver pane",
+                            branch="exited-driver-pane",
+                        )
+                        if self.frame.respawn_agent(repaired, shell_agent):
+                            actions.append("agent: respawned exited driver pane")
+                            self._log(
+                                repaired,
+                                log,
+                                stage="completed",
+                                reason="exited driver pane",
+                                branch="exited-driver-pane",
+                            )
+                        else:
+                            warnings.append(
+                                "agent pane is the caller's own; not respawned"
+                            )
+                            self._log(
+                                repaired,
+                                log,
+                                stage="skipped",
+                                reason="exited driver pane: caller's own pane",
+                                branch="exited-driver-pane",
+                            )
+                elif cwd_observed["deleted"]:
+                    rebuilt = self._repair_deleted_cwds(
+                        repaired, log, cwd_observed["deleted"], deferred=deferred
+                    )
                 elif pane_cwd_warnings:
-                    if self._has_deleted_pane_cwd(pane_cwd_warnings):
-                        self.frame.rebuild(repaired)
-                        actions.append("window: rebuilt for deleted pane cwd")
-                    else:
-                        actions.append("window: pane cwd differs; live panes preserved")
+                    actions.append("window: pane cwd differs; live panes preserved")
                 if self.frame.refresh_sidebar_if_needed(repaired):
                     actions.append("sidebar: refreshed hidden-aware wrapper")
                 if self.frame.retitle_panes(repaired):
@@ -162,6 +248,19 @@ class SessionRepair:
                 self._clear_repair_error(session_id)
             except HiveIdeError as exc:
                 errors.append(str(exc))
+                self._log(
+                    repaired, log, stage="failed", reason=str(exc), branch="exception"
+                )
+            if pending_marker and not caller_inside and not rebuilt and not deferred:
+                actions.append("window: deferred rebuild no longer warranted; marker cleared")
+            if not log["written"]:
+                self._log(
+                    repaired,
+                    log,
+                    stage="skipped",
+                    reason="no destructive repair needed",
+                    branch=None,
+                )
 
         if errors and apply:
             self._record_error(repaired, errors, warnings, actions)
@@ -174,14 +273,192 @@ class SessionRepair:
             "actions": actions,
             "warnings": warnings,
             "errors": errors,
+            "deferred": deferred,
+            "rebuilt": rebuilt,
             "working_dir": repaired.get("working_dir"),
         }
 
-    def _missing_pane_roles(self, record: dict[str, Any]) -> tuple[str, ...]:
-        if record["id"] not in self.frame.windows():
-            return ()
-        roles = self.frame.role_panes(record["id"])
+    def _missing_pane_roles(self, roles: dict[str, str]) -> tuple[str, ...]:
         return tuple(role for role in self.REQUIRED_PANE_ROLES if role not in roles)
+
+    # -- destructive steps -------------------------------------------------
+
+    def _rebuild(
+        self,
+        record: dict[str, Any],
+        log: dict[str, Any],
+        *,
+        reason: str,
+        branch: str,
+        deferred: list[str],
+    ) -> bool:
+        """Rebuild the window, or record a deferral when the caller lives in it."""
+        actions: list[str] = log["actions"]
+        warnings: list[str] = log["warnings"]
+        self._log(record, log, stage="planned", reason=reason, branch=branch)
+        try:
+            result = self.frame.rebuild(record)
+        except HiveIdeError as exc:
+            self._log(record, log, stage="failed", reason=str(exc), branch=branch)
+            raise
+        if result.get("deferred"):
+            why = str(result.get("reason") or "caller-inside-window").replace("-", " ")
+            self._mark_deferred_rebuild(record, reason=reason, op_id=log["op_id"])
+            deferred.append(reason)
+            actions.append(f"window: rebuild deferred ({why}): {reason}")
+            warnings.append(
+                "the window was not rebuilt because this repair ran inside it; run "
+                f"`hive-ide repair --session-id {record['id']}` from outside the "
+                "window (another pane or a plain terminal) to finish the rebuild"
+            )
+            self._log(record, log, stage="deferred", reason=reason, branch=branch)
+            return False
+        actions.append(f"window: rebuilt for {reason}")
+        self._log(record, log, stage="completed", reason=reason, branch=branch)
+        return True
+
+    def _repair_deleted_cwds(
+        self,
+        record: dict[str, Any],
+        log: dict[str, Any],
+        deleted: list[dict[str, str]],
+        *,
+        deferred: list[str],
+    ) -> bool:
+        """Respawn sidebar/plan panes whose cwd vanished; rebuild only for the rest.
+
+        A deleted cwd on a pane the frame can relaunch in place (sidebar, plan)
+        touches only that pane. Only the agent pane, or an untagged pane that
+        nothing can respawn, still costs the whole window.
+        """
+        actions: list[str] = log["actions"]
+        warnings: list[str] = log["warnings"]
+        in_place = [
+            pane
+            for pane in deleted
+            if pane["role"] in self.IN_PLACE_ROLES and pane["pane_id"]
+        ]
+        rebuild_roles = [
+            pane["role"]
+            for pane in deleted
+            if pane["role"] not in self.IN_PLACE_ROLES or not pane["pane_id"]
+        ]
+        if rebuild_roles:
+            return self._rebuild(
+                record,
+                log,
+                reason="deleted pane cwd: " + ", ".join(rebuild_roles),
+                branch="deleted-pane-cwd",
+                deferred=deferred,
+            )
+        reason = "deleted pane cwd: " + ", ".join(pane["role"] for pane in in_place)
+        self._log(record, log, stage="planned", reason=reason, branch="deleted-pane-cwd")
+        skipped = False
+        for pane in in_place:
+            if self.frame.respawn_role_pane(record, pane["role"], pane["pane_id"]):
+                actions.append(f"{pane['role']} pane: respawned (cwd was deleted)")
+            else:
+                skipped = True
+                warnings.append(
+                    f"{pane['role']} pane: cwd was deleted but the pane is the "
+                    "caller's own; not respawned"
+                )
+        self._log(
+            record,
+            log,
+            stage="skipped" if skipped else "completed",
+            reason=reason,
+            branch="deleted-pane-cwd",
+        )
+        return False
+
+    # -- deferred-rebuild marker ------------------------------------------
+
+    @staticmethod
+    def _deferred_rebuild_marker(record: dict[str, Any]) -> dict[str, Any] | None:
+        host = record.get("host")
+        repair_meta = host.get("repair") if isinstance(host, dict) else None
+        marker = repair_meta.get("deferred_rebuild") if isinstance(repair_meta, dict) else None
+        return marker if isinstance(marker, dict) else None
+
+    def _mark_deferred_rebuild(
+        self, record: dict[str, Any], *, reason: str, op_id: str
+    ) -> None:
+        host = dict(record.get("host") or {})
+        repair_meta = dict(host.get("repair") or {})
+        repair_meta["deferred_rebuild"] = {
+            "reason": reason,
+            "op_id": op_id,
+            "requested_at": utc_now(),
+        }
+        host["repair"] = repair_meta
+        record["host"] = host
+        self.store.write("sessions", record["id"], record)
+
+    def _clear_deferred_rebuild(self, record: dict[str, Any]) -> None:
+        host = dict(record.get("host") or {})
+        repair_meta = dict(host.get("repair") or {})
+        if "deferred_rebuild" not in repair_meta:
+            return
+        repair_meta.pop("deferred_rebuild", None)
+        if repair_meta:
+            host["repair"] = repair_meta
+        else:
+            host.pop("repair", None)
+        record["host"] = host
+        self.store.write("sessions", record["id"], record)
+
+    # -- repair log -------------------------------------------------------
+
+    def _log(
+        self,
+        record: dict[str, Any],
+        log: dict[str, Any],
+        *,
+        stage: str,
+        reason: str | None,
+        branch: str | None,
+    ) -> None:
+        """Append one entry to the session's bounded repair log.
+
+        Only identity keys from pane environments ever land here (the roles map and
+        cwd list carry none); the `pane_roles`/`pane_cwds` snapshots are what was
+        observed at the start of this operation, not re-read per stage.
+        """
+        if stage not in self.LOG_STAGES:
+            raise ValueError(f"Unknown repair log stage: {stage}")
+        entry = {
+            "at": utc_now(),
+            "op_id": log["op_id"],
+            "stage": stage,
+            "reason": reason,
+            "branch": branch,
+            "caller_pane": log["caller_pane"],
+            "caller_in_window": log["caller_in_window"],
+            "target_window": log["target_window"],
+            "pane_roles": log["pane_roles"],
+            "pane_cwds": log["pane_cwds"],
+            "actions": list(log["actions"]),
+            "warnings": list(log["warnings"]),
+            "errors": list(log["errors"]),
+        }
+        self.append_repair_log(self.store, record["id"], entry)
+        log["written"] += 1
+
+    @classmethod
+    def append_repair_log(
+        cls, store: StateStore, session_id: str, entry: dict[str, Any]
+    ) -> dict[str, Any]:
+        current = store.read("repairs", session_id) or {}
+        entries = [item for item in current.get("entries") or [] if isinstance(item, dict)]
+        entries.append(entry)
+        document = {
+            "schema_version": SCHEMA_VERSION,
+            "session_id": session_id,
+            "entries": entries[-cls.REPAIR_LOG_LIMIT :],
+        }
+        store.write("repairs", session_id, document)
+        return document
 
     def _remove_duplicate_conversation_refs(
         self,
@@ -280,11 +557,8 @@ class SessionRepair:
             "sessions": results,
         }
 
-    def _has_deleted_pane_cwd(self, warnings: list[str]) -> bool:
-        return any("pane cwd no longer exists:" in warning for warning in warnings)
-
     def _shell_agent_pane(self, record: dict[str, Any]) -> str | None:
-        pane_id = self.frame.role_panes(record["id"]).get("agent")
+        pane_id = (self.frame.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             return None
         command = self.frame.agent_pane_command(record)
@@ -349,9 +623,19 @@ class SessionRepair:
             self.store.write("sessions", record["id"], record)
 
     def _pane_cwd_warnings(self, record: dict[str, Any]) -> list[str]:
+        return self._observe_pane_cwds(record)["warnings"]
+
+    def _observe_pane_cwds(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Observe every pane's cwd in the session window.
+
+        Returns `{"warnings": [str], "deleted": [pane], "panes": [pane]}` where a
+        pane is `{"role", "pane_id", "cwd"}`; `deleted` lists the panes whose cwd
+        no longer exists so the caller can repair exactly those.
+        """
+        observed: dict[str, Any] = {"warnings": [], "deleted": [], "panes": []}
         target = self.frame.windows().get(record["id"])
         if not target:
-            return []
+            return observed
         expected = str(Path(record["working_dir"]).expanduser().resolve())
         panes = self.frame.tmux(
             [
@@ -359,34 +643,43 @@ class SessionRepair:
                 "-t",
                 target,
                 "-F",
-                "#{@hive_ide_pane}\t#{pane_current_path}",
+                "#{@hive_ide_pane}\t#{pane_id}\t#{pane_current_path}",
             ]
         )
         if panes.returncode != 0:
-            return []
-        warnings: list[str] = []
+            return observed
         for line in panes.stdout.splitlines():
-            role, _, raw_path = line.partition("\t")
+            parts = line.split("\t", 2)
+            if len(parts) != 3:
+                continue
+            role, pane_id, raw_path = parts
             if not raw_path.strip():
                 continue
             label = role or "unknown"
             shown_path = raw_path.strip()
+            pane = {"role": label, "pane_id": pane_id.strip(), "cwd": shown_path}
+            observed["panes"].append(pane)
             clean_path = shown_path.removesuffix(" (deleted)")
             current = str(Path(clean_path).expanduser().resolve())
             if shown_path.endswith(" (deleted)") or not Path(clean_path).is_dir():
-                warnings.append(
-                    f"{label} pane cwd no longer exists: {shown_path}; "
-                    "repair will rebuild the window from the session record"
+                observed["deleted"].append(pane)
+                remedy = (
+                    "repair will respawn that pane in place"
+                    if label in self.IN_PLACE_ROLES and pane["pane_id"]
+                    else "repair will rebuild the window from the session record"
+                )
+                observed["warnings"].append(
+                    f"{label} pane cwd no longer exists: {shown_path}; {remedy}"
                 )
             elif current != expected:
-                warnings.append(
+                observed["warnings"].append(
                     f"{label} pane cwd differs from session working_dir: "
                     f"{shown_path} != {expected}; repair preserves the live pane"
                 )
-        return warnings
+        return observed
 
     def _agent_env_warnings(self, record: dict[str, Any]) -> list[str]:
-        pane_id = self.frame.role_panes(record["id"]).get("agent")
+        pane_id = (self.frame.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             return []
         env = self.frame.pane_hive_ide_env(pane_id)
