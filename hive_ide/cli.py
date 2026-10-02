@@ -603,6 +603,9 @@ def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
         }
     record = _session(store, args.session_id, None)
     result = frame.rebuild(record)
+    if result.get("rebuilt"):
+        # A forced rebuild from the record satisfies any deferred rebuild owed.
+        SessionRepair.clear_deferred_rebuild(store, record)
     frame.bind_keys()
     return {
         "session_id": record["id"],
@@ -862,6 +865,11 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             },
         }
+    if rebuild.get("rebuilt"):
+        # The window was just rebuilt from the record: any rebuild still owed by
+        # an earlier deferral (a previous inside switch included) is satisfied,
+        # and a stale driver-switch marker would otherwise rebuild it again.
+        SessionRepair.clear_deferred_rebuild(store, record)
     return {**record, "rebuild": rebuild}
 
 

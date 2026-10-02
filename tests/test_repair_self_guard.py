@@ -824,6 +824,175 @@ def test_deferred_driver_switch_completes_from_outside_on_the_marker(
     assert live.frame.windows()[live.record["id"]] == replacement
 
 
+def test_pending_driver_switch_survives_an_unrelated_inside_deferral(
+    live, monkeypatch, capsys
+):
+    """An inside repair that defers for a stale environment must not overwrite the
+    switch intent; once the environment is clean the outside run performs the
+    switch rebuild and retires everything."""
+    inert = _inert_codex_registry(monkeypatch)
+    healthy = Frame.pane_hive_ide_env
+    live.inside("agent")
+    assert main(
+        [
+            *live.base,
+            "switch-driver",
+            f"--session-id={live.record['id']}",
+            "--driver=codex",
+            f"--tmux-socket={live.socket}",
+        ]
+    ) == 0
+    capsys.readouterr()
+    switch_marker = _marker(live.store, live.record["id"])
+    assert switch_marker["requested_driver"] == "codex"
+
+    _stale_agent_env(monkeypatch)
+    inside = live.repair(inert)
+    assert inside["deferred"] == ["stale agent environment"]
+    marker = _marker(live.store, live.record["id"])
+    assert marker["reason"] == "driver-switch"
+    assert marker["requested_driver"] == "codex"
+    assert marker["op_id"] == switch_marker["op_id"]
+    assert marker["also_pending"] == ["stale agent environment"]
+    # A repeated deferral for the same cause does not duplicate it.
+    live.repair(inert)
+    assert _marker(live.store, live.record["id"])["also_pending"] == ["stale agent environment"]
+
+    monkeypatch.setattr(Frame, "pane_hive_ide_env", healthy)
+    live.outside()
+    result = live.repair(inert)
+
+    assert result["rebuilt"] is True
+    assert "window: rebuilt for deferred driver switch to codex" in result["actions"]
+    assert "window: deferred driver switch to codex completed" in result["actions"]
+    assert _marker(live.store, live.record["id"]) is None
+    assert live.frame.windows()[live.record["id"]] != live.window
+    assert "hive-ide-absent-codex" in _agent_start_command(live.frame, live.record["id"])
+
+
+def test_superseded_switch_with_other_pending_causes_demotes_the_marker(live, monkeypatch):
+    inert = _inert_codex_registry(monkeypatch)
+    record = live.store.find_session(live.record["id"])
+    SessionRepair.mark_deferred_rebuild(
+        live.store, record, reason="driver-switch", op_id="op1", requested_driver="codex"
+    )
+    SessionRepair.mark_deferred_rebuild(
+        live.store, record, reason="stale agent environment", op_id="op2"
+    )
+    assert _marker(live.store, live.record["id"])["also_pending"] == ["stale agent environment"]
+    _stale_agent_env(monkeypatch)  # the other cause is still observed
+    roles = live.frame.role_panes(live.record["id"])
+    # A missing plan pane pre-empts the stale-environment rebuild this run, so
+    # the other cause is still wanted but not performed.
+    assert live.frame.tmux(["kill-pane", "-t", roles["plan"]]).returncode == 0
+    live.outside()
+
+    result = live.repair(inert)  # record runs term, so the switch is superseded
+
+    assert result["rebuilt"] is False
+    assert "window: restored panes: plan" in result["actions"]
+    assert any(
+        action.startswith("window: deferred driver switch superseded")
+        and "still deferred: stale agent environment" in action
+        for action in result["actions"]
+    )
+    demoted = _marker(live.store, live.record["id"])
+    assert demoted["reason"] == "stale agent environment"
+    assert "requested_driver" not in demoted
+    assert "also_pending" not in demoted
+    assert live.frame.windows()[live.record["id"]] == live.window
+
+    # Next outside run: nothing pre-empts, the stale environment is rebuilt for,
+    # and the demoted marker is completed.
+    again = live.repair(inert)
+    assert again["rebuilt"] is True
+    assert "window: rebuilt for stale agent environment" in again["actions"]
+    assert (
+        "window: deferred rebuild completed (deferred for: stale agent environment)"
+        in again["actions"]
+    )
+    assert _marker(live.store, live.record["id"]) is None
+
+
+def test_superseded_switch_whose_other_cause_was_rebuilt_for_clears_everything(
+    live, monkeypatch
+):
+    inert = _inert_codex_registry(monkeypatch)
+    record = live.store.find_session(live.record["id"])
+    SessionRepair.mark_deferred_rebuild(
+        live.store, record, reason="driver-switch", op_id="op1", requested_driver="codex"
+    )
+    SessionRepair.mark_deferred_rebuild(
+        live.store, record, reason="stale agent environment", op_id="op2"
+    )
+    _stale_agent_env(monkeypatch)
+    live.outside()
+
+    result = live.repair(inert)
+
+    assert result["rebuilt"] is True
+    assert "window: rebuilt for stale agent environment" in result["actions"]
+    assert any(
+        action.startswith("window: deferred driver switch superseded")
+        and "still deferred" not in action
+        for action in result["actions"]
+    )
+    assert _marker(live.store, live.record["id"]) is None
+    assert live.frame.windows()[live.record["id"]] != live.window
+
+
+def test_successful_outside_switch_retires_the_deferred_marker(live, monkeypatch, capsys):
+    """A deferred switch, then a successful retry from outside: the marker must go,
+    or the next ordinary repair would rebuild the healthy window again."""
+    inert = _inert_codex_registry(monkeypatch)
+    switch = [
+        *live.base,
+        "switch-driver",
+        f"--session-id={live.record['id']}",
+        "--driver=codex",
+        f"--tmux-socket={live.socket}",
+    ]
+    live.inside("agent")
+    assert main(switch) == 0
+    assert json.loads(capsys.readouterr().out)["rebuild"]["deferred"] is True
+    assert _marker(live.store, live.record["id"])["requested_driver"] == "codex"
+
+    live.outside()
+    assert main(switch) == 0
+    retried = json.loads(capsys.readouterr().out)
+    assert retried["rebuild"]["rebuilt"] is True
+    assert _marker(live.store, live.record["id"]) is None
+    replacement = live.frame.windows()[live.record["id"]]
+    assert replacement != live.window
+
+    again = live.repair(inert)
+    assert again["rebuilt"] is False
+    assert not any(action.startswith("window: rebuilt") for action in again["actions"])
+    assert live.frame.windows()[live.record["id"]] == replacement
+    assert _marker(live.store, live.record["id"]) is None
+
+
+def test_successful_force_rebuild_retires_the_deferred_marker(live, capsys):
+    SessionRepair.mark_deferred_rebuild(
+        live.store, live.store.find_session(live.record["id"]), reason="earlier", op_id="op1"
+    )
+    live.outside()
+
+    assert main(
+        [
+            *live.base,
+            "force-rebuild",
+            f"--session-id={live.record['id']}",
+            f"--tmux-socket={live.socket}",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["rebuilt"] is True
+    assert _marker(live.store, live.record["id"]) is None
+    assert live.frame.windows()[live.record["id"]] != live.window
+
+
 def test_superseded_driver_switch_clears_the_marker_without_rebuilding(live, monkeypatch):
     """The user switched back before an outside repair ran: the record names the
     driver the window already runs, so the marker is just retired."""
@@ -963,6 +1132,120 @@ def test_mutation_lock_is_owned_per_thread_and_orders_contending_writes(tmp_path
     assert order == ["a-nested", "a-exit", "b-enter"]
     assert [entry["at"] for entry in store.read("repairs", "s")["entries"]] == ["a-nested", "b"]
     assert store.mutation_lock_held() is False
+
+
+def _third_party_flock_attempt(lock_path) -> str:
+    """Try a non-blocking exclusive flock from a fresh process; 'blocked' or 'acquired'."""
+    code = (
+        "import fcntl, sys\n"
+        f"handle = open({str(lock_path)!r}, 'a+')\n"
+        "try:\n"
+        "    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    print('acquired')\n"
+        "except OSError:\n"
+        "    print('blocked')\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    ).stdout.strip()
+
+
+def _wait_child(pid: int, timeout: float = 10.0) -> int | None:
+    """Reap a forked child, bounded by the child's own exit (or the timeout)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            return os.waitstatus_to_exitcode(status)
+        time.sleep(0.02)
+    os.kill(pid, 9)
+    os.waitpid(pid, 0)
+    return None
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_forked_child_leaving_the_parents_lock_context_does_not_release_it(tmp_path):
+    """flock(2): the lock belongs to the open file description and is released
+    only when EVERY fd referring to it is closed. The child closes its copy on
+    the way out of the inherited context and must not LOCK_UN."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    lock_path = store.workspace_dir / ".mutation.lock"
+    read_fd, write_fd = os.pipe()
+
+    def child_leaves_inherited_context() -> None:
+        # Unwinding through the parent's `with` runs the context exit in the
+        # child; it must notice it is not the owner and leave the flock alone.
+        try:
+            with store.mutation_lock():
+                assert _third_party_flock_attempt(lock_path) == "blocked"
+                pid = os.fork()
+                if pid == 0:
+                    os.close(read_fd)
+                    raise _LeaveContext()
+                os.close(write_fd)
+                assert _wait_child(pid) == 0
+                assert os.read(read_fd, 8) == b"left"
+                assert store.mutation_lock_held() is True
+                # The child has come and gone: the parent must still hold it.
+                assert _third_party_flock_attempt(lock_path) == "blocked"
+        except _LeaveContext:
+            # Only the child gets here, now outside the inherited context.
+            os.write(write_fd, b"left")
+            os._exit(0)
+
+    child_leaves_inherited_context()
+    os.close(read_fd)
+    assert _third_party_flock_attempt(lock_path) == "acquired"
+
+
+class _LeaveContext(Exception):
+    """Raised inside a forked child to unwind out of an inherited `with` block."""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable")
+def test_child_forked_while_a_sibling_thread_holds_the_guard_can_lock(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    store._lock_state(str(store.workspace_dir / ".mutation.lock"))  # table populated
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_guard():
+        with StateStore._LOCKS_GUARD:
+            holding.set()
+            release.wait(10)
+
+    sibling = threading.Thread(target=hold_guard, daemon=True)
+    sibling.start()
+    assert holding.wait(5)
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            with store.mutation_lock():
+                os.write(write_fd, b"locked")
+        except BaseException as exc:  # noqa: BLE001 - reported to the parent
+            os.write(write_fd, f"error:{exc!r}".encode()[:63])
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        exit_code = _wait_child(pid, timeout=10.0)
+        report = os.read(read_fd, 64).decode()
+    finally:
+        os.close(read_fd)
+        release.set()
+        sibling.join(5)
+
+    assert exit_code == 0, "child deadlocked or crashed on the inherited guard"
+    assert report == "locked"
+    # The parent's own bookkeeping is untouched by the child's reset.
+    with store.mutation_lock():
+        assert store.mutation_lock_held() is True
 
 
 def test_mutation_lock_non_blocking_refuses_another_threads_hold(tmp_path):

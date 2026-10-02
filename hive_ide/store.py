@@ -54,18 +54,32 @@ class StateStore:
     # belong to an open file description, so a nested `open() + LOCK_EX` from the
     # thread that already holds the lock would block on itself; the owning thread
     # therefore nests by depth, every OTHER thread waits here until the owner has
-    # released, and only then takes the real flock. The table is reset after a
-    # fork: inherited bookkeeping describes the parent's threads, not ours.
+    # released, and only then takes the real flock.
+    #
+    # Fork safety: the table and its guard are replaced in a forked child
+    # (`os.register_at_fork`, plus a lazy pid check that never touches the
+    # inherited guard first — a sibling thread may have held it at fork time, and
+    # that thread does not exist in the child). A child that leaves a context the
+    # PARENT entered must not `LOCK_UN` the inherited file description: the lock
+    # belongs to the parent, and closing the child's fd copy does not release it
+    # while the parent's fd still refers to the same description (flock(2)).
     _LOCKS: dict[str, dict[str, Any]] = {}
     _LOCKS_GUARD = threading.Lock()
     _LOCKS_PID = os.getpid()
 
     @classmethod
+    def _reset_locks_after_fork(cls) -> None:
+        cls._LOCKS_GUARD = threading.Lock()
+        cls._LOCKS = {}
+        cls._LOCKS_PID = os.getpid()
+
+    @classmethod
     def _lock_state(cls, key: str) -> dict[str, Any]:
+        if cls._LOCKS_PID != os.getpid():
+            # Belt and braces for the at-fork hook: a fresh guard, never the one
+            # another (now nonexistent) thread may have been holding at fork.
+            cls._reset_locks_after_fork()
         with cls._LOCKS_GUARD:
-            if cls._LOCKS_PID != os.getpid():
-                cls._LOCKS = {}
-                cls._LOCKS_PID = os.getpid()
             state = cls._LOCKS.get(key)
             if state is None:
                 state = {
@@ -102,9 +116,13 @@ class StateStore:
             try:
                 yield
             finally:
-                with cond:
-                    if state["owner"] == me and state["depth"] > 1:
-                        state["depth"] -= 1
+                if os.getpid() == me[0]:
+                    with cond:
+                        if state["owner"] == me and state["depth"] > 1:
+                            state["depth"] -= 1
+                # In a forked child the bookkeeping (and its guard) is the
+                # parent's; the child's table was reset, so there is nothing to
+                # update and nothing safe to wait on.
             return
         handle = None
         try:
@@ -122,14 +140,24 @@ class StateStore:
         try:
             yield
         finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                handle.close()
-            finally:
-                with cond:
-                    state["owner"] = None
-                    state["depth"] = 0
-                    cond.notify_all()
+            if os.getpid() != me[0]:
+                # Forked child leaving the parent's context: the flock is the
+                # parent's. Close only our copy of the fd — that does not release
+                # a lock the parent's fd still holds — and leave the parent's
+                # (inherited, possibly held) guard untouched.
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            else:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    handle.close()
+                finally:
+                    with cond:
+                        state["owner"] = None
+                        state["depth"] = 0
+                        cond.notify_all()
 
     def mutation_lock_held(self) -> bool:
         """Is THIS thread inside `mutation_lock` for this workspace right now?"""
@@ -498,3 +526,9 @@ class StateStore:
         for collection in self.COLLECTIONS:
             self.delete(collection, session_id)
         return True
+
+
+if hasattr(os, "register_at_fork"):
+    # A forked child must not inherit lock bookkeeping, nor a guard some other
+    # thread held at fork time (that thread does not exist in the child).
+    os.register_at_fork(after_in_child=StateStore._reset_locks_after_fork)

@@ -490,15 +490,47 @@ class SessionRepair:
         op_id: str,
         requested_driver: str | None = None,
     ) -> dict[str, Any]:
+        """Record a deferred rebuild, never downgrading a pending driver switch.
+
+        A `driver-switch` marker is an explicit user request; a later unrelated
+        deferral (say, a stale agent environment seen from inside) must not
+        replace it, or the switch intent is lost. Such causes are kept alongside
+        in `also_pending`, which settling prunes as each check clears. A new
+        switch request replaces an older one but inherits its `also_pending`.
+        """
+        existing = SessionRepair.deferred_rebuild_marker(record) or {}
+        existing_reason = existing.get("reason")
+        existing_also = [
+            item
+            for item in existing.get("also_pending") or []
+            if isinstance(item, str) and item
+        ]
+        if existing_reason == "driver-switch" and reason != "driver-switch":
+            marker = dict(existing)
+            also = list(existing_also)
+            if reason not in also:
+                also.append(reason)
+            marker["also_pending"] = also
+        else:
+            marker = {
+                "reason": reason,
+                "op_id": op_id,
+                "requested_at": utc_now(),
+            }
+            if requested_driver:
+                marker["requested_driver"] = requested_driver
+            also = list(existing_also)
+            if (
+                existing_reason
+                and existing_reason not in {reason, "driver-switch"}
+                and existing_reason not in also
+            ):
+                also.append(existing_reason)
+            also = [item for item in also if item != reason]
+            if also:
+                marker["also_pending"] = also
         host = dict(record.get("host") or {})
         repair_meta = dict(host.get("repair") or {})
-        marker: dict[str, Any] = {
-            "reason": reason,
-            "op_id": op_id,
-            "requested_at": utc_now(),
-        }
-        if requested_driver:
-            marker["requested_driver"] = requested_driver
         repair_meta["deferred_rebuild"] = marker
         host["repair"] = repair_meta
         record["host"] = host
@@ -547,38 +579,68 @@ class SessionRepair:
         if not pending:
             return
         owed = pending.get("reason") or "unknown reason"
+        also = [
+            item
+            for item in pending.get("also_pending") or []
+            if isinstance(item, str) and item
+        ]
         if caller_inside:
             return  # the pending warning already says to run from outside
+        # A conclusive run (every observation succeeded, no error) settles each
+        # extra pending cause on its own evidence: it stays only while the
+        # observations still want that rebuild.
+        settled = conclusive and not errors
+        remaining = [item for item in also if item in rebuild_wanted] if settled else also
         if pending.get("reason") == "driver-switch":
             requested = pending.get("requested_driver")
             current = (record.get("driver") or {}).get("id")
             if not requested or requested != current:
-                self.clear_deferred_rebuild(self.store, record)
-                actions.append(
+                note = (
                     "window: deferred driver switch superseded "
                     f"(requested {requested or 'unknown'}, record now runs {current})"
                 )
+                if rebuilt and not errors:
+                    # A rebuild from the record this run satisfies every other
+                    # pending cause as well.
+                    remaining = []
+                if remaining:
+                    # The switch intent is retired; the other deferred causes are
+                    # not, so the marker becomes an ordinary one for them. Clear
+                    # first: mark_deferred_rebuild never downgrades a switch.
+                    self.clear_deferred_rebuild(self.store, record)
+                    self.mark_deferred_rebuild(
+                        self.store, record, reason=remaining[0], op_id=log["op_id"]
+                    )
+                    self._set_also_pending(record, remaining[1:])
+                    note += "; still deferred: " + ", ".join(remaining)
+                else:
+                    self.clear_deferred_rebuild(self.store, record)
+                actions.append(note)
                 return
             if not errors and (
                 built or (rebuilt and log.get("rebuilt_branch") == "driver-switch")
             ):
+                # The rebuild from the record satisfies every pending cause too.
                 self.clear_deferred_rebuild(self.store, record)
                 actions.append(f"window: deferred driver switch to {requested} completed")
                 return
             if deferred:
-                return  # re-deferred; _rebuild refreshed the marker and warned
+                return  # re-deferred; mark_deferred_rebuild kept the switch intent
+            if remaining != also:
+                self._set_also_pending(record, remaining)
             why = "; ".join(errors) if errors else "the rebuild was not performed"
             warnings.append(
                 f"deferred rebuild marker kept (deferred for: driver-switch to "
                 f"{requested}): {why}"
             )
             return
-        if rebuilt and not errors and log.get("rebuilt_reason") == owed:
+        owed_all = [owed, *also]
+        if rebuilt and not errors and log.get("rebuilt_reason") in owed_all:
             self.clear_deferred_rebuild(self.store, record)
             actions.append(f"window: deferred rebuild completed (deferred for: {owed})")
             return
         if deferred:
-            return  # re-deferred; _rebuild refreshed the marker and warned
+            return  # re-deferred; mark_deferred_rebuild carried the earlier cause
         if rebuilt:
             warnings.append(
                 f"deferred rebuild marker kept (deferred for: {owed}): the window was "
@@ -598,17 +660,36 @@ class SessionRepair:
             )
         else:
             why = None
-        if conclusive and why is None:
+        if settled and why is None:
             self.clear_deferred_rebuild(self.store, record)
             actions.append(
                 "window: deferred rebuild no longer warranted; marker cleared "
                 f"(deferred for: {owed})"
             )
             return
+        if remaining != also:
+            self._set_also_pending(record, remaining)
         warnings.append(
             f"deferred rebuild marker kept (deferred for: {owed}): this run was "
             f"not conclusive — {why or 'observations incomplete'}"
         )
+
+    def _set_also_pending(self, record: dict[str, Any], remaining: list[str]) -> None:
+        """Rewrite the marker's `also_pending` list (dropping it when empty)."""
+        marker = self.deferred_rebuild_marker(record)
+        if marker is None:
+            return
+        marker = dict(marker)
+        if remaining:
+            marker["also_pending"] = list(remaining)
+        else:
+            marker.pop("also_pending", None)
+        host = dict(record.get("host") or {})
+        repair_meta = dict(host.get("repair") or {})
+        repair_meta["deferred_rebuild"] = marker
+        host["repair"] = repair_meta
+        record["host"] = host
+        self.store.write("sessions", record["id"], record)
 
     # -- repair log -------------------------------------------------------
 

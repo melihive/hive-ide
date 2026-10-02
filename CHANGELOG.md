@@ -50,7 +50,15 @@ All notable changes to `hive-ide` will be documented in this file.
   the strength of that marker (branch `driver-switch`) and clears it on
   completion. If the record names another driver again the switch was
   superseded and the marker is simply retired. From inside or from an unknown
-  location the marker is kept and the same next step is reported.
+  location the marker is kept and the same next step is reported. A pending
+  switch survives unrelated deferrals: a later inside repair that has to defer
+  for, say, a stale agent environment records that cause in the marker's
+  `also_pending` list instead of replacing the switch, and settling prunes
+  those causes on their own evidence while the switch itself is retired only by
+  completion or supersession. A `switch-driver` or `force-rebuild` that does
+  rebuild the window (run from outside) retires any marker still pending, since
+  the rebuild it just performed satisfies it; otherwise the stale marker would
+  rebuild the healthy window again on the next repair.
 - A deleted sidebar or plan cwd rebuilt the whole window. The incident trigger
   was exactly this: `plan-set` had respawned the plan pane with the worktree as
   its cwd, the worktree was deleted by merge cleanup, and the plan pane's dead
@@ -88,9 +96,12 @@ All notable changes to `hive-ide` will be documented in this file.
   cwds, and the run's actions, warnings and errors. A run with no destructive
   step records one `skipped` entry. Only identity environment keys are ever
   logged. The append runs under the workspace mutation lock, which is now
-  owner-aware: the thread holding it may nest, any other thread waits for the
-  real `flock`, and the bookkeeping resets after a fork. `plan` joined the
-  commands that hold it.
+  owner-aware and fork-safe: the thread holding it may nest, any other thread
+  waits for the real `flock`, a forked child gets a fresh guard and table (an
+  `os.register_at_fork` hook, so a guard a sibling thread held at fork time
+  cannot deadlock the child), and a child that unwinds out of a context the
+  parent entered closes only its own fd copy — never `LOCK_UN`, which would
+  release the parent's lock. `plan` joined the commands that hold it.
 - `repair` results gain `deferred` (the reasons a rebuild was put off) and
   `rebuilt`.
 
