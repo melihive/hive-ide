@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -137,6 +138,19 @@ class CommandDriver:
             return ConversationStatus(ConversationState.UNKNOWN, detail=str(exc))
         return ConversationStatus(ConversationState.UNKNOWN)
 
+    def conversation_origin(self, reference: str) -> str | None:
+        """The working directory a conversation was STARTED in, or None if unknown.
+
+        Used to tell a misattributed event from a real one. None is not evidence
+        of anything — a caller must treat it as "cannot check", never as "foreign".
+        """
+        try:
+            if self.conversation_probe == "codex":
+                return ConversationProbe.codex_origin(reference)
+        except OSError:
+            return None
+        return None
+
     def translate_status(
         self, payload: dict[str, Any], requested_state: str
     ) -> dict[str, Any] | None:
@@ -181,6 +195,39 @@ class ConversationProbe:
     def codex_root() -> Path:
         configured = os.environ.get("CODEX_HOME")
         return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+    @staticmethod
+    def codex_origin(reference: str) -> str | None:
+        """The `cwd` recorded in a codex rollout's header line.
+
+        codex writes the originating working directory into the first JSONL record
+        of every rollout. That is per-conversation and written by codex itself, so
+        it survives an identity that arrived through an inherited environment.
+        """
+        if not ConversationProbe.UUID_RE.fullmatch(reference):
+            return None
+        sessions = ConversationProbe.codex_root() / "sessions"
+        if not sessions.is_dir():
+            return None
+        matches = sorted(sessions.glob(f"*/*/*/rollout-*-{reference}.jsonl"))
+        if not matches:
+            return None
+        try:
+            with matches[0].open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    break
+                else:
+                    return None
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else record
+        cwd = payload.get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else None
 
     @staticmethod
     def codex(reference: str) -> ConversationStatus:

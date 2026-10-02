@@ -11,8 +11,17 @@ single **argv** JSON string. Both carry `cwd` and a session/thread id.
 
 The join is by **immutable session id**, not cwd or display name. The frame exports
 `HIVE_IDE_WORKSPACE_KEY` / `HIVE_IDE_SESSION_ID` into the agent pane, and hooks
-inherit the agent's environment, so an agent launched by the ide always identifies
-the exact record.
+inherit the agent's environment.
+
+Inheriting is the weakness: an environment can be carried by a process that is not
+the pane it came from. Codex runs every TUI's commands and hooks as children of one
+shared `app-server --managed-daemon`, which keeps the environment of whichever pane
+first started it, so every Codex session's events can arrive wearing that one pane's
+identity. The **conversation reference** does not have that problem — it is carried
+per event and minted by the agent — so it outranks the environment: an event for a
+conversation some session already owns is routed to that owner, in whatever
+workspace it lives, and a new conversation whose recorded origin lies outside the
+named session's workspace is refused rather than claimed.
 
 Two writes per turn: the sidebar's status file (the dot), and the matching ide
 session's `last_active` + `agents.resume_ids[<agent>]`. The id arrives here
@@ -33,6 +42,8 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 from .agents import AgentResumeState
 from .config import configured_registry, load_config
@@ -227,6 +238,13 @@ class IdeHook:
             if subagents_running is not None:
                 status["subagents"] = {"running": subagents_running}
                 status["subagents_running"] = subagents_running
+            store, session_id, refused = IdeHook._retarget_by_conversation(
+                store, parsed, session_id, reference, driver
+            )
+            if refused:
+                return 0
+            status["session_id"] = session_id
+            status["workspace_key"] = store.workspace_key
             with store.mutation_lock():
                 record = store.find_session(session_id)
                 if record is None:
@@ -263,6 +281,66 @@ class IdeHook:
         except BaseException:
             pass
         return 0
+
+
+    @staticmethod
+    def _retarget_by_conversation(
+        store: StateStore,
+        parsed: argparse.Namespace,
+        session_id: str,
+        reference: str | None,
+        driver: Any,
+    ) -> tuple[StateStore, str, bool]:
+        """Trust the conversation over the environment it arrived in.
+
+        A hook's `HIVE_IDE_*` identity can be INHERITED rather than observed. Codex
+        runs every TUI's commands and hooks as children of one shared
+        `codex app-server --managed-daemon`, which keeps the environment of
+        whichever pane first started it — so every Codex session's events arrive
+        wearing that one pane's identity, in that one pane's workspace.
+
+        A conversation reference does not have that problem: it is carried per
+        event and minted by the agent itself. So:
+
+        - If some session already owns this conversation, that session IS the
+          target, in whatever workspace it lives. An inherited identity cannot
+          steal an established conversation or divert its activity.
+        - If nobody owns it, the conversation is new, and only its recorded origin
+          can place it. When the agent records one and it falls outside the
+          candidate session's workspace, refuse: a skipped event is recoverable,
+          a conversation claimed by the wrong session is not.
+        - When the origin is unknown, leave the event alone. Unknown is not a
+          verdict, and the drivers that record nothing never had this problem.
+
+        Returns the store and session to write through, plus whether to refuse.
+        """
+        if not reference:
+            return store, session_id, False
+        owner = store.find_conversation_owner(
+            driver_id=parsed.driver, reference=reference, exclude_session_id=None
+        )
+        if owner is not None:
+            if owner.get("id") == session_id:
+                return store, session_id, False
+            owner_workspace = owner.get("workspace_key")
+            if not isinstance(owner_workspace, str) or not owner_workspace:
+                return store, session_id, False
+            if owner_workspace != store.workspace_key:
+                store = StateStore(parsed.state_home, owner_workspace)
+            return store, str(owner["id"]), False
+        probe = getattr(driver, "conversation_origin", None)
+        origin = probe(reference) if callable(probe) else None
+        if not origin:
+            return store, session_id, False
+        record = store.find_session(session_id)
+        if record is None:
+            return store, session_id, False
+        workspace = Path(store.workspace_key).resolve()
+        try:
+            Path(origin).resolve().relative_to(workspace)
+        except ValueError:
+            return store, session_id, True
+        return store, session_id, False
 
     @staticmethod
     def _write_subagent_status(

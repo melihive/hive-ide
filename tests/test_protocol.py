@@ -1845,7 +1845,15 @@ def test_hook_prefers_visible_tmux_pane_over_stale_session_environment(tmp_path,
     )
 
 
-def test_hook_does_not_claim_conversation_owned_by_another_session(tmp_path, monkeypatch):
+def test_hook_routes_an_owned_conversation_to_its_owner(tmp_path, monkeypatch):
+    """An inherited identity must not divert another session's activity.
+
+    Codex runs every TUI's hooks as children of one shared app-server daemon that
+    keeps the environment of whichever pane first started it, so events arrive
+    wearing the wrong session id. The conversation reference is minted per event by
+    the agent itself, so it outranks the environment: the event lands on the
+    session that owns the conversation, and the misnamed session gets nothing.
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -1886,11 +1894,12 @@ def test_hook_does_not_claim_conversation_owned_by_another_session(tmp_path, mon
         ]
     ) == 0
 
-    status = store.read("status", target["id"])
-    assert status["conversation_reference"] == "shared-codex"
-    updated = store.find_session(target["id"])
-    assert "codex" not in updated.get("agents", {}).get("resume_ids", {})
-    assert updated["driver"]["resume"]["reference"] is None
+    # The event belongs to the owner, not to the session the environment named.
+    assert store.read("status", target["id"]) is None
+    assert store.read("status", owner["id"])["conversation_reference"] == "shared-codex"
+    misnamed = store.find_session(target["id"])
+    assert "codex" not in misnamed.get("agents", {}).get("resume_ids", {})
+    assert misnamed["driver"]["resume"]["reference"] is None
     assert store.find_session(owner["id"])["driver"]["resume"]["reference"] == "shared-codex"
 
 
@@ -6392,3 +6401,148 @@ def test_explicit_source_version_drift_still_refuses(tmp_path, monkeypatch):
 
     with pytest.raises(UsageError):
         frame._refresh_source_if_needed(record, sys.executable)
+
+
+def test_hook_routes_an_owned_conversation_across_workspaces(tmp_path, monkeypatch):
+    """The daemon leak as it actually happens: the inherited identity names a
+    session in a DIFFERENT workspace from the one that owns the conversation."""
+    mine = tmp_path / "repo-one"
+    mine.mkdir()
+    theirs = tmp_path / "repo-two"
+    theirs.mkdir()
+    store = StateStore(tmp_path / "state", mine)
+    foreign = StateStore(tmp_path / "state", theirs)
+    codex = bundled_drivers()["codex"]
+    owner = foreign.create_session(
+        name="DEV OPS",
+        working_dir=theirs,
+        source=_source(),
+        driver=codex.resolve(
+            name="DEV OPS", working_dir=str(theirs), conversation_reference="leaked-1"
+        ),
+    )
+    # The pane whose environment the shared daemon kept.
+    first_pane = store.create_session(
+        name="ADMIN",
+        working_dir=mine,
+        source=_source(),
+        driver=codex.resolve(
+            name="ADMIN", working_dir=str(mine), conversation_reference=None
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", first_pane["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "codex",
+            '{"thread-id":"leaked-1"}',
+        ]
+    ) == 0
+
+    assert store.read("status", first_pane["id"]) is None
+    landed = foreign.read("status", owner["id"])
+    assert landed["conversation_reference"] == "leaked-1"
+    assert landed["workspace_key"] == foreign.workspace_key
+    assert landed["session_id"] == owner["id"]
+
+
+def test_hook_refuses_a_new_conversation_started_outside_the_workspace(
+    tmp_path, monkeypatch
+):
+    """Nobody owns it yet, so ownership cannot route it — only the conversation's
+    recorded origin can. A codex rollout started outside this session's workspace
+    is a misattributed event, and claiming it would make the wrong session its
+    permanent owner."""
+    mine = tmp_path / "repo-one"
+    mine.mkdir()
+    elsewhere = tmp_path / "repo-two"
+    elsewhere.mkdir()
+    store = StateStore(tmp_path / "state", mine)
+    codex = bundled_drivers()["codex"]
+    first_pane = store.create_session(
+        name="ADMIN",
+        working_dir=mine,
+        source=_source(),
+        driver=codex.resolve(
+            name="ADMIN", working_dir=str(mine), conversation_reference=None
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", first_pane["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+    monkeypatch.setattr(
+        "hive_ide.drivers.ConversationProbe.codex_origin",
+        staticmethod(lambda _reference: str(elsewhere)),
+    )
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "codex",
+            '{"thread-id":"brand-new"}',
+        ]
+    ) == 0
+
+    assert store.read("status", first_pane["id"]) is None
+    updated = store.find_session(first_pane["id"])
+    assert "codex" not in updated.get("agents", {}).get("resume_ids", {})
+
+
+def test_hook_keeps_a_new_conversation_whose_origin_is_unknown(tmp_path, monkeypatch):
+    """Unknown is not a verdict. A driver that records no origin — claude — never
+    had the shared-daemon problem, so an unanswerable check must not refuse."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = _hook_session(store, "SOLO", None)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "claude",
+            '{"session_id":"no-origin"}',
+        ]
+    ) == 0
+
+    assert store.read("status", record["id"])["conversation_reference"] == "no-origin"
+
+
+def test_codex_origin_reads_the_rollout_header(tmp_path, monkeypatch):
+    """The origin comes from codex's own rollout header, not from our bookkeeping."""
+    from hive_ide.drivers import ConversationProbe
+
+    reference = "01a0f663-a766-7c92-9ed7-46aee207ec68"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    rollout = tmp_path / "sessions" / "2026" / "10" / "01"
+    rollout.mkdir(parents=True)
+    (rollout / f"rollout-2026-10-01T16-35-21-{reference}.jsonl").write_text(
+        json.dumps({"id": reference, "cwd": "/home/x/work/repo-one"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert ConversationProbe.codex_origin(reference) == "/home/x/work/repo-one"
+    assert ConversationProbe.codex_origin("not-a-uuid") is None
