@@ -5237,7 +5237,7 @@ def test_current_chat_wakes_sleeping_shell_pane(tmp_path, monkeypatch):
     monkeypatch.setattr(
         frame,
         "respawn_agent",
-        lambda _record, pane_id: respawned.append((_record["id"], pane_id)),
+        lambda _record, pane_id: respawned.append((_record["id"], pane_id)) or True,
     )
 
     def fake_tmux(args, **_kwargs):

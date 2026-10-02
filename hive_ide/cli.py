@@ -35,6 +35,7 @@ WORKSPACE_MUTATIONS = frozenset(
     {
         "archive",
         "adopt",
+        "plan",
         "attach-conversation",
         "clear-error",
         "create",
@@ -837,15 +838,26 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     store.write("sessions", record["id"], record)
     rebuild = Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
     if rebuild.get("deferred"):
-        # The record is switched; only the window relaunch waits for a repair run
-        # from outside the window (the caller lives in one of its panes).
+        # The record is switched; the window still runs the previous driver. Leave
+        # the same marker repair leaves, so a repair run from outside the window
+        # knows a rebuild was owed; repair's driver-mismatch check then finds the
+        # running driver differs from the record and rebuilds on its own evidence.
+        SessionRepair.mark_deferred_rebuild(
+            store,
+            record,
+            reason="driver-switch",
+            op_id=StateStore.new_session_id()[:12],
+        )
+        command = f"hive-ide repair --session-id {record['id']}"
+        if args.tmux_socket:
+            command += f" --tmux-socket {args.tmux_socket}"
         return {
             **record,
             "rebuild": {
                 **rebuild,
                 "next_step": (
-                    f"run `hive-ide repair --session-id {record['id']}` from outside "
-                    "the session window to relaunch the new driver"
+                    f"run `{command}` from outside the session window (another "
+                    "pane or a plain terminal) to relaunch the new driver"
                 ),
             },
         }

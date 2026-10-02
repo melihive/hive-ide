@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -49,20 +50,49 @@ class StateStore:
     def config_snapshot_path(self) -> Path:
         return self.workspace_dir / "config.json"
 
+    # Lock depth per lock path, for this process. `flock` locks belong to an open
+    # file description, so a nested `open() + LOCK_EX` from the same process would
+    # block on its own outer lock; a nested entry therefore just rides the held one.
+    _LOCK_DEPTH: dict[str, int] = {}
+    _LOCK_DEPTH_GUARD = threading.Lock()
+
     @contextmanager
     def mutation_lock(self, *, blocking: bool = True):
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         path = self.workspace_dir / ".mutation.lock"
+        key = str(path)
+        with StateStore._LOCK_DEPTH_GUARD:
+            held = StateStore._LOCK_DEPTH.get(key, 0)
+            if held:
+                StateStore._LOCK_DEPTH[key] = held + 1
+        if held:
+            try:
+                yield
+            finally:
+                with StateStore._LOCK_DEPTH_GUARD:
+                    StateStore._LOCK_DEPTH[key] -= 1
+            return
         try:
             with path.open("a+", encoding="utf-8") as handle:
                 flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
                 fcntl.flock(handle.fileno(), flags)
+                with StateStore._LOCK_DEPTH_GUARD:
+                    StateStore._LOCK_DEPTH[key] = 1
                 try:
                     yield
                 finally:
+                    with StateStore._LOCK_DEPTH_GUARD:
+                        StateStore._LOCK_DEPTH.pop(key, None)
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         except OSError as exc:
             raise StateError(f"Cannot lock workspace state {path}: {exc}") from exc
+
+    def mutation_lock_held(self) -> bool:
+        """Is this process inside `mutation_lock` for this workspace right now?"""
+        with StateStore._LOCK_DEPTH_GUARD:
+            return StateStore._LOCK_DEPTH.get(
+                str(self.workspace_dir / ".mutation.lock"), 0
+            ) > 0
 
     @staticmethod
     def new_session_id() -> str:

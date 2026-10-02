@@ -10,16 +10,37 @@ All notable changes to `hive-ide` will be documented in this file.
   session's own window when the Hive skill calls it from the agent pane, and
   three of its branches (agent pane missing, agent environment belonging to
   another session, any pane cwd deleted) rebuilt the window: build a replacement,
-  `kill-window` the old one, agent dead with exit 137. `Frame.rebuild` now checks
-  whether the calling process lives in a pane of the window it is about to kill
-  (`$TMUX_PANE`, addressable only on this frame's tmux server) and defers instead:
-  nothing is destroyed, the session record carries a
-  `host.repair.deferred_rebuild` marker, and repair reports the rebuild as
-  deferred with the command to run from outside the window. The next apply-mode
-  repair from outside re-evaluates the checks, rebuilds only if still warranted,
-  and clears the marker either way; a marker alone never rebuilds.
-  `force-rebuild` from inside the window refuses with an error rather than
-  deferring silently, and `switch-driver` reports a deferred relaunch.
+  `kill-window` the old one, agent dead with exit 137. `Frame.rebuild` now asks
+  where the calling process lives before it builds anything, and the answer is
+  tri-state and fails closed. `$TMUX_PANE`, `$TMUX` and the IDE marker
+  `HIVE_IDE_TMUX_SOCKET` are combined: "outside" (the only verdict that permits
+  a kill) requires either no tmux evidence at all or the marker and `$TMUX`
+  agreeing on a different server (compared by full socket path, honouring
+  `TMUX_TMPDIR`), "inside" requires the evidence to agree on this server and the
+  pane to be listed in the window, and every partial or contradictory reading —
+  a pane id with no server evidence, a server marker without a pane id, a
+  marker that disagrees with `$TMUX`, a window whose panes cannot be listed — is
+  unknown and defers. A deferred rebuild destroys nothing and is reported as
+  `deferred`. When `SessionRepair` defers it also leaves a
+  `host.repair.deferred_rebuild` marker on the record and names the command to
+  run from outside the window. `force-rebuild` from inside (or from an unknown
+  location) refuses with an error rather than deferring silently.
+- A deferred rebuild could be forgotten or finished too early. The marker is now
+  cleared only by an apply-mode repair run from outside the window whose checks
+  were conclusive — panes observed, no error — and that either rebuilt or found
+  nothing to rebuild; an inconclusive or failed run keeps it and says so. A
+  marker on its own never triggers a rebuild: the outside run re-evaluates the
+  live checks and rebuilds only on their evidence.
+- `switch-driver` from inside the window left the previous driver running with
+  nothing to finish the job: it persisted the new driver, `rebuild` deferred, and
+  ordinary repair had no check that noticed the window still ran the old one.
+  `switch-driver` now writes the same deferred-rebuild marker (reason
+  `driver-switch`) and names the exact command to run from outside, and repair
+  gained a `driver-mismatch` check: the driver program the agent pane was
+  spawned with (from `#{pane_start_command}`) is compared with the record's
+  `launch_argv[0]`, and a difference is a rebuild branch in its own right, so
+  the outside run rebuilds on its own evidence. A pane whose start command
+  cannot be parsed, or a sleeping agent, is unknown and left alone.
 - A deleted sidebar or plan cwd rebuilt the whole window. The incident trigger
   was exactly this: `plan-set` had respawned the plan pane with the worktree as
   its cwd, the worktree was deleted by merge cleanup, and the plan pane's dead
@@ -30,13 +51,19 @@ All notable changes to `hive-ide` will be documented in this file.
   `HIVE_IDE_SESSION_ID` of whichever window first started the server, so a pane
   relaunched by `respawn_agent`, the sidebar refresh, the plan refresh or
   `current_plan` carried another session's identity and later tripped the
-  stale-environment rebuild. Every `respawn-pane` and `split-window` now passes
-  the record's own `HIVE_IDE_*` environment. The respawn helpers also refuse to
-  kill the caller's own pane.
+  stale-environment rebuild. Every `respawn-pane` and `split-window` the frame
+  issues now passes the record's own `HIVE_IDE_*` environment (`sleep_agent`
+  already did). The repair-driven respawn helpers (`respawn_agent`,
+  `respawn_role_pane` and the sidebar/plan refreshes built on it, and the
+  `current_plan` reopen) kill a pane only when it is provably not the caller's
+  own; `sleep_agent` is deliberately exempt, because sleeping the agent from its
+  own pane is the explicit request.
 - A failed `list-panes` read as "every pane role is missing" and could authorize
   a rebuild. Pane observation now distinguishes unobservable (`None`) from
-  absent (`{}`); repair warns "could not observe panes of window X; no rebuild"
-  and does nothing destructive.
+  absent (`{}`); when the roles cannot be observed repair warns "could not
+  observe panes of window X; no rebuild" and skips every rebuild and respawn
+  branch for that window (the sidebar refresh still runs its own, separate
+  observation and respawns only on a successful one).
 - A `kill-window` that failed after the replacement was built went unnoticed.
   `rebuild` now raises, naming both windows, so the caller never believes the
   old window is gone.
@@ -44,12 +71,26 @@ All notable changes to `hive-ide` will be documented in this file.
 ### Added
 
 - A per-session repair log in the `repairs` state collection (newest 50 entries):
-  each destructive step is recorded as `planned` before any tmux call and then
-  `completed`, `deferred`, `failed` or `skipped`, with the caller pane, whether it
-  was inside the target window, the observed pane roles and cwds, and the run's
-  actions, warnings and errors. Only identity environment keys are ever logged.
-- `repair` results gain `deferred` (reasons) and `rebuilt`; `Frame.rebuild`
-  returns `{"rebuilt", "deferred", "reason", "window"}`.
+  every destructive repair step — a rebuild, a deleted-cwd respawn, an exited
+  driver respawn, a stale sidebar refresh — is recorded as `planned` before its
+  tmux call and then once more as `completed`, `deferred`, `failed` or `skipped`,
+  with the caller pane, the caller-location verdict, the observed pane roles and
+  cwds, and the run's actions, warnings and errors. A run with no destructive
+  step records one `skipped` entry. Only identity environment keys are ever
+  logged. The append runs under the workspace mutation lock (now reentrant
+  within a process), and `plan` joined the commands that hold it.
+- `repair` results gain `deferred` (the reasons a rebuild was put off) and
+  `rebuilt`.
+
+### Changed
+
+- Python API, for callers outside this package: `Frame.rebuild()` now returns
+  `{"rebuilt", "deferred", "reason", "window"}` instead of `None`, and
+  `Frame.role_panes()` returns `None` (not `{}`) when the window's panes cannot
+  be listed. Older Hive skill wrappers keep working on the JSON surface, but a
+  wrapper that treats a missing `rebuilt` key as "not rebuilt" reports an older
+  package's completed rebuilds as not rebuilt; read `actions` when `rebuilt` is
+  absent.
 
 ## [1.0.85] - 2026-10-02
 

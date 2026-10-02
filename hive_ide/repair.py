@@ -97,8 +97,9 @@ class SessionRepair:
 
         window_id = self.frame.windows().get(session_id)
         caller_location = self.frame.caller_location(window_id) if window_id else False
-        # `None` means "on this server but the panes could not be listed": for a
-        # destructive decision that is "possibly inside", never "outside".
+        # `None` is "possibly inside": partial or conflicting caller evidence, or
+        # a window whose panes could not be listed. Only an exact `False` is
+        # "outside" for anything destructive.
         caller_inside = caller_location is not False
         pane_roles = self.frame.role_panes(session_id) if window_id else {}
         if window_id and pane_roles is None:
@@ -111,22 +112,22 @@ class SessionRepair:
         agent_env_warnings = self._agent_env_warnings(repaired)
         warnings.extend(agent_env_warnings)
         sleeping = (repaired.get("sleep") or {}).get("state") == "sleeping"
+        driver_mismatch = None if sleeping else self._driver_mismatch(repaired)
+        if driver_mismatch:
+            observed, expected = driver_mismatch
+            warnings.append(
+                f"agent pane runs {observed} but the record's driver launches "
+                f"{expected}; repair will rebuild the window"
+            )
         live_shell_agent = self._has_live_shell_agent(repaired)
         shell_agent = self._shell_agent_pane(repaired)
 
-        pending_marker = self._deferred_rebuild_marker(repaired)
-        if pending_marker and apply:
-            if caller_inside:
-                warnings.append(
-                    "a deferred window rebuild is pending; run "
-                    f"`hive-ide repair --session-id {session_id}` from outside the window"
-                )
-            else:
-                self._clear_deferred_rebuild(repaired)
-                actions.append(
-                    "window: deferred rebuild re-evaluated from outside the window "
-                    f"(deferred for: {pending_marker.get('reason') or 'unknown reason'})"
-                )
+        pending_marker = self.deferred_rebuild_marker(repaired)
+        if pending_marker and apply and caller_inside:
+            warnings.append(
+                "a deferred window rebuild is pending; run "
+                f"`hive-ide repair --session-id {session_id}` from outside the window"
+            )
 
         log = {
             "op_id": uuid.uuid4().hex[:12],
@@ -139,9 +140,11 @@ class SessionRepair:
             "warnings": warnings,
             "errors": errors,
             "written": 0,
+            "failed_logged": False,
         }
         deferred: list[str] = []
         rebuilt = False
+        conclusive = False
 
         if apply and not errors:
             try:
@@ -203,6 +206,15 @@ class SessionRepair:
                             branch="stale-agent-environment",
                             deferred=deferred,
                         )
+                elif driver_mismatch:
+                    observed, expected = driver_mismatch
+                    rebuilt = self._rebuild(
+                        repaired,
+                        log,
+                        reason=f"driver mismatch: pane runs {observed}, record launches {expected}",
+                        branch="driver-mismatch",
+                        deferred=deferred,
+                    )
                 elif shell_agent:
                     if sleeping:
                         actions.append("agent: sleeping; exited driver pane preserved")
@@ -225,13 +237,13 @@ class SessionRepair:
                             )
                         else:
                             warnings.append(
-                                "agent pane is the caller's own; not respawned"
+                                "agent pane may be the caller's own; not respawned"
                             )
                             self._log(
                                 repaired,
                                 log,
                                 stage="skipped",
-                                reason="exited driver pane: caller's own pane",
+                                reason="exited driver pane: caller location not settled",
                                 branch="exited-driver-pane",
                             )
                 elif cwd_observed["deleted"]:
@@ -240,19 +252,48 @@ class SessionRepair:
                     )
                 elif pane_cwd_warnings:
                     actions.append("window: pane cwd differs; live panes preserved")
-                if self.frame.refresh_sidebar_if_needed(repaired):
-                    actions.append("sidebar: refreshed hidden-aware wrapper")
+                if self.frame.sidebar_refresh_target(repaired):
+                    self._log(
+                        repaired,
+                        log,
+                        stage="planned",
+                        reason="stale sidebar wrapper",
+                        branch="sidebar-refresh",
+                    )
+                    refreshed = self.frame.refresh_sidebar_if_needed(repaired)
+                    if refreshed:
+                        actions.append("sidebar: refreshed hidden-aware wrapper")
+                    self._log(
+                        repaired,
+                        log,
+                        stage="completed" if refreshed else "skipped",
+                        reason="stale sidebar wrapper",
+                        branch="sidebar-refresh",
+                    )
                 if self.frame.retitle_panes(repaired):
                     actions.append("window: retitled panes")
                 self.frame.apply_columns(repaired)
                 self._clear_repair_error(session_id)
+                # Conclusive = every rebuild check ran on observed panes (an absent
+                # window has nothing to observe and nothing to rebuild).
+                conclusive = pane_roles is not None
             except HiveIdeError as exc:
                 errors.append(str(exc))
-                self._log(
-                    repaired, log, stage="failed", reason=str(exc), branch="exception"
-                )
-            if pending_marker and not caller_inside and not rebuilt and not deferred:
-                actions.append("window: deferred rebuild no longer warranted; marker cleared")
+                if not log["failed_logged"]:
+                    self._log(
+                        repaired, log, stage="failed", reason=str(exc), branch="exception"
+                    )
+            self._settle_deferred_marker(
+                repaired,
+                pending_marker,
+                caller_inside=caller_inside,
+                conclusive=conclusive and not errors,
+                rebuilt=rebuilt,
+                deferred=deferred,
+                actions=actions,
+                warnings=warnings,
+                errors=errors,
+            )
             if not log["written"]:
                 self._log(
                     repaired,
@@ -292,7 +333,7 @@ class SessionRepair:
         branch: str,
         deferred: list[str],
     ) -> bool:
-        """Rebuild the window, or record a deferral when the caller lives in it."""
+        """Rebuild the window, or record a deferral when the caller may live in it."""
         actions: list[str] = log["actions"]
         warnings: list[str] = log["warnings"]
         self._log(record, log, stage="planned", reason=reason, branch=branch)
@@ -300,16 +341,20 @@ class SessionRepair:
             result = self.frame.rebuild(record)
         except HiveIdeError as exc:
             self._log(record, log, stage="failed", reason=str(exc), branch=branch)
+            log["failed_logged"] = True
             raise
         if result.get("deferred"):
             why = str(result.get("reason") or "caller-inside-window").replace("-", " ")
-            self._mark_deferred_rebuild(record, reason=reason, op_id=log["op_id"])
+            self.mark_deferred_rebuild(
+                self.store, record, reason=reason, op_id=log["op_id"]
+            )
             deferred.append(reason)
             actions.append(f"window: rebuild deferred ({why}): {reason}")
             warnings.append(
-                "the window was not rebuilt because this repair ran inside it; run "
-                f"`hive-ide repair --session-id {record['id']}` from outside the "
-                "window (another pane or a plain terminal) to finish the rebuild"
+                "the window was not rebuilt because this repair may be running "
+                f"inside it; run `hive-ide repair --session-id {record['id']}` from "
+                "outside the window (another pane or a plain terminal) to finish "
+                "the rebuild"
             )
             self._log(record, log, stage="deferred", reason=reason, branch=branch)
             return False
@@ -360,7 +405,7 @@ class SessionRepair:
             else:
                 skipped = True
                 warnings.append(
-                    f"{pane['role']} pane: cwd was deleted but the pane is the "
+                    f"{pane['role']} pane: cwd was deleted but the pane may be the "
                     "caller's own; not respawned"
                 )
         self._log(
@@ -373,17 +418,23 @@ class SessionRepair:
         return False
 
     # -- deferred-rebuild marker ------------------------------------------
+    #
+    # `host.repair.deferred_rebuild` records that a window rebuild was owed but
+    # could not be performed because the caller may have been inside the window.
+    # Repair and `switch-driver` write it; only a conclusive apply-mode repair
+    # run from outside the window clears it.
 
     @staticmethod
-    def _deferred_rebuild_marker(record: dict[str, Any]) -> dict[str, Any] | None:
+    def deferred_rebuild_marker(record: dict[str, Any]) -> dict[str, Any] | None:
         host = record.get("host")
         repair_meta = host.get("repair") if isinstance(host, dict) else None
         marker = repair_meta.get("deferred_rebuild") if isinstance(repair_meta, dict) else None
         return marker if isinstance(marker, dict) else None
 
-    def _mark_deferred_rebuild(
-        self, record: dict[str, Any], *, reason: str, op_id: str
-    ) -> None:
+    @staticmethod
+    def mark_deferred_rebuild(
+        store: StateStore, record: dict[str, Any], *, reason: str, op_id: str
+    ) -> dict[str, Any]:
         host = dict(record.get("host") or {})
         repair_meta = dict(host.get("repair") or {})
         repair_meta["deferred_rebuild"] = {
@@ -393,20 +444,61 @@ class SessionRepair:
         }
         host["repair"] = repair_meta
         record["host"] = host
-        self.store.write("sessions", record["id"], record)
+        store.write("sessions", record["id"], record)
+        return repair_meta["deferred_rebuild"]
 
-    def _clear_deferred_rebuild(self, record: dict[str, Any]) -> None:
+    @staticmethod
+    def clear_deferred_rebuild(store: StateStore, record: dict[str, Any]) -> bool:
         host = dict(record.get("host") or {})
         repair_meta = dict(host.get("repair") or {})
         if "deferred_rebuild" not in repair_meta:
-            return
+            return False
         repair_meta.pop("deferred_rebuild", None)
         if repair_meta:
             host["repair"] = repair_meta
         else:
             host.pop("repair", None)
         record["host"] = host
-        self.store.write("sessions", record["id"], record)
+        store.write("sessions", record["id"], record)
+        return True
+
+    def _settle_deferred_marker(
+        self,
+        record: dict[str, Any],
+        pending: dict[str, Any] | None,
+        *,
+        caller_inside: bool,
+        conclusive: bool,
+        rebuilt: bool,
+        deferred: list[str],
+        actions: list[str],
+        warnings: list[str],
+        errors: list[str],
+    ) -> None:
+        """Clear a pending marker only after a conclusive pass from outside."""
+        if not pending:
+            return
+        owed = pending.get("reason") or "unknown reason"
+        if caller_inside:
+            return  # the pending warning already says to run from outside
+        if rebuilt:
+            self.clear_deferred_rebuild(self.store, record)
+            actions.append(f"window: deferred rebuild completed (deferred for: {owed})")
+            return
+        if deferred:
+            return  # re-deferred; _rebuild refreshed the marker and warned
+        if conclusive:
+            self.clear_deferred_rebuild(self.store, record)
+            actions.append(
+                "window: deferred rebuild no longer warranted; marker cleared "
+                f"(deferred for: {owed})"
+            )
+            return
+        why = "; ".join(errors) if errors else "panes could not be observed"
+        warnings.append(
+            f"deferred rebuild marker kept (deferred for: {owed}): this run was "
+            f"not conclusive — {why}"
+        )
 
     # -- repair log -------------------------------------------------------
 
@@ -449,15 +541,24 @@ class SessionRepair:
     def append_repair_log(
         cls, store: StateStore, session_id: str, entry: dict[str, Any]
     ) -> dict[str, Any]:
-        current = store.read("repairs", session_id) or {}
-        entries = [item for item in current.get("entries") or [] if isinstance(item, dict)]
-        entries.append(entry)
-        document = {
-            "schema_version": SCHEMA_VERSION,
-            "session_id": session_id,
-            "entries": entries[-cls.REPAIR_LOG_LIMIT :],
-        }
-        store.write("repairs", session_id, document)
+        """Read-modify-write the log under the workspace mutation lock.
+
+        The lock is process-reentrant, so a CLI command that already holds it
+        (every command in `WORKSPACE_MUTATIONS`) just rides it; a caller without
+        it takes it for the duration of the append.
+        """
+        with store.mutation_lock():
+            current = store.read("repairs", session_id) or {}
+            entries = [
+                item for item in current.get("entries") or [] if isinstance(item, dict)
+            ]
+            entries.append(entry)
+            document = {
+                "schema_version": SCHEMA_VERSION,
+                "session_id": session_id,
+                "entries": entries[-cls.REPAIR_LOG_LIMIT :],
+            }
+            store.write("repairs", session_id, document)
         return document
 
     def _remove_duplicate_conversation_refs(
@@ -556,6 +657,24 @@ class SessionRepair:
             "pruned_legacy_plans": pruned_legacy_plans,
             "sessions": results,
         }
+
+    def _driver_mismatch(self, record: dict[str, Any]) -> tuple[str, str] | None:
+        """(observed, expected) driver program names when the agent pane runs a
+        different driver than the record names; None when they agree or when
+        either side cannot be determined."""
+        observed = Frame.driver_command_name(
+            self.frame.agent_pane_start_command(record)
+        )
+        expected = Frame.record_driver_name(record)
+        if not observed or not expected or observed == expected:
+            return None
+        if (record.get("driver") or {}).get("id") == "term":
+            # A terminal session launches `$SHELL`, which `refresh_driver` tracks;
+            # any shell in the pane is the terminal driver, whichever shell the
+            # record names today.
+            if observed in Frame.SHELL_COMMANDS:
+                return None
+        return observed, expected
 
     def _shell_agent_pane(self, record: dict[str, Any]) -> str | None:
         pane_id = (self.frame.role_panes(record["id"]) or {}).get("agent")
