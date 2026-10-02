@@ -59,6 +59,16 @@ All notable changes to `hive-ide` will be documented in this file.
   rebuild the window (run from outside) retires any marker still pending, since
   the rebuild it just performed satisfies it; otherwise the stale marker would
   rebuild the healthy window again on the next repair.
+- The agent pane's identity was read from the deepest process in the pane that
+  carried any `HIVE_IDE_*` variable. Agents spawn background jobs that drop or
+  override `HIVE_IDE_SESSION_ID` for their subprocesses, so such a descendant
+  could mask a genuine mismatch of the pane (a job without the id hid a wrapper
+  that belonged to another session) and, worse, fake one — a job launched with
+  another session's id would have had an outside repair rebuild a healthy
+  window. The identity is now the environment of the pane's own root process
+  (`#{pane_pid}`, the wrapper tmux spawned with the window's `-e` values);
+  only when that environ is unreadable do the root's direct children stand in,
+  in pid order and never deeper.
 - A deleted sidebar or plan cwd rebuilt the whole window. The incident trigger
   was exactly this: `plan-set` had respawned the plan pane with the worktree as
   its cwd, the worktree was deleted by merge cleanup, and the plan pane's dead

@@ -638,6 +638,103 @@ def test_respawned_panes_carry_the_record_session_id_not_the_tmux_session_env(li
     assert live.frame.role_panes(live.record["id"]) == roles
 
 
+def test_pane_identity_is_the_root_process_not_a_descendant(live):
+    """A background job the agent spawned with another session id (or none) is
+    not evidence of what tmux spawned the pane with."""
+    roles = live.frame.role_panes(live.record["id"])
+    root_pid = live.frame._pane_pid(roles["agent"])
+    assert root_pid is not None
+    # The term pane runs `sh -c "…; /bin/sh; …"`: send a background job to that
+    # interactive shell so a grandchild of the pane root carries session B.
+    assert (
+        live.frame.tmux(
+            [
+                "send-keys",
+                "-t",
+                roles["agent"],
+                "env HIVE_IDE_SESSION_ID=someone-else sleep 20 &",
+                "Enter",
+            ]
+        ).returncode
+        == 0
+    )
+
+    def impostor() -> int | None:
+        for pid in Frame._process_tree(root_pid):
+            if pid == root_pid:
+                continue
+            if Frame._process_env(pid).get("HIVE_IDE_SESSION_ID") == "someone-else":
+                return pid
+        return None
+
+    impostor_pid = _wait_for(impostor)
+    try:
+        assert impostor_pid, "the background job with session B never appeared"
+        assert impostor_pid not in Frame._child_pids(root_pid)  # a grandchild
+        assert Frame._process_env(root_pid)["HIVE_IDE_SESSION_ID"] == live.record["id"]
+
+        observed = live.frame.pane_hive_ide_env(roles["agent"])
+
+        assert observed is not None
+        assert observed["HIVE_IDE_SESSION_ID"] == live.record["id"]
+        warnings, seen = SessionRepair(live.store, live.frame)._agent_env_warnings(
+            live.store.find_session(live.record["id"])
+        )
+        assert (warnings, seen) == ([], True)
+        result = live.repair()
+        assert result["rebuilt"] is False
+        assert result["deferred"] == []
+        assert not any("another IDE session" in warning for warning in result["warnings"])
+        assert live.frame.windows()[live.record["id"]] == live.window
+    finally:
+        if impostor_pid:
+            try:
+                os.kill(impostor_pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_pane_identity_falls_back_to_direct_children_only(tmp_path, monkeypatch):
+    """Root unreadable → direct children in pid order, never grandchildren."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket=THIS)
+    monkeypatch.setattr(frame, "_pane_pid", lambda _pane_id: 100)
+    children = {100: [102, 101], 101: [200], 102: [], 200: []}
+    monkeypatch.setattr(Frame, "_child_pids", staticmethod(lambda pid: children.get(pid, [])))
+    envs: dict[int, dict[str, str]] = {}
+    monkeypatch.setattr(Frame, "_process_env", staticmethod(lambda pid: dict(envs.get(pid, {}))))
+
+    # Root readable with session A, grandchild B: the root answers.
+    envs.update({100: {"HIVE_IDE_SESSION_ID": "A", "PATH": "x"}, 200: {"HIVE_IDE_SESSION_ID": "B"}})
+    assert frame.pane_hive_ide_env("%9") == {"HIVE_IDE_SESSION_ID": "A"}
+
+    # Root readable but without IDE keys: observed, no identity — a child's key
+    # is not consulted.
+    envs[100] = {"PATH": "x"}
+    envs[102] = {"HIVE_IDE_SESSION_ID": "C"}
+    assert frame.pane_hive_ide_env("%9") == {}
+
+    # Root unreadable: direct children in pid order; 101 is readable but has no
+    # key, 102 answers. The grandchild 200 (B) is never consulted.
+    envs.pop(100)
+    envs[101] = {"PATH": "x"}
+    assert frame.pane_hive_ide_env("%9") == {"HIVE_IDE_SESSION_ID": "C"}
+
+    # Root unreadable, children readable without keys, grandchild with a key:
+    # observed, no identity — depth stops at one.
+    envs.pop(102)
+    assert frame.pane_hive_ide_env("%9") == {}
+
+    # Root and children unreadable: unobserved.
+    envs.pop(101)
+    assert frame.pane_hive_ide_env("%9") is None
+
+    # Pane pid unresolved: unobserved.
+    monkeypatch.setattr(frame, "_pane_pid", lambda _pane_id: None)
+    assert frame.pane_hive_ide_env("%9") is None
+
+
 def test_respawn_helpers_refuse_the_callers_own_pane(live):
     roles = live.frame.role_panes(live.record["id"])
     pids_before = _pane_pids(live.frame, roles)

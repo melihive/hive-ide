@@ -296,27 +296,55 @@ class Frame:
         return self.caller_location(window_id) is True
 
     def pane_hive_ide_env(self, pane_id: str) -> dict[str, str] | None:
-        """The `HIVE_IDE_*` environment of the pane's process tree.
+        """The `HIVE_IDE_*` environment of the pane's own root process.
 
-        `{}` means the tree was read and carries no IDE identity. `None` means it
-        could not be observed: the pane's pid did not resolve, or no process
-        environment in the tree was readable.
+        The pane's identity is what tmux spawned it with: the `-e` values live in
+        the environment of `#{pane_pid}`, the `sh -c` wrapper. Descendants are
+        not evidence — an agent runs background jobs that drop or override
+        `HIVE_IDE_SESSION_ID` for their own subprocesses, so a deeper process
+        can both mask a genuine mismatch of the pane and fake one on a healthy
+        pane. The root's environ is therefore the answer whenever it is
+        readable, HIVE_IDE_ keys or not. Only when it cannot be read do the
+        root's DIRECT children stand in, in pid order and never deeper: the
+        first with an IDE key answers, else `{}` if any was readable.
+
+        `{}` means an environment was read and carries no IDE identity. `None`
+        means nothing could be observed: the pane's pid did not resolve, or
+        neither the root nor any direct child had a readable environment.
         """
         pid = self._pane_pid(pane_id)
         if pid is None:
             return None
+        root = self._process_env(pid)
+        if root:
+            return self._hive_ide_keys(root)
         readable = False
-        for candidate in reversed(self._process_tree(pid)):
-            env = self._process_env(candidate)
-            if env:
-                readable = True
-            if any(key.startswith("HIVE_IDE_") for key in env):
-                return {
-                    key: value
-                    for key, value in env.items()
-                    if key.startswith("HIVE_IDE_")
-                }
+        for child in sorted(self._child_pids(pid)):
+            env = self._process_env(child)
+            if not env:
+                continue
+            readable = True
+            identity = self._hive_ide_keys(env)
+            if identity:
+                return identity
         return {} if readable else None
+
+    @staticmethod
+    def _hive_ide_keys(env: dict[str, str]) -> dict[str, str]:
+        return {key: value for key, value in env.items() if key.startswith("HIVE_IDE_")}
+
+    @staticmethod
+    def _child_pids(pid: int) -> list[int]:
+        """Direct children of `pid` (from procfs), unordered; `[]` when unreadable."""
+        children = Path(f"/proc/{pid}/task/{pid}/children")
+        try:
+            return [
+                int(item)
+                for item in children.read_text(encoding="utf-8").split()
+                if item.isdigit()
+            ]
+        except OSError:
+            return []
 
     def _pane_pid(self, pane_id: str) -> int | None:
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
@@ -336,16 +364,7 @@ class Frame:
                 continue
             seen.add(current)
             ordered.append(current)
-            children = Path(f"/proc/{current}/task/{current}/children")
-            try:
-                child_ids = [
-                    int(item)
-                    for item in children.read_text(encoding="utf-8").split()
-                    if item.isdigit()
-                ]
-            except OSError:
-                child_ids = []
-            stack.extend(child_ids)
+            stack.extend(Frame._child_pids(current))
         return ordered
 
     @staticmethod
