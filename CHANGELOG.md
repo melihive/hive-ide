@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.86] - 2026-10-04
+
 ### Fixed
 
 - Repair could kill the agent that invoked it. `repair` runs from inside the
