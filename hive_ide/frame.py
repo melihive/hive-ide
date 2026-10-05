@@ -258,6 +258,18 @@ class Frame:
         if server is False:
             return False
         pane = self.caller_pane()
+        if not pane and server is True and self._tmux_var_verdict() is True:
+            # tmux itself places us on this server and gave us no pane: tmux
+            # exports `$TMUX_PANE` into every pane it creates, so a process on
+            # this server without one is a popup, a `run-shell` or a hook — none
+            # of which can BE the pane in question. Reading that as "cannot tell"
+            # is what stopped the sidebar waking a sleeping agent, because the
+            # options modal runs in a popup.
+            #
+            # `$TMUX` is required here, not just the marker. The marker is an
+            # ordinary environment variable that a process can inherit from
+            # somewhere else, so marker-only evidence stays unknown.
+            return False
         if server is None or not pane:
             return None
         return pane == pane_id

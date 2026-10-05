@@ -6624,3 +6624,78 @@ def test_codex_origin_reads_the_rollout_header(tmp_path, monkeypatch):
 
     assert ConversationProbe.codex_origin(reference) == "/home/x/work/repo-one"
     assert ConversationProbe.codex_origin("not-a-uuid") is None
+
+
+def _verdict_frame(tmp_path, socket="hive-ide-next-aaaa1111"):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    return Frame(store, socket=socket)
+
+
+def _caller_env(monkeypatch, **values):
+    for key in ("TMUX", "TMUX_PANE", "HIVE_IDE_TMUX_SOCKET", "TMUX_TMPDIR"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_a_popup_on_this_server_is_not_the_agent_pane(tmp_path, monkeypatch):
+    """The options modal runs in a tmux popup, which has no `$TMUX_PANE`. Reading
+    that as "cannot tell" made every sidebar wake refuse itself with "the agent
+    pane is idle but this command may be running inside it"."""
+    frame = _verdict_frame(tmp_path)
+    _caller_env(
+        monkeypatch,
+        TMUX="/tmp/tmux-1000/hive-ide-next-aaaa1111,26021,0",
+        HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111",
+    )
+
+    assert frame.caller_server() is True
+    assert frame.pane_is_caller("%16") is False
+
+
+def test_marker_only_without_a_pane_id_stays_unknown(tmp_path, monkeypatch):
+    """The marker alone is not enough. It is an ordinary environment variable, so
+    a process can carry it from somewhere else; only `$TMUX` is tmux's own witness
+    that this process is on this server."""
+    frame = _verdict_frame(tmp_path)
+    _caller_env(monkeypatch, HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111")
+
+    assert frame.caller_server() is True
+    assert frame.pane_is_caller("%16") is None
+
+
+def test_the_agent_pane_itself_is_still_recognised(tmp_path, monkeypatch):
+    """The guard must keep working where it matters: a caller running IN the agent
+    pane must never have that pane killed under it."""
+    frame = _verdict_frame(tmp_path)
+    _caller_env(
+        monkeypatch,
+        TMUX="/tmp/tmux-1000/hive-ide-next-aaaa1111,26021,0",
+        TMUX_PANE="%16",
+        HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111",
+    )
+
+    assert frame.pane_is_caller("%16") is True
+    assert frame.pane_is_caller("%15") is False
+
+
+def test_a_malformed_tmux_var_is_still_unknown(tmp_path, monkeypatch):
+    """Evidence that cannot be read is not evidence of being elsewhere."""
+    frame = _verdict_frame(tmp_path)
+    _caller_env(monkeypatch, TMUX="not-a-tmux-var", TMUX_PANE="%16")
+
+    assert frame.caller_server() is None
+    assert frame.pane_is_caller("%16") is None
+
+
+def test_a_stale_pane_id_with_no_server_evidence_is_still_unknown(
+    tmp_path, monkeypatch
+):
+    """A pane id alone says nothing about which server it came from."""
+    frame = _verdict_frame(tmp_path)
+    _caller_env(monkeypatch, TMUX_PANE="%16")
+
+    assert frame.caller_server() is None
+    assert frame.pane_is_caller("%16") is None
