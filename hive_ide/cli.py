@@ -963,19 +963,25 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         Frame(store, socket=socket),
         registry=registry,
     ).repair_all()
-    _reap_dead_sockets(keep={socket})
+    _reap_dead_sockets(Frame(store, socket=socket), keep={socket})
     return Frame(store, socket=socket).open(no_attach=args.no_attach)
 
 
-def _reap_dead_sockets(*, keep: set[str]) -> None:
+def _reap_dead_sockets(frame: Frame, *, keep: set[str]) -> None:
     """Best-effort tidy of this package's abandoned tmux sockets.
 
     `open` is the right moment: it is interactive and infrequent, and the user is
     already waiting on tmux. It is never worth failing an open for, so every
     failure is swallowed — a socket left behind costs nothing but clutter.
+
+    The directory comes from THIS frame's own socket path, not from a global
+    default. Sweeping where our socket actually lives is the correct scope, and
+    it also stops the sweep escaping its context: a test that opens a frame on an
+    isolated `TMUX_TMPDIR` must not reach the developer's real tmux directory.
     """
     try:
-        SocketReaper().sweep(keep=keep, apply=True)
+        directory = Path(frame.socket_path()).parent
+        SocketReaper(directory).sweep(keep=keep, apply=True)
     except Exception:
         pass
 

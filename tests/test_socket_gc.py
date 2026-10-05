@@ -186,3 +186,84 @@ def test_is_listening_distinguishes_live_dead_and_unknown(tmp_path):
         server.close()
 
     assert SocketReaper.is_listening(tmp_path / "hive-ide-absent01") is None
+
+
+def test_a_server_that_starts_mid_sweep_is_not_deleted(tmp_path, monkeypatch):
+    """The window Codex found: between the refusal probe and the unlink, another
+    workspace can bind this very path. tmux binds a NEW socket file, so the inode
+    and mtime change — revalidating just before the unlink turns a deleted live
+    socket into a skipped entry."""
+    path = _dead_socket(tmp_path, "hive-ide-raced001")
+    reaper = SocketReaper(tmp_path)
+    started: list = []
+
+    real_identity = SocketReaper._identity
+
+    def bind_a_server_then_report(entry: Path):
+        # Called from the pre-unlink revalidation: simulate the race by replacing
+        # the stale socket with a live one at the same path, exactly as tmux would.
+        if not started:
+            path.unlink()
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(path))
+            server.listen(1)
+            started.append(server)
+        return real_identity(entry)
+
+    monkeypatch.setattr(
+        SocketReaper, "_identity", staticmethod(bind_a_server_then_report)
+    )
+    try:
+        result = reaper.sweep(apply=True)
+        assert result["dead"] == ["hive-ide-raced001"]
+        assert result["removed"] == []
+        assert path.exists()
+        assert SocketReaper.is_listening(path) is True
+    finally:
+        started[0].close()
+
+
+def test_an_entry_that_vanishes_before_the_unlink_is_skipped(tmp_path, monkeypatch):
+    path = _dead_socket(tmp_path, "hive-ide-vanish01")
+    real_identity = SocketReaper._identity
+
+    def remove_it_first(entry: Path):
+        if entry.name == "hive-ide-vanish01" and entry.exists():
+            entry.unlink()
+        return real_identity(entry)
+
+    monkeypatch.setattr(SocketReaper, "_identity", staticmethod(remove_it_first))
+
+    result = SocketReaper(tmp_path).sweep(apply=True)
+
+    assert result["removed"] == []
+    assert not path.exists()
+
+
+def test_open_sweeps_only_this_frames_socket_directory(tmp_path, monkeypatch):
+    """The sweep must stay inside the directory this frame's socket lives in.
+
+    Taking the directory from a global default let a test that opens a frame on an
+    isolated `TMUX_TMPDIR` reach the developer's real tmux directory and delete
+    sockets there — observed during this package's own suite.
+    """
+    from hive_ide.cli import _reap_dead_sockets
+    from hive_ide.frame import Frame
+    from hive_ide.store import StateStore
+
+    isolated = tmp_path / "isolated" / f"tmux-{os.getuid()}"
+    isolated.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere" / f"tmux-{os.getuid()}"
+    elsewhere.mkdir(parents=True)
+    mine = _dead_socket(isolated, "hive-ide-inscope1")
+    theirs = _dead_socket(elsewhere, "hive-ide-offlimit")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "isolated"))
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket="hive-ide-aaaa1111")
+
+    _reap_dead_sockets(frame, keep={"hive-ide-aaaa1111"})
+
+    assert not mine.exists(), "the frame's own directory should be swept"
+    assert theirs.exists(), "no other directory may be touched"

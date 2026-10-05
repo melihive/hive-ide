@@ -76,18 +76,51 @@ class SocketReaper:
             except OSError:
                 pass
 
-    def _is_reapable(self, entry: Path, keep: set[str]) -> bool:
-        if not entry.name.startswith(self.PREFIX) or entry.name in keep:
-            return False
+    @staticmethod
+    def _identity(entry: Path) -> tuple[int, int, float] | None:
+        """What this path pointed at when we looked: device, inode, mtime."""
         try:
             info = entry.lstat()
         except OSError:
-            return False
+            return None
+        return (info.st_dev, info.st_ino, info.st_mtime)
+
+    def _is_reapable(self, entry: Path, keep: set[str]) -> tuple[int, int, float] | None:
+        """The identity we judged, or None when the entry must be kept."""
+        if not entry.name.startswith(self.PREFIX) or entry.name in keep:
+            return None
+        try:
+            info = entry.lstat()
+        except OSError:
+            return None
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-            return False
+            return None
         if self.now - info.st_mtime < self.MIN_AGE_SECONDS:
-            return False
-        return self.is_listening(entry) is False
+            return None
+        if self.is_listening(entry) is not False:
+            return None
+        return (info.st_dev, info.st_ino, info.st_mtime)
+
+    def _still_the_same_dead_socket(
+        self, entry: Path, judged: tuple[int, int, float]
+    ) -> bool:
+        """Re-check identity immediately before unlinking.
+
+        Between the refusal probe and the unlink, another workspace can start its
+        tmux server on this very path. tmux binds by creating a NEW socket file,
+        so the inode changes — and a freshly bound socket also has a fresh mtime,
+        which the age floor rejects on its own. Checking both just before the
+        unlink turns "the server started while we were deciding" from a deleted
+        live socket into a skipped entry.
+
+        This narrows the window rather than closing it: POSIX offers no
+        unlink-if-unchanged, so a bind landing between this stat and the unlink is
+        still possible. It is microseconds wide, and the cost if it ever lands is
+        a server that new clients cannot reach until its frame is reopened —
+        attached clients hold an open fd and are unaffected. That is the right
+        trade for a sweep whose only job is removing clutter.
+        """
+        return self._identity(entry) == judged
 
     def sweep(self, *, keep: set[str] | None = None, apply: bool = False) -> dict:
         """Report, and optionally remove, the dead sockets in this directory."""
@@ -109,10 +142,13 @@ class SocketReaper:
             scanned += 1
             if len(dead) >= self.MAX_REMOVALS:
                 break
-            if not self._is_reapable(entry, kept):
+            judged = self._is_reapable(entry, kept)
+            if judged is None:
                 continue
             dead.append(entry.name)
             if not apply:
+                continue
+            if not self._still_the_same_dead_socket(entry, judged):
                 continue
             try:
                 entry.unlink()

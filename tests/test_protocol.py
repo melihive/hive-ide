@@ -6633,6 +6633,12 @@ def _verdict_frame(tmp_path, socket="hive-ide-next-aaaa1111"):
     return Frame(store, socket=socket)
 
 
+def _tmux_var(socket_name: str) -> str:
+    """A well-formed `$TMUX` for this user — `Frame.socket_path()` uses os.getuid(),
+    so a hardcoded uid makes the evidence conflict and the verdict go unknown."""
+    return f"/tmp/tmux-{os.getuid()}/{socket_name},26021,0"
+
+
 def _caller_env(monkeypatch, **values):
     for key in ("TMUX", "TMUX_PANE", "HIVE_IDE_TMUX_SOCKET", "TMUX_TMPDIR"):
         monkeypatch.delenv(key, raising=False)
@@ -6647,7 +6653,7 @@ def test_a_popup_on_this_server_is_not_the_agent_pane(tmp_path, monkeypatch):
     frame = _verdict_frame(tmp_path)
     _caller_env(
         monkeypatch,
-        TMUX="/tmp/tmux-1000/hive-ide-next-aaaa1111,26021,0",
+        TMUX=_tmux_var("hive-ide-next-aaaa1111"),
         HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111",
     )
 
@@ -6672,7 +6678,7 @@ def test_the_agent_pane_itself_is_still_recognised(tmp_path, monkeypatch):
     frame = _verdict_frame(tmp_path)
     _caller_env(
         monkeypatch,
-        TMUX="/tmp/tmux-1000/hive-ide-next-aaaa1111,26021,0",
+        TMUX=_tmux_var("hive-ide-next-aaaa1111"),
         TMUX_PANE="%16",
         HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111",
     )
