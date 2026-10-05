@@ -27,6 +27,7 @@ from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
 from .relayout import IdeRelayout
 from .source import inspect_interpreter, resolve_source
+from .socket_gc import SocketReaper
 from .store import StateStore, utc_now
 from .workspace_map import WorkspaceMap
 
@@ -962,7 +963,21 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         Frame(store, socket=socket),
         registry=registry,
     ).repair_all()
+    _reap_dead_sockets(keep={socket})
     return Frame(store, socket=socket).open(no_attach=args.no_attach)
+
+
+def _reap_dead_sockets(*, keep: set[str]) -> None:
+    """Best-effort tidy of this package's abandoned tmux sockets.
+
+    `open` is the right moment: it is interactive and infrequent, and the user is
+    already waiting on tmux. It is never worth failing an open for, so every
+    failure is swallowed — a socket left behind costs nothing but clutter.
+    """
+    try:
+        SocketReaper().sweep(keep=keep, apply=True)
+    except Exception:
+        pass
 
 
 def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
