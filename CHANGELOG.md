@@ -4,6 +4,40 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.87] - 2026-10-05
+
+### Fixed
+
+- Waking a sleeping agent from the session options menu always refused with
+  "the agent pane is idle but this command may be running inside it". The menu
+  runs in a tmux popup, which has `$TMUX` but no `$TMUX_PANE`, so the
+  caller-identity verdict was "cannot tell" and the relaunch declined itself.
+  When tmux places the caller on this server and gives it no pane, the caller is
+  not in a pane here and cannot be the pane being respawned. `$TMUX` is required
+  for this, not the `HIVE_IDE_TMUX_SOCKET` marker, which a process can inherit
+  from elsewhere — so marker-only evidence still defers, and the repair
+  self-guard is unchanged.
+
+### Added
+
+- Abandoned tmux sockets are swept when a frame opens. A socket file outlives
+  its server, so every workspace that has ever opened a frame and every test run
+  leaves one behind; one machine had 934 entries, most of them dead.
+
+  Deleting a live server's socket would cut off every client attached to it, so
+  the sweep is timid by construction. A file is removed only when all of these
+  hold, and any one that cannot be proven keeps it: it sits directly in this
+  frame's own tmux directory; its name is one this package hands out; it is a
+  socket by `lstat`, not a symlink, file or directory; it is owned by this user;
+  it is not the socket in use; it has not been touched for an hour, so a server
+  binding now is not caught mid-start; connecting is explicitly refused, any
+  other error being unknown; and its device, inode and mtime are unchanged when
+  re-checked immediately before the unlink, so a server that starts while the
+  sweep is deciding is skipped rather than deleted.
+
+  The sweep is bounded, each removal is independent, and `open` swallows every
+  failure — a socket left behind costs nothing but clutter.
+
 ## [1.0.86] - 2026-10-04
 
 ### Fixed
