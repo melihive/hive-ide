@@ -7,12 +7,15 @@ owns tmux and the supervisor; consumers never need to call tmux.
 hive-ide pane-lease --session-id ID --role plan --title Monitor --owner-label client -- python -m my_monitor
 hive-ide pane-status --session-id ID
 hive-ide pane-release --lease LEASE_ID --token TOKEN
+# The equals form also accepts older tokens beginning with a dash:
+hive-ide pane-release --lease LEASE_ID --token=TOKEN
 ```
 
 `--cwd DIR` overrides the child's working directory. Without it, the session's
 working directory is used. Arguments after `--` are passed literally, including
-`--quiet`; they are not interpreted as a shell string. Use `sh -c '…'` explicitly
-when a shell is needed. Acquisition returns immediately after spawning the
+`--quiet`, spaces, quotes, and semicolons; they are not interpreted as shell or
+tmux commands. Use `sh -c '…'` explicitly when a shell is needed. Acquisition
+returns immediately after spawning the
 supervisor; the child may subsequently fail to start.
 
 All commands accept the usual global `--state-home` and `--workspace-key` before
@@ -20,7 +23,10 @@ the subcommand. Acquisition/release also accept `--tmux-socket` for an explicitl
 selected frame. Otherwise the saved frame configuration selects the socket.
 
 Acquire returns `{lease_id, token, pane_id, session_id, role}`. Keep the token for
-release. Status returns `{leases: [...]}`, with `alive` indicating supervisor
+release. New tokens start with `t` followed by a URL-safe random string, so they
+never begin with `-`. Treat tokens as opaque; existing tokens remain valid. Use
+`--token=TOKEN` when supplying an older token that starts with `-`.
+Status returns `{leases: [...]}`, with `alive` indicating supervisor
 liveness. Status and refusal summaries omit the token. A live lease refuses a
 second acquire with exit 2 and `{error: "pane_leased", lease: {...}}`. Release
 errors also exit 2: `forbidden` carries `status: 403`; `lease_not_found` carries
@@ -43,6 +49,11 @@ pane titles, clears the lease, and execs the default command in place. A cleared
 or unavailable plan displays `No plan linked.` The default command ends in an
 interactive shell when the editor exits.
 
+Restoration preserves the pane's previous `remain-on-exit` setting, including
+`failed`. If the setting was inherited from the window or global scope, the
+temporary pane override is removed so inheritance continues. Older lease
+records without inheritance metadata restore their saved value.
+
 Missing executables and nonzero exits in the first second print a reason and
 pause briefly before restoration. All fast failures are reported, including
 silent failures, so stdout/stderr can remain attached directly to the tty.
@@ -54,8 +65,12 @@ programs that deliberately daemonize into another session are outside this scope
 If restoration itself fails, the supervisor prints the reason and execs `$SHELL`
 (with `/bin/sh` as a fallback) and clears the lease when state storage is writable.
 SIGKILL cannot run cleanup: leased
-panes use tmux's `remain-on-exit` until restored. `repair`, release, or the next
-acquire reaps a dead supervisor and restores the pane. Destroyed panes/windows
+panes use tmux's `remain-on-exit` until restored. `repair`, release, the next
+acquire, and ordinary pane mutations (`plan`, path-changing `plan-set` including
+`--clear`, plan refresh, missing-pane recovery, and rebuild) reap a dead
+supervisor under the mutation lock before replacing content. Reaping restores
+pane settings and clears the lease, so later repair or release cannot replace
+the recovered content through a stale lease. Destroyed panes/windows
 are recreated from their session record when recovery runs. There is no guarantee
 of automatic recovery after loss of the tmux server, machine, or state storage.
 

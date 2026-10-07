@@ -10,7 +10,12 @@ import termios
 import time
 
 from .frame import Frame
-from .pane_lease import LeaseStore, PaneLeases, process_start
+from .pane_lease import (
+    LeaseStore,
+    PaneLeases,
+    process_start,
+    remain_on_exit_restore_args,
+)
 from .store import StateStore
 
 
@@ -116,14 +121,7 @@ def supervise(lease_id: str, role: str, argv: list[str]) -> None:
             for args in (
                 ["select-pane", "-T", title, "-t", pane],
                 ["set-option", "-p", "-t", pane, "@hive_ide_title", title],
-                [
-                    "set-option",
-                    "-p",
-                    "-t",
-                    pane,
-                    "remain-on-exit",
-                    current["previous"].get("remain_on_exit", "off"),
-                ],
+                remain_on_exit_restore_args(pane, current["previous"]),
             ):
                 result = frame.tmux(args)
                 if result.returncode:

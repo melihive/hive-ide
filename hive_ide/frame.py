@@ -1564,10 +1564,12 @@ class Frame:
             "plan": self._plan_command(record),
         }
         for role in missing_roles:
-            if LeaseStore(self.store).live(record["id"], role):
-                if not force:
+            leases = LeaseStore(self.store)
+            lease = leases.read(record["id"], role) if role == "plan" else None
+            if lease:
+                if leases.alive(lease) and not force:
                     continue
-                PaneLeases(self).check(record["id"], role, force=True)
+                PaneLeases(self).check(record["id"], role, force=force)
                 if role in (self.role_panes(record["id"]) or {}):
                     restored.append(role)
                     continue

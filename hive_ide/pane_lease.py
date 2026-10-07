@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import secrets
+import shlex
 import signal
 import subprocess
 import time
@@ -59,6 +60,20 @@ def process_start(pid: int | None) -> str | None:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         return None
+
+
+def remain_on_exit_restore_args(pane: str, previous: dict) -> list[str]:
+    # Older records did not track inheritance; preserve their saved value.
+    if previous.get("remain_on_exit_local", True):
+        return [
+            "set-option",
+            "-p",
+            "-t",
+            pane,
+            "remain-on-exit",
+            previous.get("remain_on_exit", "off"),
+        ]
+    return ["set-option", "-p", "-u", "-t", pane, "remain-on-exit"]
 
 
 class LeaseStore:
@@ -139,13 +154,16 @@ class PaneLeases:
     def check(
         self, session_id: str, role: str = "plan", *, force: bool = False
     ) -> None:
+        if role != "plan":
+            return
         with self.store.mutation_lock():
-            lease = self.leases.live(session_id, role)
+            lease = self.leases.read(session_id, role)
             if lease:
-                if not force:
+                if self.leases.alive(lease) and not force:
                     raise LeaseError("pane_leased", lease=self.leases.summary(lease))
+                # Reap dead leases before allowing ordinary pane mutations.
                 # Force is still subject to the ordinary caller guard.
-                self.restore(lease, force=True)
+                self.restore(lease, force=force)
 
     def _pane(self, lease: dict) -> str | None:
         roles = self.frame.role_panes(lease["session_id"])
@@ -202,16 +220,14 @@ class PaneLeases:
                 raise LeaseError(
                     "restore_failed", message="Could not restore the leased pane."
                 )
-            self.frame.tmux(
-                [
-                    "set-option",
-                    "-p",
-                    "-t",
-                    pane,
-                    "remain-on-exit",
-                    current["previous"].get("remain_on_exit", "off"),
-                ]
+            result = self.frame.tmux(
+                remain_on_exit_restore_args(pane, current["previous"])
             )
+            if result.returncode:
+                raise LeaseError(
+                    "restore_failed",
+                    message=result.stderr.strip() or "Could not restore pane options.",
+                )
         elif record:
             # A destroyed window/pane is reconstructed through the usual frame path.
             self.leases.clear(current)
@@ -243,10 +259,8 @@ class PaneLeases:
         if not Path(working_dir).is_dir():
             raise UsageError(f"Lease working directory does not exist: {working_dir}")
         with self.store.mutation_lock():
-            old = self.leases.read(record["id"], role)
-            if old:
-                self.check(record["id"], role)
-                self.restore(old)
+            self.leases.path(record["id"], role)  # Validate the requested lease role.
+            self.check(record["id"], role)
             pane = (self.frame.role_panes(record["id"]) or {}).get(role)
             if not pane:
                 raise LeaseError(
@@ -277,16 +291,16 @@ class PaneLeases:
             previous_title = self.frame.tmux(
                 ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"]
             ).stdout.strip()
-            previous_remain = (
-                self.frame.tmux(
-                    ["show-options", "-p", "-v", "-t", pane, "remain-on-exit"]
-                ).stdout.strip()
-                or "off"
-            )
+            local_remain = self.frame.tmux(
+                ["show-options", "-p", "-v", "-t", pane, "remain-on-exit"]
+            ).stdout.strip()
+            previous_remain = self.frame.tmux(
+                ["show-options", "-p", "-v", "-A", "-t", pane, "remain-on-exit"]
+            ).stdout.strip()
             lease = {
                 "schema_version": 1,
                 "lease_id": uuid.uuid4().hex,
-                "token": secrets.token_urlsafe(32),
+                "token": "t" + secrets.token_urlsafe(32),
                 "session_id": record["id"],
                 "role": role,
                 "pid": None,
@@ -298,6 +312,7 @@ class PaneLeases:
                 "previous": {
                     "title": previous_title,
                     "remain_on_exit": previous_remain,
+                    "remain_on_exit_local": bool(local_remain),
                 },
             }
             self.leases.write(lease)
@@ -316,10 +331,19 @@ class PaneLeases:
                         *self.frame._environment(record, role=role),
                         "-e",
                         f"HIVE_IDE_PANE_LEASE={lease['lease_id']}",
-                        *PythonCommand.module_argv(
-                            "pane_supervisor",
-                            ["--lease", lease["lease_id"], "--role", role, "--", *argv],
-                            python=self.frame._record_python(record),
+                        shlex.join(
+                            PythonCommand.module_argv(
+                                "pane_supervisor",
+                                [
+                                    "--lease",
+                                    lease["lease_id"],
+                                    "--role",
+                                    role,
+                                    "--",
+                                    *argv,
+                                ],
+                                python=self.frame._record_python(record),
+                            )
                         ),
                     ]
                 )

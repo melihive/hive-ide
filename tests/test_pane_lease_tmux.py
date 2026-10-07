@@ -192,6 +192,164 @@ def test_repair_dead_supervisor(pane):
     wait_for(lambda: "ORIGINAL PLAN" in content(frame, result["pane_id"]))
 
 
+def test_plan_clear_reaps_dead_lease_before_mutation(pane, monkeypatch, capsys):
+    frame, record, manager, base = pane
+    pane_id = frame.role_panes(record["id"])["plan"]
+    frame.tmux(["set-option", "-p", "-t", pane_id, "remain-on-exit", "off"])
+    result = acquire(manager, record)
+    lease = manager.leases.read(record["id"])
+    os.kill(lease["pid"], signal.SIGKILL)
+    wait_for(lambda: not manager.leases.alive(lease))
+    restore = PaneLeases.restore
+    restored = []
+
+    def checked_restore(self, *args, **kwargs):
+        assert self.store.mutation_lock_held()
+        restored.append(True)
+        return restore(self, *args, **kwargs)
+
+    monkeypatch.setattr(PaneLeases, "restore", checked_restore)
+    assert (
+        main(
+            [
+                *base,
+                "plan-set",
+                "--session-id",
+                record["id"],
+                "--tmux-socket",
+                frame.socket,
+                "--clear",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert manager.leases.read(record["id"]) is None
+    assert restored
+    assert (
+        frame.tmux(
+            [
+                "show-options",
+                "-p",
+                "-v",
+                "-t",
+                pane_id,
+                "remain-on-exit",
+            ]
+        ).stdout.strip()
+        == "off"
+    )
+    wait_for(lambda: "No plan linked" in content(frame, pane_id))
+    recovered_pid = frame._pane_pid(pane_id)
+    record = frame.store.find_session(record["id"])
+    assert SessionRepair(frame.store, frame).repair(record)["ok"]
+    assert (
+        main(
+            [
+                *base,
+                "pane-release",
+                "--lease",
+                result["lease_id"],
+                "--tmux-socket",
+                frame.socket,
+                f"--token={result['token']}",
+            ]
+        )
+        == 2
+    )
+    assert json.loads(capsys.readouterr().out)["error"] == "lease_not_found"
+    assert frame._pane_pid(pane_id) == recovered_pid
+    assert process_alive(recovered_pid)
+
+
+def test_child_arguments_survive_tmux_command_parser(pane, tmp_path):
+    frame, record, manager, base = pane
+    output = tmp_path / "literal-argv.json"
+    expected = ["arg;", "next", "a b", "$(x)", "'q'", "--quiet"]
+    code = (
+        "import sys,pathlib,json,time; "
+        f"pathlib.Path({str(output)!r}).write_text(json.dumps(sys.argv[1:])); "
+        "time.sleep(60)"
+    )
+    result = manager.acquire(
+        record,
+        role="plan",
+        title="Literal arguments",
+        argv=[sys.executable, "-c", code, *expected],
+    )
+    wait_for(output.exists)
+    assert json.loads(output.read_text()) == expected
+    assert manager.release(result["lease_id"], result["token"])["released"]
+
+
+def test_missing_pane_recovery_reaps_dead_lease(pane):
+    frame, record, manager, base = pane
+    result = acquire(manager, record)
+    lease = manager.leases.read(record["id"])
+    os.kill(lease["pid"], signal.SIGKILL)
+    wait_for(lambda: not manager.leases.alive(lease))
+    frame.tmux(["kill-pane", "-t", result["pane_id"]])
+    assert frame.restore_missing_panes(record, ("plan",)) == ("plan",)
+    assert manager.leases.read(record["id"]) is None
+    window = frame.windows()[record["id"]]
+    roles = frame.tmux(
+        [
+            "list-panes",
+            "-t",
+            window,
+            "-F",
+            "#{@hive_ide_pane}",
+        ]
+    ).stdout.splitlines()
+    assert roles.count("plan") == 1
+    restored_pane = frame.role_panes(record["id"])["plan"]
+    wait_for(lambda: "ORIGINAL PLAN" in content(frame, restored_pane))
+
+
+@pytest.mark.parametrize("local", [False, True], ids=["inherited-on", "local-failed"])
+@pytest.mark.parametrize("dead", [False, True], ids=["supervisor", "recovery"])
+def test_remain_on_exit_restores_value_and_inheritance(pane, local, dead):
+    frame, record, manager, base = pane
+    pane_id = frame.role_panes(record["id"])["plan"]
+    frame.tmux(["set-option", "-w", "-t", pane_id, "remain-on-exit", "on"])
+    frame.tmux(["set-option", "-p", "-u", "-t", pane_id, "remain-on-exit"])
+    if local:
+        frame.tmux(["set-option", "-p", "-t", pane_id, "remain-on-exit", "failed"])
+    result = acquire(manager, record)
+    lease = manager.leases.read(record["id"])
+    expected = "failed" if local else "on"
+    assert lease["previous"]["remain_on_exit"] == expected
+    if dead:
+        os.kill(lease["pid"], signal.SIGKILL)
+        wait_for(lambda: not manager.leases.alive(lease))
+    assert manager.release(result["lease_id"], result["token"])["released"]
+    assert manager.leases.read(record["id"]) is None
+    assert frame.tmux(
+        [
+            "show-options",
+            "-p",
+            "-v",
+            "-t",
+            pane_id,
+            "remain-on-exit",
+        ]
+    ).stdout.strip() == ("failed" if local else "")
+    assert (
+        frame.tmux(
+            [
+                "show-options",
+                "-p",
+                "-v",
+                "-A",
+                "-t",
+                pane_id,
+                "remain-on-exit",
+            ]
+        ).stdout.strip()
+        == expected
+    )
+
+
 def test_concurrent_cli_acquire_exactly_one_wins(pane, capsys):
     frame, record, manager, base = pane
     command = [

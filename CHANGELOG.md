@@ -4,6 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Ordinary PLAN pane mutations now reap dead leases and restore pane settings
+  before replacing content, preventing later repair or release from killing
+  the recovered editor through a stale lease.
+- Lease child arguments containing semicolons, spaces, quotes, or shell syntax
+  are passed literally through tmux's command parser.
+- New lease tokens start with `t`, preventing leading dashes from breaking
+  `pane-release --token TOKEN`. The supported `--token=TOKEN` form also accepts
+  older tokens beginning with a dash.
+- Lease restoration preserves inherited `remain-on-exit` settings by removing
+  the temporary pane override, and restores explicit pane values such as `failed`.
+
 ### Added
 
 - Public PLAN pane leases: `pane-lease`, token-protected `pane-release`,
