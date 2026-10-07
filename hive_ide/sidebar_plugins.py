@@ -13,6 +13,8 @@ from typing import Any, Literal, Protocol
 from .errors import UsageError
 from .git_status import inspect_linked_checkout
 from .state_compat import StateIO
+from .pane_lease import LeaseStore
+from .store import StateStore
 
 
 SidebarRegion = Literal["state", "slot"]
@@ -121,7 +123,7 @@ class ActivityProvider:
 class PlanProvider:
     id = "plan"
     region: SidebarRegion = "slot"
-    default_icons = {"active": "📝", "done": "📦"}
+    default_icons = {"active": "📝", "done": "📦", "leased": "▶"}
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -132,6 +134,11 @@ class PlanProvider:
         }
 
     def value(self, state_home: Path, session: dict[str, Any]) -> str | None:
+        workspace = session.get("workspace_key")
+        session_id = session.get("id")
+        if workspace and session_id:
+            if LeaseStore(StateStore(state_home, workspace)).live(session_id):
+                return "leased"
         plan = session.get("plan")
         path = plan.get("path") if isinstance(plan, dict) else plan
         if not path:

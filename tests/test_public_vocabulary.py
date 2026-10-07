@@ -75,3 +75,11 @@ def test_vocabulary_check_observes_a_real_violation(tmp_path):
     bad = tmp_path / "example.md"
     bad.write_text(f"private term: {PRIVATE_WORDS[0]}\n", encoding="utf-8")
     assert vocabulary_violations(tmp_path) == ["example.md:1"]
+
+
+def test_pane_lease_commands_are_public():
+    from hive_ide.cli import build_parser
+
+    help_text = build_parser().format_help()
+    for command in ("pane-lease", "pane-release", "pane-status", "capabilities"):
+        assert command in help_text

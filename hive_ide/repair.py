@@ -13,6 +13,7 @@ from .drivers import DriverRegistry
 from .errors import HiveIdeError
 from .frame import Frame
 from .health import SessionHealth
+from .pane_lease import LeaseStore, PaneLeases, serialized
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
 
@@ -37,12 +38,29 @@ class SessionRepair:
         self.frame = frame
         self.registry = registry or DriverRegistry()
 
-    def repair(self, record: dict[str, Any], *, apply: bool = True) -> dict[str, Any]:
+    @serialized
+    def repair(
+        self, record: dict[str, Any], *, apply: bool = True, force: bool = False
+    ) -> dict[str, Any]:
         session_id = record["id"]
         actions: list[str] = []
         warnings: list[str] = []
         errors: list[str] = []
         repaired = dict(record)
+
+        lease_store = LeaseStore(self.store)
+        lease = lease_store.read(session_id)
+        if lease:
+            if lease_store.alive(lease) and not force:
+                warnings.append(
+                    "pane_leased: plan pane is borrowed; live content preserved"
+                )
+            elif apply:
+                try:
+                    PaneLeases(self.frame).restore(lease, force=force)
+                    actions.append("plan: reaped pane lease and restored current default")
+                except HiveIdeError as exc:
+                    errors.append(str(exc))
 
         self._drop_legacy_record_plan(repaired, actions, apply=apply)
 
@@ -103,9 +121,7 @@ class SessionRepair:
         caller_inside = caller_location is not False
         pane_roles = self.frame.role_panes(session_id) if window_id else {}
         if window_id and pane_roles is None:
-            warnings.append(
-                f"could not observe panes of window {window_id}; no rebuild"
-            )
+            warnings.append(f"could not observe panes of window {window_id}; no rebuild")
         cwd_observed = self._observe_pane_cwds(repaired)
         pane_cwd_warnings = cwd_observed["warnings"]
         warnings.extend(pane_cwd_warnings)
@@ -220,16 +236,13 @@ class SessionRepair:
                     else:
                         restored = self.frame.restore_missing_panes(repaired, missing)
                         if restored:
-                            actions.append(
-                                "window: restored panes: " + ", ".join(restored)
-                            )
+                            actions.append("window: restored panes: " + ", ".join(restored))
                         still_missing = tuple(
                             role for role in missing if role not in restored
                         )
                         if still_missing:
                             warnings.append(
-                                "window still missing panes: "
-                                + ", ".join(still_missing)
+                                "window still missing panes: " + ", ".join(still_missing)
                             )
                 elif agent_env_warnings:
                     if live_shell_agent:
@@ -355,6 +368,11 @@ class SessionRepair:
             "deferred": deferred,
             "rebuilt": rebuilt,
             "working_dir": repaired.get("working_dir"),
+            **(
+                {"pane_leased": lease_store.summary(lease)}
+                if lease and lease_store.alive(lease) and not force
+                else {}
+            ),
         }
 
     def _missing_pane_roles(self, roles: dict[str, str]) -> tuple[str, ...]:
@@ -835,12 +853,11 @@ class SessionRepair:
         if apply:
             self.store.write("sessions", record["id"], record)
 
-    def repair_all(self, *, apply: bool = True) -> dict[str, Any]:
-        pruned_legacy_plans = (
-            self.store.prune_dead_legacy_plan() if apply else []
-        )
+    def repair_all(self, *, apply: bool = True, force: bool = False) -> dict[str, Any]:
+        pruned_legacy_plans = self.store.prune_dead_legacy_plan() if apply else []
         results = [
-            self.repair(record, apply=apply) for record in self.store.list("sessions")
+            self.repair(record, apply=apply, force=force)
+            for record in self.store.list("sessions")
         ]
         return {
             "ok": all(result["ok"] for result in results),

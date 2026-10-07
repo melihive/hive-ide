@@ -197,6 +197,7 @@ def _keys(snapshot: dict) -> list[str]:
         "agent": "change agent",
         "options": "session options",
         "card": "session card",
+        "lease": "focus leased pane (when present)",
         "jump_plan": "first unfinished plan task",
         "reset": "reset columns",
         "help": "shortcut map",

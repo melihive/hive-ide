@@ -17,6 +17,7 @@ from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
 from .conversation import ConversationGuard
 from .errors import HiveIdeError, UsageError
 from .layout import IdeLayout
+from .pane_lease import LeaseStore, PaneLeases, serialized
 from .python_cmd import PythonCommand
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
@@ -497,7 +498,7 @@ class Frame:
             module, args, python=interpreter or self.python
         )
 
-    def _environment(self, record: dict[str, Any]) -> list[str]:
+    def _environment(self, record: dict[str, Any], *, role: str | None = None) -> list[str]:
         source = record.get("source") or {}
         env = [
             "-e",
@@ -528,6 +529,8 @@ class Frame:
         if isinstance(handoff, dict) and handoff:
             payload = json.dumps(handoff, separators=(",", ":"), sort_keys=True)
             env.extend(["-e", f"HIVE_IDE_HANDOFF_JSON={payload}"])
+        if role:
+            env.extend(["-e", f"HIVE_IDE_PANE_ROLE={role}", "-e", "HIVE_IDE_PANE_LEASE="])
         return env
 
     def _refresh_source_if_needed(
@@ -941,9 +944,22 @@ class Frame:
     def scratchpad(self, record: dict[str, Any]) -> dict[str, Any]:
         return self.plan_popup(record, mode="scratchpad")
 
+    @serialized
     def current_plan(
-        self, record: dict[str, Any], *, focus: bool = False
+        self, record: dict[str, Any], *, focus: bool = False, force: bool = False
     ) -> dict[str, Any]:
+        lease = LeaseStore(self.store).live(record["id"])
+        if lease and focus and not force:
+            pane = (self.role_panes(record["id"]) or {}).get("plan")
+            if pane:
+                self.tmux(["select-pane", "-t", pane])
+            return {
+                "session_id": record["id"],
+                "reason": "pane_leased",
+                "lease": LeaseStore.summary(lease),
+                "opened": "plan-pane",
+            }
+        PaneLeases(self).check(record["id"], force=force)
         path = self.plan_path(record)
         line = self.plan_focus_line(path) if focus else None
         pane_id = (self.role_panes(record["id"]) or {}).get("plan")
@@ -972,14 +988,16 @@ class Frame:
                     pane_id,
                     "-c",
                     self.safe_working_dir(record),
-                    *self._environment(record),
+                    *self._environment(record, role="plan"),
                     "sh",
                     "-c",
                     self._plan_command(record, line=line),
                 ]
             )
             if result.returncode != 0:
-                raise HiveIdeError(result.stderr.strip() or "Could not reopen the plan pane.")
+                raise HiveIdeError(
+                    result.stderr.strip() or "Could not reopen the plan pane."
+                )
             self.tmux(["select-pane", "-T", self._plan_title(record), "-t", pane_id])
             if focus:
                 self.tmux(["select-pane", "-t", pane_id])
@@ -1126,7 +1144,7 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
-                *self._environment(record),
+                *self._environment(record, role="agent"),
                 "sh",
                 "-c",
                 self._agent_command(record),
@@ -1158,7 +1176,7 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
-                *self._environment(record),
+                *self._environment(record, role="agent"),
                 "sh",
                 "-c",
                 command,
@@ -1191,8 +1209,15 @@ class Frame:
             return False
         return self.respawn_role_pane(record, "sidebar", pane_id)
 
+    @serialized
     def respawn_role_pane(
-        self, record: dict[str, Any], role: str, pane_id: str
+        self,
+        record: dict[str, Any],
+        role: str,
+        pane_id: str,
+        *,
+        force: bool = False,
+        _lease_restore: bool = False,
     ) -> bool:
         """Relaunch one sidebar/plan pane in place, in the session's own environment.
 
@@ -1202,6 +1227,8 @@ class Frame:
         Returns False (does nothing) unless the pane is provably not the caller's
         own and the role has an in-place command.
         """
+        if not _lease_restore:
+            PaneLeases(self).check(record["id"], role, force=force)
         commands = {
             "sidebar": self._sidebar_command,
             "plan": self._plan_command,
@@ -1217,7 +1244,7 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
-                *self._environment(record),
+                *self._environment(record, role=role),
                 "sh",
                 "-c",
                 builder(record),
@@ -1230,7 +1257,11 @@ class Frame:
         self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_pane", role])
         if role == "sidebar":
             self._tag_sidebar_source(pane_id, record)
-        title = self._pane_titles(record)[role]
+        title = (
+            self._plan_title(record)
+            if _lease_restore and role == "plan"
+            else self._pane_titles(record)[role]
+        )
         self.tmux(["select-pane", "-T", title, "-t", pane_id])
         self.tmux(["set-option", "-p", "-t", pane_id, "@hive_ide_title", title])
         return True
@@ -1338,6 +1369,7 @@ class Frame:
                 self._tag_sidebar_source(pane, record)
         self._retitle_panes(target, record)
 
+    @serialized
     def _retitle_panes(self, target: str, record: dict[str, Any]) -> None:
         titles = self._pane_titles(record)
         roles = self._order_role_panes(target)
@@ -1347,6 +1379,7 @@ class Frame:
                 self.tmux(["select-pane", "-T", title, "-t", pane])
                 self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_title", title])
 
+    @serialized
     def retitle_panes(self, record: dict[str, Any]) -> bool:
         target = self.windows().get(record["id"])
         if not target:
@@ -1373,7 +1406,8 @@ class Frame:
         return {
             "sidebar": workspace,
             "agent": str(record.get("name") or "chat"),
-            "plan": self._plan_title(record),
+            "plan": (LeaseStore(self.store).live(record["id"]) or {}).get("title")
+            or self._plan_title(record),
         }
 
     def _plan_title(self, record: dict[str, Any]) -> str:
@@ -1423,13 +1457,14 @@ class Frame:
         self._apply_columns(target)
         return True
 
-    def build(self, record: dict[str, Any]) -> str:
+    @serialized
+    def build(self, record: dict[str, Any], *, force: bool = False) -> str:
+        PaneLeases(self).check(record["id"], force=force)
         working_dir = record["working_dir"]
         if not Path(working_dir).is_dir():
             raise UsageError(f"Session working directory does not exist: {working_dir}")
         interpreter = (record.get("source") or {}).get("interpreter") or self.python
         self._refresh_source_if_needed(record, interpreter)
-        env = self._environment(record)
         sidebar = ["sh", "-c", self._sidebar_command(record)]
         if self.exists():
             created = self.tmux(
@@ -1445,7 +1480,7 @@ class Frame:
                     "#{window_id}",
                     "-c",
                     working_dir,
-                    *env,
+                    *self._environment(record, role="sidebar"),
                     *sidebar,
                 ]
             )
@@ -1463,13 +1498,15 @@ class Frame:
                     "#{window_id}",
                     "-c",
                     working_dir,
-                    *env,
+                    *self._environment(record, role="sidebar"),
                     *sidebar,
                 ],
                 clean_start=True,
             )
         if created.returncode != 0:
-            raise HiveIdeError(created.stderr.strip() or f"Could not create window {record['name']}.")
+            raise HiveIdeError(
+                created.stderr.strip() or f"Could not create window {record['name']}."
+            )
         target = created.stdout.strip()
         if not target:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
@@ -1479,7 +1516,10 @@ class Frame:
             if self._is_sleeping(record)
             else self._agent_command(record)
         )
-        for command in (agent_command, self._plan_command(record)):
+        for role, command in (
+            ("agent", agent_command),
+            ("plan", self._plan_command(record)),
+        ):
             result = self.tmux(
                 [
                     "split-window",
@@ -1488,14 +1528,16 @@ class Frame:
                     target,
                     "-c",
                     working_dir,
-                    *env,
+                    *self._environment(record, role=role),
                     "sh",
                     "-c",
                     command,
                 ]
             )
             if result.returncode != 0:
-                raise HiveIdeError(result.stderr.strip() or f"Could not split window {record['name']}.")
+                raise HiveIdeError(
+                    result.stderr.strip() or f"Could not split window {record['name']}."
+                )
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
@@ -1508,20 +1550,29 @@ class Frame:
         self.build(record)
         return True
 
+    @serialized
     def restore_missing_panes(
-        self, record: dict[str, Any], missing_roles: tuple[str, ...]
+        self, record: dict[str, Any], missing_roles: tuple[str, ...], *, force: bool = False
     ) -> tuple[str, ...]:
         target = self.windows().get(record["id"])
         if not target:
             return ()
         restored: list[str] = []
-        env = self._environment(record)
         working_dir = self.safe_working_dir(record)
         commands = {
             "sidebar": self._sidebar_command(record),
             "plan": self._plan_command(record),
         }
         for role in missing_roles:
+            leases = LeaseStore(self.store)
+            lease = leases.read(record["id"], role) if role == "plan" else None
+            if lease:
+                if leases.alive(lease) and not force:
+                    continue
+                PaneLeases(self).check(record["id"], role, force=force)
+                if role in (self.role_panes(record["id"]) or {}):
+                    restored.append(role)
+                    continue
             command = commands.get(role)
             if command is None:
                 continue
@@ -1536,7 +1587,7 @@ class Frame:
                     "#{pane_id}",
                     "-c",
                     working_dir,
-                    *env,
+                    *self._environment(record, role=role),
                     "sh",
                     "-c",
                     command,
@@ -1568,7 +1619,8 @@ class Frame:
         self.tmux(["select-pane", "-t", pane_target])
         return True
 
-    def rebuild(self, record: dict[str, Any]) -> dict[str, Any]:
+    @serialized
+    def rebuild(self, record: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         """Replace the session's window with one built from its record.
 
         Returns `{"rebuilt", "deferred", "reason", "window"}`. A rebuild kills the
@@ -1593,15 +1645,28 @@ class Frame:
                     "reason": "caller-location-unknown",
                     "window": existing,
                 }
+        lease = LeaseStore(self.store).live(record["id"])
+        if lease and not force:
+            return {
+                "rebuilt": False,
+                "deferred": True,
+                "reason": "pane_leased",
+                "window": existing,
+                "lease": LeaseStore.summary(lease),
+            }
+        PaneLeases(self).check(record["id"], force=force)
         previous_index = None
         selected = False
         active_before = self.tmux(
             ["display-message", "-p", "-t", self.target, "#{window_id}.#{pane_index}"]
         ).stdout.strip()
         if existing:
-            previous_index = self.tmux(
-                ["display-message", "-p", "-t", existing, "#{window_index}"]
-            ).stdout.strip() or None
+            previous_index = (
+                self.tmux(
+                    ["display-message", "-p", "-t", existing, "#{window_index}"]
+                ).stdout.strip()
+                or None
+            )
             selected = (
                 self.tmux(
                     ["display-message", "-p", "-t", existing, "#{window_active}"]
@@ -1674,8 +1739,10 @@ class Frame:
             self._retitle_panes(window_id, {**record, "name": display_name})
         return renamed
 
-    def refresh_plan_pane(self, record: dict[str, Any]) -> bool:
+    @serialized
+    def refresh_plan_pane(self, record: dict[str, Any], *, force: bool = False) -> bool:
         """Reload the plan pane after the linked plan changes or is cleared."""
+        PaneLeases(self).check(record["id"], force=force)
         pane_id = (self.role_panes(record["id"]) or {}).get("plan")
         if not pane_id or self.pane_is_caller(pane_id) is not False:
             return False
@@ -1851,6 +1918,14 @@ class Frame:
                 ],
             )
             self.tmux(["bind-key", key, "run-shell", "-b", popup])
+        if key := keys.get("lease"):
+            focus_lease = self._module("cli", [
+                "--state-home", str(self.store.home),
+                "--workspace-key", self.store.workspace_key,
+                "pane-focus", "--session-id", "#{@hive_ide_session_id}",
+                "--tmux-socket", self.socket,
+            ])
+            self.tmux(["bind-key", key, "run-shell", "-b", f"{focus_lease} >/dev/null 2>&1"])
         if key := keys.get("jump_plan"):
             focus = self._module(
                 "cli",
