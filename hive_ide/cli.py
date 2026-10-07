@@ -23,6 +23,7 @@ from .frame import Frame
 from .handoff import HandoffPackage
 from .hooks import HookInstaller
 from .monitor import monitor_state
+from .pane_lease import LeaseError, LeaseStore, PaneLeases
 from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
 from .relayout import IdeRelayout
@@ -432,10 +433,59 @@ def _current_record(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any
     return store, _session(store, session_id, None)
 
 
+def cmd_pane_lease(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    record = _session(store, args.session_id, None)
+    argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+    return PaneLeases(Frame(store, socket=_socket(store, args.tmux_socket))).acquire(
+        record,
+        role=args.role,
+        title=args.title,
+        argv=argv,
+        cwd=args.cwd,
+        owner_label=args.owner_label,
+    )
+
+
+def cmd_pane_release(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    return PaneLeases(Frame(store, socket=_socket(store, args.tmux_socket))).release(
+        args.lease, args.token
+    )
+
+
+def cmd_pane_status(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    leases = LeaseStore(store)
+    with store.mutation_lock():
+        return {
+            "leases": [
+                {**leases.summary(item), "alive": leases.alive(item)}
+                for item in leases.list(args.session_id)
+            ]
+        }
+
+
+def cmd_pane_focus(args: argparse.Namespace) -> dict[str, Any]:
+    store, record = _current_record(args)
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    lease = LeaseStore(store).live(record["id"])
+    pane = (frame.role_panes(record["id"]) or {}).get(lease["role"]) if lease else None
+    if pane:
+        frame.tmux(["select-pane", "-t", pane])
+    else:
+        frame.tmux(["display-message", "No leased pane in this session."])
+    return {"session_id": record["id"], "focused": bool(pane), "pane_id": pane}
+
+
 def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
     _, config = _context(args)
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    force = getattr(args, "force", False)
+    if args.focus and LeaseStore(store).live(record["id"]) and not force:
+        return frame.current_plan(record, focus=True)
+    PaneLeases(frame).check(record["id"], force=force)
     repair = SessionRepair(
         store, frame, registry=configured_registry(config)
     ).repair(record)
@@ -507,6 +557,9 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
             plan["path"] = args.path
         if args.active_task is not None:
             plan["active_task"] = args.active_task
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    if plan.get("path") != previous_path:
+        PaneLeases(frame).check(record["id"], force=getattr(args, "force", False))
     record["plan"] = {
         "path": plan.get("path"),
         "active_task": plan.get("active_task"),
@@ -592,6 +645,7 @@ def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
             f"force-rebuild would kill the window this command runs in ({window_id}); "
             "run it from another pane or a plain terminal outside the session window."
         )
+    PaneLeases(frame).check(record["id"], force=getattr(args, "force", False))
     repair = SessionRepair(
         store, frame, registry=configured_registry(config)
     ).repair(record)
@@ -722,14 +776,21 @@ def cmd_repair(args: argparse.Namespace) -> dict[str, Any]:
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
     repair = SessionRepair(store, frame, registry=configured_registry(config))
     if args.all:
-        result = repair.repair_all(apply=not args.dry_run)
+        result = repair.repair_all(
+            apply=not args.dry_run,
+            **({"force": True} if getattr(args, "force", False) else {}),
+        )
     else:
         session_id = args.session_id
         name = args.name
         if not session_id and not name:
             session_id = os.environ.get("HIVE_IDE_SESSION_ID")
         record = _session(store, session_id, name)
-        result = repair.repair(record, apply=not args.dry_run)
+        result = repair.repair(
+            record,
+            apply=not args.dry_run,
+            **({"force": True} if getattr(args, "force", False) else {}),
+        )
     return result
 
 
@@ -1097,6 +1158,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     command_help = {
+        "pane-lease": "Borrow a PLAN pane until a command exits.",
+        "pane-release": "Release a pane lease with its owner token.",
+        "pane-status": "List pane leases and supervisor liveness.",
+        "pane-focus": "Focus this session's leased pane, if any.",
+        "capabilities": "Print protocol, version, and supported features.",
         "create": "Create a session, optionally adopting a known conversation.",
         "adopt": "List or import existing Claude/Codex conversations for this directory.",
         "list": "List active sessions for the workspace.",
@@ -1198,6 +1264,10 @@ def build_parser() -> argparse.ArgumentParser:
     current_plan.add_argument("--session-id")
     current_plan.add_argument("--tmux-socket")
     current_plan.add_argument("--focus", action="store_true")
+    current_plan.add_argument(
+        "--force", action="store_true",
+        help="Revoke a live pane lease before replacing its content.",
+    )
     current_plan.set_defaults(handler=cmd_current_plan)
 
     plan_popup = command("plan-popup")
@@ -1233,6 +1303,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--active-task")
     plan.add_argument("--clear", action="store_true")
     plan.add_argument("--tmux-socket")
+    plan.add_argument(
+        "--force", action="store_true",
+        help="Revoke a live pane lease before replacing its content.",
+    )
     plan.set_defaults(handler=cmd_plan_set)
 
     attach = command("attach-conversation")
@@ -1250,6 +1324,10 @@ def build_parser() -> argparse.ArgumentParser:
     force_rebuild = command("force-rebuild")
     force_rebuild.add_argument("--session-id", required=True)
     force_rebuild.add_argument("--tmux-socket")
+    force_rebuild.add_argument(
+        "--force", action="store_true",
+        help="Revoke a live pane lease before replacing its content.",
+    )
     force_rebuild.set_defaults(handler=cmd_force_rebuild)
 
     relayout = command("relayout")
@@ -1291,6 +1369,10 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--all", action="store_true")
     repair.add_argument("--dry-run", action="store_true")
     repair.add_argument("--tmux-socket")
+    repair.add_argument(
+        "--force", action="store_true",
+        help="Revoke a live pane lease before replacing its content.",
+    )
     repair.set_defaults(handler=cmd_repair)
 
     snapshot = command("snapshot")
@@ -1370,6 +1452,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     monitor.set_defaults(handler=cmd_monitor)
 
+    lease = command("pane-lease")
+    lease.add_argument("--session-id", required=True)
+    lease.add_argument("--role", choices=("plan",), required=True)
+    lease.add_argument("--title", required=True)
+    lease.add_argument("--cwd")
+    lease.add_argument("--owner-label")
+    lease.add_argument("--tmux-socket")
+    lease.add_argument("argv", nargs=argparse.REMAINDER)
+    lease.set_defaults(handler=cmd_pane_lease)
+
+    release = command("pane-release")
+    release.add_argument("--lease", required=True)
+    release.add_argument("--token", required=True)
+    release.add_argument("--tmux-socket")
+    release.set_defaults(handler=cmd_pane_release)
+
+    status = command("pane-status")
+    status.add_argument("--session-id")
+    status.set_defaults(handler=cmd_pane_status)
+
+    focus_lease = command("pane-focus")
+    focus_lease.add_argument("--session-id")
+    focus_lease.add_argument("--tmux-socket")
+    focus_lease.set_defaults(handler=cmd_pane_focus)
+
+    capabilities = command("capabilities")
+    capabilities.set_defaults(handler=lambda _args: {
+        "protocol_version": PROTOCOL_VERSION, "version": __version__,
+        "features": ["pane-lease"],
+    })
+
     version = command("version")
     version.set_defaults(
         handler=lambda _args: {
@@ -1386,8 +1499,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         raw_argv = list(argv) if argv is not None else sys.argv[1:]
-        if "--quiet" in raw_argv[1:]:
-            raw_argv = ["--quiet", *[item for item in raw_argv if item != "--quiet"]]
+        boundary = raw_argv.index("--") if "--" in raw_argv else len(raw_argv)
+        options, remainder = raw_argv[:boundary], raw_argv[boundary:]
+        if "--quiet" in options[1:]:
+            raw_argv = [
+                "--quiet",
+                *[item for item in options if item != "--quiet"],
+                *remainder,
+            ]
         args = parser.parse_args(raw_argv)
         if args.command in WORKSPACE_MUTATIONS:
             store, _ = _context(args)
@@ -1398,6 +1517,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet and args.command not in QUIET_SUCCESS_COMMANDS:
             print(result if isinstance(result, str) else _json(result))
         return 0
+    except LeaseError as exc:
+        print(_json(exc.payload))
+        return 2
     except HiveIdeError as exc:
         print(f"hive-ide: {exc}", file=sys.stderr)
         return 2

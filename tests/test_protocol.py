@@ -5711,7 +5711,7 @@ def test_explicit_source_is_validated_in_isolated_mode():
         sys.executable, {}, default_interpreter="/not-used"
     )
     assert source["kind"] == "explicit"
-    assert source["interpreter"] == sys.executable
+    assert source["interpreter"] == os.path.abspath(sys.executable)
 
 
 def test_environment_setup_creates_stable_and_editable_dev(monkeypatch, tmp_path):
@@ -5918,7 +5918,7 @@ def test_source_set_updates_metadata_without_repairing_absent_window(
     capsys.readouterr()
     updated = store.find_session(record["id"])
     assert updated["source"]["kind"] == "stable"
-    assert updated["source"]["interpreter"] == sys.executable
+    assert updated["source"]["interpreter"] == os.path.abspath(sys.executable)
     assert updated["working_dir"] == str(missing)
 
 

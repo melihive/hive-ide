@@ -31,6 +31,10 @@ managed environment, use `pipx install hive-ide`.
 - `hive-ide create --driver=claude|codex --adopt [--reference=<ID>]`
 - `hive-ide show --session-id=<ID>`
 - `hive-ide current`
+- `hive-ide capabilities`
+- `hive-ide pane-lease --session-id=<ID> --role=plan --title=<TITLE> -- <argv…>`
+- `hive-ide pane-status [--session-id=<ID>]`
+- `hive-ide pane-release --lease=<ID> --token=<TOKEN>`
 - `hive-ide plan [--session-id=<ID>]`
 - `hive-ide chat [--session-id=<ID>]`
 - `hive-ide plan-set --session-id=<ID> --path=<PATH>`
@@ -78,3 +82,10 @@ To edit from a long-lived `micro` plan pane, press `Ctrl-e`, run `reload`, then 
 Plan paths may be relative to the workspace/current working directory or absolute.
 Absolute paths are accepted as-is, so standalone/non-Hive users can attach personal
 plan files outside the repository root.
+
+Pane leases lend the PLAN pane until the child command exits or is released. The
+package restores the currently linked plan; `repair` recovers a dead supervisor.
+Probe `capabilities` through the session's pinned interpreter before acquiring.
+Live leases protect the pane from replacement unless `--force` is explicit.
+`<prefix> m` focuses the lease; `<prefix> g` focuses without steering the editor
+while leased. The sidebar plan slot shows `▶`.

@@ -619,7 +619,7 @@ def test_respawned_panes_carry_the_record_session_id_not_the_tmux_session_env(li
     )
     assert control.returncode == 0, control.stderr
     assert _wait_for(
-        lambda: live.frame.pane_hive_ide_env(roles["plan"]).get("HIVE_IDE_SESSION_ID")
+        lambda: (live.frame.pane_hive_ide_env(roles["plan"]) or {}).get("HIVE_IDE_SESSION_ID")
         == "someone-else"
     )
 
@@ -630,7 +630,7 @@ def test_respawned_panes_carry_the_record_session_id_not_the_tmux_session_env(li
     for role in ("plan", "agent", "sidebar"):
         observed = _wait_for(
             lambda role=role: (
-                live.frame.pane_hive_ide_env(roles[role]).get("HIVE_IDE_SESSION_ID")
+                (live.frame.pane_hive_ide_env(roles[role]) or {}).get("HIVE_IDE_SESSION_ID")
                 == live.record["id"]
             )
         )

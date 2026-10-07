@@ -4,6 +4,18 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Public PLAN pane leases: `pane-lease`, token-protected `pane-release`,
+  `pane-status`, and a pinned-interpreter `capabilities` probe. A package-owned
+  tty supervisor restores the currently linked plan after child exit or release;
+  repair and reacquisition recover a dead supervisor.
+- Live lease protection for plan changes, repair, missing-pane restoration, and
+  rebuild, with an explicit `--force` override that retains the caller-pane guard.
+- `HIVE_IDE_PANE_ROLE` on every pane spawn and `HIVE_IDE_PANE_LEASE` for borrowed
+  commands; sidebar `▶` lease indicator and `<prefix> m` lease focus. Plan focus
+  (`<prefix> g`) does not send editor commands while the pane is borrowed.
+
 ## [1.0.87] - 2026-10-05
 
 ### Fixed

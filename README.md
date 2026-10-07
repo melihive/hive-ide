@@ -165,6 +165,33 @@ hive-ide hook-setup
 hive-ide hook-setup --apply
 ```
 
+## Pane leases
+
+Any program can temporarily borrow the PLAN pane without calling tmux:
+
+```sh
+hive-ide pane-lease --session-id ID --role plan --title Monitor -- python -m my_monitor
+hive-ide pane-status --session-id ID
+hive-ide pane-release --lease LEASE_ID --token TOKEN
+```
+
+Acquisition returns the lease ID and release token. The package supervisor runs
+the command on the pane's tty, then restores the **currently linked** plan on
+exit or release, including crashes and startup failures. With no plan it shows
+`No plan linked.` Restoration failures print a reason and open a shell. If the
+supervisor is killed, `repair` (or the next acquire/release) restores the pane.
+Live leases protect the pane from plan changes, repair, and rebuild unless
+explicitly revoked with `--force`; the caller-pane guard still applies.
+
+The sidebar plan slot shows `▶` while borrowed. `<prefix> m` focuses the lease;
+`<prefix> g` focuses it without sending editor commands. Clients should probe
+`capabilities` through the session's pinned interpreter and check for
+`pane-lease` in `features`. All panes expose `HIVE_IDE_PANE_ROLE`; borrowed
+commands also receive `HIVE_IDE_PANE_LEASE`.
+
+See [the lease contract](docs/pane-leases.md) for errors, recovery limits, and
+state records, and [keys](docs/keys.md) for shortcuts.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

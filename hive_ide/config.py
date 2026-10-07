@@ -48,6 +48,7 @@ DEFAULT_KEYS = {
         "card": "i",
         "options": "o",
         "jump_plan": "g",
+        "lease": "m",
         "reset": "r",
         "help": "k",
         "new": "+",
