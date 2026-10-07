@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.88] - 2026-10-08
+
 ### Fixed
 
 - Ordinary PLAN pane mutations now reap dead leases and restore pane settings
