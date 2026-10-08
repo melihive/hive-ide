@@ -52,6 +52,10 @@ class ActivityProvider:
         "release": "🚀",
         "blocked": "⛔",
         "compacting": "🧠",
+        # U+FE0F keeps the eye in emoji presentation; without it terminals fall
+        # back to the text glyph, which renders at a different weight to every
+        # other icon here.
+        "monitor": "👁️",
     }
     stale_seconds = 1800
     priority = {

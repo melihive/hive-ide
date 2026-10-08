@@ -764,6 +764,64 @@ def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
     assert "💻" not in _plain(lines[0])
 
 
+def test_monitor_activity_icon_is_a_package_default_in_emoji_presentation(tmp_path):
+    """The eye ships with the package, in emoji presentation.
+
+    It used to be seeded per machine as a bare U+1F441, which terminals render in
+    text presentation — a different weight and baseline to every neighbouring icon.
+    The trailing U+FE0F is the fix, so assert the selector explicitly: dropping it
+    is the regression this guards.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    session = store.create_session(
+        name="MONITORED",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver={"id": "term"},
+    )
+    store.write(
+        "activity",
+        session["id"],
+        {
+            "schema_version": 1,
+            "session_id": session["id"],
+            "workspace_key": store.workspace_key,
+            "kind": "monitor",
+            "state": "running",
+            "observed_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+    registry = SidebarProviderRegistry()
+    provider = registry.get("activity")
+    assert provider.value(store.home, session) == "monitor"
+    assert provider.default_icons["monitor"] == "\U0001f441\ufe0f"
+
+    # The eye must occupy the same icon column as every other activity glyph.
+    # U+1F441 is East_Asian_Width Neutral, so width-by-EAW alone measures it 1
+    # and pads its column one cell wide; the selector is what makes it 2.
+    assert SidebarGrid.cell_width("\U0001f441\ufe0f") == 2
+    assert SidebarGrid.cell_width("\U0001f9e0") == 2
+    assert SidebarGrid.cell_width("\u25b6") == 1
+
+    # No icon overrides: the default alone must paint the row.
+    sidebar = _sidebar_config({}, registry)
+    lines = IdeSidebar.render_lines(
+        store.home,
+        [session],
+        str(workspace),
+        "none",
+        0,
+        20,
+        focused=False,
+        entry_rows=1,
+        sidebar=sidebar,
+        providers=registry,
+    )
+    assert _plain(lines[0]).startswith("\U0001f441\ufe0f MONITORED")
+
+
 def test_legacy_release_activity_outranks_package_compacting_activity(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

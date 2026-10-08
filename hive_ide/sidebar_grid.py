@@ -22,18 +22,30 @@ class SidebarGrid:
     GAP_CELLS = 1
     ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+    VARIATION_SELECTOR_16 = "\ufe0f"
+
     @staticmethod
     def cell_width(text: str) -> int:
         text = SidebarGrid.ANSI_RE.sub("", text)
         width = 0
-        for char in text:
+        for index, char in enumerate(text):
             if unicodedata.combining(char) or unicodedata.category(char) in {
                 "Cf",
                 "Mn",
                 "Me",
             }:
                 continue
-            width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+            if unicodedata.east_asian_width(char) in {"F", "W"}:
+                width += 2
+                continue
+            # East_Asian_Width alone under-counts emoji presentation: U+1F441 EYE
+            # is Neutral, so it measured 1 while every terminal draws it 2 cells
+            # wide, padding its column one cell past every other icon. A trailing
+            # U+FE0F is the explicit request for emoji presentation, so honour it.
+            if text[index + 1 : index + 2] == SidebarGrid.VARIATION_SELECTOR_16:
+                width += 2
+                continue
+            width += 1
         return width
 
     @classmethod
