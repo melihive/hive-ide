@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.89] - 2026-10-09
+
 ### Fixed
 
 - The sidebar's `leased` plan state no longer reuses the `working` status arrow.
