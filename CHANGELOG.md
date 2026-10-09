@@ -4,6 +4,20 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- The sidebar's `leased` plan state no longer reuses the `working` status arrow.
+  One glyph meant two unrelated states, told apart only by colour and column; a
+  leased PLAN pane now shows its own icon.
+- `SidebarGrid.cell_width` measures emoji presentation as two cells. U+1F441 EYE
+  is East_Asian_Width Neutral, so an icon using it measured one cell while every
+  terminal draws two, padding its column one past every other icon.
+
+### Added
+
+- The `monitor` activity icon ships as a package default, in emoji presentation,
+  so consumers no longer seed it per machine.
+
 ## [1.0.88] - 2026-10-08
 
 ### Fixed

@@ -14,7 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hive_ide.sidebar import IdeSidebar, SidebarCommandRunner, SidebarCursorState  # noqa: E402
 from hive_ide.sidebar_grid import SidebarGrid  # noqa: E402
-from hive_ide.sidebar_plugins import SidebarProviderRegistry, SubagentsProvider  # noqa: E402
+from hive_ide.sidebar_plugins import (  # noqa: E402
+    PlanProvider,
+    SidebarProviderRegistry,
+    SubagentsProvider,
+)
 from hive_ide.state_compat import StateIO, migrate_snapshot  # noqa: E402
 from hive_ide.store import StateStore  # noqa: E402
 from hive_ide.config import _sidebar_config  # noqa: E402
@@ -762,6 +766,28 @@ def test_compacting_activity_has_a_distinct_configurable_state_icon(tmp_path):
     )
     assert _plain(lines[0]).startswith("🧠 COMPACT")
     assert "💻" not in _plain(lines[0])
+
+
+def test_leased_plan_icon_does_not_collide_with_the_working_status_glyph():
+    """A glyph means one state.
+
+    `leased` shipped as the same arrow the status track uses for `working`, so a
+    session rendered both at once and they were distinguishable only by colour
+    and column. Couple the two defaults here: reusing the status glyph for a plan
+    state is the regression this catches.
+    """
+    from hive_ide.config import DEFAULT_SIDEBAR
+
+    plan_icons = PlanProvider.default_icons
+    status_icons = DEFAULT_SIDEBAR["icons"]["status"]
+
+    assert plan_icons["leased"] == "\U0001f4fa"
+    assert plan_icons["leased"] not in status_icons.values()
+    assert not set(plan_icons.values()) & set(status_icons.values())
+
+    # The plan slot is a two-cell icon column; every state must fill it equally.
+    for state, icon in plan_icons.items():
+        assert SidebarGrid.cell_width(icon) == 2, state
 
 
 def test_monitor_activity_icon_is_a_package_default_in_emoji_presentation(tmp_path):

@@ -127,7 +127,11 @@ class ActivityProvider:
 class PlanProvider:
     id = "plan"
     region: SidebarRegion = "slot"
-    default_icons = {"active": "📝", "done": "📦", "leased": "▶"}
+    # "leased" must not reuse the working-status glyph (config.py STATUS icons):
+    # one glyph meaning two unrelated states, told apart only by colour and
+    # column, is unreadable. It is an emoji so it shares the two-cell icon
+    # column with its siblings.
+    default_icons = {"active": "📝", "done": "📦", "leased": "📺"}
 
     def snapshot(self) -> dict[str, Any]:
         return {
