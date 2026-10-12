@@ -66,7 +66,7 @@ def test_capabilities(capsys):
     assert result == {
         "protocol_version": PROTOCOL_VERSION,
         "version": __version__,
-        "features": ["pane-lease"],
+        "features": ["pane-lease", "plan-set-defer-pane"],
     }
 
 
