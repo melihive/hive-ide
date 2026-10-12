@@ -12,6 +12,9 @@ All notable changes to `hive-ide` will be documented in this file.
   borrower's pane is restored from the session record; the exception is for a
   caller FOLLOWING a rename, such as a plan volume roll, where refusing left the
   record pointing at a path that no longer existed.
+- `capabilities` advertises the `plan-set-defer-pane` feature, so a consumer
+  gates on what the running CLI actually supports instead of inferring it
+  from a version number.
 
 ## [1.0.89] - 2026-10-09
 
