@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.92] - 2026-10-13
+
 ### Fixed
 
 - A long turn no longer renders as an idle session. The agent hook writes
