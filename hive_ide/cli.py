@@ -1096,6 +1096,21 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             source_errors.append(f"{session['name']}: {exc}")
     frame = Frame(store)
     config_findings = frame.verify_user_config()
+    # A second attached client is invisible today and degrades the frame for
+    # everyone on it: the window sizes to whichever client was active last, so a
+    # stale one at a different size reflows every pane when focus moves.
+    clients = frame.attached_clients()
+    client_findings = (
+        [
+            f"{len(clients)} clients attached to this frame "
+            f"({', '.join(c['size'] for c in clients)}); only the most recent is in "
+            "use. Re-run `hive-ide open` to take sole ownership, or detach the "
+            "others with `tmux -L "
+            f"{frame.socket} detach-client -t <client>`."
+        ]
+        if len(clients) > 1
+        else []
+    )
     hook_findings = HookInstaller(
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
@@ -1105,6 +1120,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             shutil.which("tmux") is not None
             and not source_errors
             and not hook_findings
+            and not client_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1116,6 +1132,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "source_errors": source_errors,
         "config_findings": config_findings,
         "hook_findings": hook_findings,
+        "client_findings": client_findings,
+        "clients": clients,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
             for driver_id in registry.ids()

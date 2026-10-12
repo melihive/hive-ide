@@ -4,6 +4,18 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `open` now attaches with `-d`, taking sole ownership of the session. Every
+  previous `open` left another client attached and nothing reaped them: found
+  two clients on most frames across four machines and three on one, the oldest
+  idle for 6.4 days. With `window-size latest` the window sizes itself to
+  whichever client was active most recently, so a stale 126x33 beside a live
+  203x70 made the window flip geometry and reflow every pane — which is what
+  people reported as sessions freezing.
+- `verify` reports a frame with more than one attached client, with each
+  client's size, instead of leaving the condition invisible.
+
 ## [1.0.92] - 2026-10-13
 
 ### Fixed

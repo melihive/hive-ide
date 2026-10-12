@@ -2218,6 +2218,39 @@ class Frame:
         if current and current.get("component") == "frame:open":
             self.store.delete("errors", record["id"])
 
+    def attached_clients(self) -> list[dict[str, Any]]:
+        """Clients attached to this frame, newest activity first.
+
+        More than one is a defect, not a preference: the window sizes itself to the
+        most recently active client, so a second client at a different size reflows
+        every pane whenever focus moves between them.
+        """
+        result = self.tmux(
+            [
+                "list-clients",
+                "-t",
+                self.target,
+                "-F",
+                "#{client_name}\t#{client_width}\t#{client_height}\t#{client_activity}",
+            ]
+        )
+        if result.returncode != 0:
+            return []
+        clients: list[dict[str, Any]] = []
+        for line in result.stdout.splitlines():
+            name, width, height, activity = (line.split("\t") + ["", "", "", ""])[:4]
+            if not name:
+                continue
+            clients.append(
+                {
+                    "client": name,
+                    "size": f"{width}x{height}",
+                    "last_active_epoch": int(activity) if activity.isdigit() else None,
+                }
+            )
+        clients.sort(key=lambda c: c["last_active_epoch"] or 0, reverse=True)
+        return clients
+
     def open(self, *, no_attach: bool = False) -> dict[str, Any]:
         self.require_tmux()
         sessions = self.store.list("sessions")
@@ -2264,7 +2297,17 @@ class Frame:
         if selected_window and selected_window != current_window:
             self.tmux(["select-window", "-t", selected_window])
         if not no_attach:
-            os.execvp("tmux", ["tmux", "-L", self.socket, "attach", "-t", self.target])
+            # `-d` detaches any client already on this session. Without it every
+            # `open` leaves ANOTHER client attached and nothing ever reaps them —
+            # found 2026-10-13 with two clients on most frames across the fleet and
+            # three on one, the oldest idle for 6.4 days. That is not merely untidy:
+            # `window-size latest` sizes the window to whichever client was active
+            # most recently, so a stale 126x33 beside a live 203x70 makes the window
+            # flip geometry and reflow every pane, which reads as the session
+            # freezing. One session, one client.
+            os.execvp(
+                "tmux", ["tmux", "-L", self.socket, "attach", "-d", "-t", self.target]
+            )
         return {
             "tmux_socket": self.socket,
             "tmux_session": self.target,
