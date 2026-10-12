@@ -601,3 +601,76 @@ def test_unsupported_pinned_interpreter_preserves_default(pane, tmp_path):
     assert error.value.payload["error"] == "capability_unavailable"
     assert frame._pane_pid(pane_id) == before
     assert manager.leases.read(record["id"]) is None
+
+
+def _rolled_plan(tmp_path):
+    rolled = tmp_path / "workspace" / "plan-02.md"
+    rolled.write_text("# ROLLED PLAN\n")
+    return rolled
+
+
+def test_defer_pane_links_a_renamed_plan_while_the_pane_stays_borrowed(
+    pane, tmp_path, capsys
+):
+    frame, record, manager, base = pane
+    result = acquire(manager, record)
+    rolled = _rolled_plan(tmp_path)
+    args = [
+        *base, "plan-set", "--session-id", record["id"],
+        "--tmux-socket", frame.socket, "--path", str(rolled),
+    ]
+    # Without the flag the refusal stands and the link is left alone — a third
+    # party must not move the plan a borrower's pane will be restored onto.
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "pane_leased"
+    assert frame.store.find_session(record["id"])["plan"]["path"] != str(rolled)
+    # With it, the record follows the rename and SAYS the repaint is deferred,
+    # so a caller can tell that apart from nothing having happened.
+    assert main([*args, "--defer-pane"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan"]["path"] == str(rolled)
+    assert payload["pane_refresh_deferred"]["error"] == "pane_leased"
+    assert payload["pane_refresh_deferred"]["lease"]["lease_id"] == result["lease_id"]
+    assert "token" not in payload["pane_refresh_deferred"]["lease"]
+    # The borrower keeps the pane and its child, and sees no repaint.
+    lease = manager.leases.read(record["id"])
+    assert lease and process_alive(lease["child_pid"])
+    assert "ROLLED PLAN" not in content(frame, result["pane_id"])
+    # Release reads the record fresh, so the pane lands on the NEW plan by itself.
+    assert manager.release(result["lease_id"], result["token"])["released"]
+    wait_for(lambda: "ROLLED PLAN" in content(frame, result["pane_id"]))
+
+
+def test_defer_pane_still_repaints_when_no_lease_is_held(pane, tmp_path, capsys):
+    frame, record, _, base = pane
+    rolled = _rolled_plan(tmp_path)
+    pane_id = frame.role_panes(record["id"])["plan"]
+    assert main([
+        *base, "plan-set", "--session-id", record["id"],
+        "--tmux-socket", frame.socket, "--path", str(rolled), "--defer-pane",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    # The flag tolerates a lease; it does not defer a repaint that can happen now.
+    assert "pane_refresh_deferred" not in payload
+    wait_for(lambda: "ROLLED PLAN" in content(frame, pane_id))
+
+
+def test_defer_pane_refuses_an_unobservable_pane_and_writes_nothing(
+    pane, tmp_path, monkeypatch, capsys
+):
+    frame, record, manager, base = pane
+    acquire(manager, record)
+    lease = manager.leases.read(record["id"])
+    os.kill(lease["pid"], signal.SIGKILL)
+    wait_for(lambda: not manager.leases.alive(lease))
+    before = frame.store.find_session(record["id"])["plan"]["path"]
+    # A dead lease is reaped through `restore`, which cannot see the panes here.
+    # "Could not observe" is not "not leased", so --defer-pane must still refuse.
+    monkeypatch.setattr(Frame, "role_panes", lambda self, session_id: None)
+    assert main([
+        *base, "plan-set", "--session-id", record["id"],
+        "--tmux-socket", frame.socket, "--path", str(_rolled_plan(tmp_path)),
+        "--defer-pane",
+    ]) == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "pane_unobservable"
+    assert frame.store.find_session(record["id"])["plan"]["path"] == before

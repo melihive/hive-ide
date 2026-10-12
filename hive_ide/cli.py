@@ -558,14 +558,36 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
         if args.active_task is not None:
             plan["active_task"] = args.active_task
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    force = bool(getattr(args, "force", False))
+    deferred = None
     if plan.get("path") != previous_path:
-        PaneLeases(frame).check(record["id"], force=getattr(args, "force", False))
+        # A live lease refuses an ordinary plan change, and that is deliberate:
+        # the borrower's pane is restored from this record, so letting someone
+        # else clear or move the link would restore their pane onto a plan they
+        # did not ask for. `--defer-pane` is the narrow exception for a caller
+        # that is FOLLOWING the plan rather than choosing it — a volume roll
+        # renames the file underneath the session, and refusing there leaves the
+        # record pointing at a path that no longer exists, which is strictly
+        # worse for the borrower than a deferred repaint. The record write is
+        # safe because `PaneLeases.restore` re-reads the session on release and
+        # respawns the pane from it, so the pane lands on the new path by itself.
+        try:
+            PaneLeases(frame).check(record["id"], force=force)
+        except LeaseError as exc:
+            if not (
+                getattr(args, "defer_pane", False)
+                and exc.payload.get("error") == "pane_leased"
+            ):
+                raise
+            deferred = exc.payload
     record["plan"] = {
         "path": plan.get("path"),
         "active_task": plan.get("active_task"),
     }
     record["last_active"] = utc_now()
     store.write("sessions", record["id"], record)
+    if deferred is not None:
+        return dict(record, pane_refresh_deferred=deferred)
     if record["plan"]["path"] != previous_path:
         Frame(store, socket=_socket(store, args.tmux_socket)).refresh_plan_pane(record)
     return record
@@ -1306,6 +1328,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--force", action="store_true",
         help="Revoke a live pane lease before replacing its content.",
+    )
+    plan.add_argument(
+        "--defer-pane", action="store_true",
+        help="Link the plan even while the pane is leased, leaving the repaint "
+             "to lease release. For a caller following a rename, not choosing a plan.",
     )
     plan.set_defaults(handler=cmd_plan_set)
 
