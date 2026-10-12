@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.90] - 2026-10-12
+
 ### Added
 
 - `plan-set --defer-pane` links a plan even while the plan pane is leased,
