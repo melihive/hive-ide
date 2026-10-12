@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `plan-set --defer-pane` links a plan even while the plan pane is leased,
+  leaving the repaint to lease release and reporting the lease under
+  `pane_refresh_deferred`. An ordinary plan change is still refused, because a
+  borrower's pane is restored from the session record; the exception is for a
+  caller FOLLOWING a rename, such as a plan volume roll, where refusing left the
+  record pointing at a path that no longer existed.
+
 ## [1.0.89] - 2026-10-09
 
 ### Fixed
