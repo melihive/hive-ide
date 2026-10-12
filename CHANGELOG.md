@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- A long turn no longer renders as an idle session. The agent hook writes
+  `working` once, at the turn boundary, and does not write again until the turn
+  ends, so the status record ages at exactly the rate the agent is busy. The
+  sidebar blanked the dot once that record passed 15 minutes — so a session
+  grinding through a 25-minute test suite showed no status glyph at all, which
+  is what an idle session shows, and what a session whose agent has died shows.
+  The glyph now stays and dims instead, and the row's relative time reads as
+  "working, 25 minutes in" rather than "idle since 25 minutes ago".
+
 ## [1.0.91] - 2026-10-13
 
 ### Fixed

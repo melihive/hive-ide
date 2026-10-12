@@ -323,7 +323,12 @@ class IdeSidebar:
                   "working": ("●", "\x1b[38;5;220m"),
                   "sleeping": ("💤", "\x1b[38;5;245m"),
                   "error": ("!", "\x1b[1;38;5;203m")}
-    STALE_WORKING_SECONDS = 900   # a crashed agent must not sit on "working" forever
+    STALE_WORKING_SECONDS = 900   # past this, "working" is no longer first-hand news
+    # Muted amber: still the working glyph, deliberately dimmer. A turn that outlives
+    # STALE_WORKING_SECONDS is unremarkable — a long test suite, a slow deploy, a
+    # hung command — and the agent writes `working` only at the turn BOUNDARY, so
+    # there is no second write to refresh it mid-turn however alive it is.
+    STALE_WORKING_COLOR = "\x1b[38;5;136m"
     PLUS = "+"                    # footer button — click to create an ide session
     # Green, deliberately NOT the cyan of ACTIVE/SEL_CUR: cyan means "the current
     # window" everywhere else in this list, so a cyan `+` read as a status rather than
@@ -421,9 +426,19 @@ class IdeSidebar:
         if not st:
             return "", ""
         state = st.get("state")
-        if state == "working" and IdeSidebar._age_seconds(st.get("ts")) > IdeSidebar.STALE_WORKING_SECONDS:
-            return "", ""   # self-heal: stale "working" (crashed agent) → neutral
         _, color = IdeSidebar.STATUS_DOT.get(state, ("", ""))
+        if state == "working" and IdeSidebar._age_seconds(st.get("ts")) > IdeSidebar.STALE_WORKING_SECONDS:
+            # Do NOT blank it. The hook writes `working` once, at the start of the
+            # turn, and does not write again until the turn ends — so the mark ages
+            # at exactly the rate the agent is busy. Blanking it meant every turn
+            # longer than the ceiling rendered as nothing at all, which is the glyph
+            # an IDLE session shows: a session grinding through a 25-minute test run
+            # looked identical to one doing nothing, and to one whose agent had died.
+            # That is "unknown" being reported as a confident negative. Dim it
+            # instead and let the row's relative time say how long — `● 25m` reads as
+            # "working, 25 minutes in", and a crashed agent reads as `● 3d`, which is
+            # obviously wrong rather than invisible.
+            return status_icons.get(state, ""), IdeSidebar.STALE_WORKING_COLOR
         return status_icons.get(state, ""), color
 
     @staticmethod
