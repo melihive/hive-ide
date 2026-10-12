@@ -603,18 +603,25 @@ def test_unsupported_pinned_interpreter_preserves_default(pane, tmp_path):
     assert manager.leases.read(record["id"]) is None
 
 
-def _rolled_plan(tmp_path):
-    rolled = tmp_path / "workspace" / "plan-02.md"
+def _rolled_plan(frame, record):
+    """Roll the plan the way a volume roll does: the OLD path stops existing.
+
+    Writing a second file alongside the first would leave the motivating case
+    untested — the session points at a path that is gone, which is why a
+    deferred repaint beats a refusal.
+    """
+    current = Path(frame.store.find_session(record["id"])["plan"]["path"])
+    rolled = current.with_name("plan-02.md")
+    current.rename(rolled)
     rolled.write_text("# ROLLED PLAN\n")
+    assert not current.exists()
     return rolled
 
 
-def test_defer_pane_links_a_renamed_plan_while_the_pane_stays_borrowed(
-    pane, tmp_path, capsys
-):
+def test_defer_pane_links_a_renamed_plan_while_the_pane_stays_borrowed(pane, capsys):
     frame, record, manager, base = pane
     result = acquire(manager, record)
-    rolled = _rolled_plan(tmp_path)
+    rolled = _rolled_plan(frame, record)
     args = [
         *base, "plan-set", "--session-id", record["id"],
         "--tmux-socket", frame.socket, "--path", str(rolled),
@@ -641,9 +648,9 @@ def test_defer_pane_links_a_renamed_plan_while_the_pane_stays_borrowed(
     wait_for(lambda: "ROLLED PLAN" in content(frame, result["pane_id"]))
 
 
-def test_defer_pane_still_repaints_when_no_lease_is_held(pane, tmp_path, capsys):
+def test_defer_pane_still_repaints_when_no_lease_is_held(pane, capsys):
     frame, record, _, base = pane
-    rolled = _rolled_plan(tmp_path)
+    rolled = _rolled_plan(frame, record)
     pane_id = frame.role_panes(record["id"])["plan"]
     assert main([
         *base, "plan-set", "--session-id", record["id"],
@@ -656,7 +663,7 @@ def test_defer_pane_still_repaints_when_no_lease_is_held(pane, tmp_path, capsys)
 
 
 def test_defer_pane_refuses_an_unobservable_pane_and_writes_nothing(
-    pane, tmp_path, monkeypatch, capsys
+    pane, monkeypatch, capsys
 ):
     frame, record, manager, base = pane
     acquire(manager, record)
@@ -669,7 +676,7 @@ def test_defer_pane_refuses_an_unobservable_pane_and_writes_nothing(
     monkeypatch.setattr(Frame, "role_panes", lambda self, session_id: None)
     assert main([
         *base, "plan-set", "--session-id", record["id"],
-        "--tmux-socket", frame.socket, "--path", str(_rolled_plan(tmp_path)),
+        "--tmux-socket", frame.socket, "--path", str(_rolled_plan(frame, record)),
         "--defer-pane",
     ]) == 2
     assert json.loads(capsys.readouterr().out)["error"] == "pane_unobservable"
