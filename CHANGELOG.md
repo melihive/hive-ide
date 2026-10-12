@@ -13,9 +13,12 @@ All notable changes to `hive-ide` will be documented in this file.
   shell re-probed just once a second, leaving the old order readable for
   around 1.5s after every switch, which read as the sidebar sorting itself
   differently per session. The frame's `session-window-changed` hook now wakes
-  that window's sidebar pane, cutting the stale frame to about 40ms. The pane
-  is resolved by its `@hive_ide_pane` role, never by index, because
-  `relayout --mode=adopt` re-sorts panes on the same hook.
+  that window's sidebar pane, cutting the stale frame to about 50ms. The
+  respawn goes through the role-pane path rather than a bare tmux
+  `respawn-pane`, so the pane is found by its `@hive_ide_pane` role (pane order
+  drifts, and `relayout --mode=adopt` re-sorts panes on this same hook) and is
+  relaunched with its own session's `HIVE_IDE_*` values instead of whichever
+  identity the tmux session environment is holding.
 
 ## [1.0.90] - 2026-10-12
 

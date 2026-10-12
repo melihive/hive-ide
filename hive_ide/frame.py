@@ -2085,14 +2085,17 @@ class Frame:
         # Third command on the same hook: the window tmux has just switched to only
         # starts painting its sidebar when its keep-alive shell next probes, up to a
         # second later, so until then it shows the frame it painted when you last left
-        # it — with a stale order. Respawning that pane repaints it at once. `-b` so it
-        # runs alongside `seen`/`adopt` rather than after them.
+        # it — with a stale order. `wake` respawns that pane so it repaints at once.
+        # `-b` so it runs alongside `seen`/`adopt` rather than after them.
         wake = self._module(
-            "sidebar",
+            "wake",
             [
-                "--wake",
-                "--window",
-                "#{window_id}",
+                "--state-home",
+                str(self.store.home),
+                "--workspace-key",
+                self.store.workspace_key,
+                "--session-id",
+                "#{@hive_ide_session_id}",
                 "--tmux-socket",
                 self.socket,
             ],
