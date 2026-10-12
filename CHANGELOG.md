@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.93] - 2026-10-13
+
 ### Fixed
 
 - `open` now attaches with `-d`, taking sole ownership of the session. Every
