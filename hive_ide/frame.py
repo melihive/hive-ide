@@ -2082,6 +2082,31 @@ class Frame:
                 f"run-shell -b {shlex.quote(adopt)}",
             ]
         )
+        # Third command on the same hook: the window tmux has just switched to only
+        # starts painting its sidebar when its keep-alive shell next probes, up to a
+        # second later, so until then it shows the frame it painted when you last left
+        # it — with a stale order. Respawning that pane repaints it at once. `-b` so it
+        # runs alongside `seen`/`adopt` rather than after them.
+        wake = self._module(
+            "sidebar",
+            [
+                "--wake",
+                "--window",
+                "#{window_id}",
+                "--tmux-socket",
+                self.socket,
+            ],
+        )
+        self.tmux(
+            [
+                "set-hook",
+                "-a",
+                "-t",
+                self.target,
+                "session-window-changed",
+                f"run-shell -b {shlex.quote(wake)}",
+            ]
+        )
         self.tmux(
             [
                 "set-hook",

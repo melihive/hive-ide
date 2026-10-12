@@ -4,6 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Switching to a session no longer shows that window's sidebar in a stale
+  order. Only the displayed window runs a sidebar process, so a backgrounded
+  pane keeps the frame it last painted, and the list is ordered by activity —
+  so the frame goes out of date while you are away. The window's keep-alive
+  shell re-probed just once a second, leaving the old order readable for
+  around 1.5s after every switch, which read as the sidebar sorting itself
+  differently per session. The frame's `session-window-changed` hook now wakes
+  that window's sidebar pane, cutting the stale frame to about 40ms. The pane
+  is resolved by its `@hive_ide_pane` role, never by index, because
+  `relayout --mode=adopt` re-sorts panes on the same hook.
+
 ## [1.0.90] - 2026-10-12
 
 ### Added

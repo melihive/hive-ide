@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -570,5 +571,107 @@ def test_open_isolates_and_reports_a_missing_session_directory(tmp_path, monkeyp
         assert reopened["failed"] == []
         assert reopened["windows"] == 2
         assert store.read("errors", stale["id"]) is None
+    finally:
+        frame.tmux(["kill-server"])
+
+
+def test_switching_windows_repaints_the_sidebar_before_its_order_can_look_stale(
+    tmp_path, monkeypatch
+):
+    """A backgrounded sidebar keeps its last painted frame, and the list is ordered by
+    activity — so the frame goes stale while you are away and switching back shows a
+    WRONG ORDER until the keep-alive shell next probes, up to a second later.
+
+    This asserts the order is right within a budget far tighter than that poll, so a
+    run against the unfixed code fails instead of settling into a pass. It also pins
+    the mechanism: the pane is respawned, so its pid changes on the switch.
+    """
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    # The frame's hooks run `<python> -m hive_ide.sidebar` as tmux-server children, and
+    # a bare interpreter resolves the INSTALLED hive-ide, not this working tree. Without
+    # this the test would silently grade the released package instead of the change in
+    # front of it — and pass or fail for reasons that have nothing to do with it.
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parent.parent))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["term"]
+
+    def _make(name: str) -> dict:
+        return store.create_session(
+            name=name,
+            working_dir=workspace,
+            source=_source(),
+            driver=driver.resolve(
+                name=name, working_dir=str(workspace), conversation_reference=None
+            ),
+        )
+
+    first = _make("ALPHA")
+    second = _make("BRAVO")
+    frame = Frame(
+        store, socket=f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
+    try:
+        frame.open(no_attach=True)
+        windows = frame.windows()
+        win_first, win_second = windows[first["id"]], windows[second["id"]]
+        for window in (win_first, win_second):
+            frame.tmux(["resize-window", "-t", window, "-x", "180", "-y", "40"])
+
+        # BRAVO is displayed long enough to paint, with ALPHA the most recent.
+        frame.tmux(["select-window", "-t", win_second])
+        time.sleep(1.8)
+        stale = frame.tmux(["capture-pane", "-p", "-t", f"{win_second}.0"]).stdout
+        assert "ALPHA" in stale and "BRAVO" in stale, stale
+        assert stale.index("ALPHA") < stale.index("BRAVO"), stale
+
+        # Leave BRAVO: its process exits and the frame above is frozen on screen.
+        frame.tmux(["select-window", "-t", win_first])
+        time.sleep(1.2)
+        pid_before = frame.tmux(
+            ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
+        ).stdout.strip()
+
+        # BRAVO becomes the most recent while we are away, so the order must flip.
+        record = store.read("sessions", second["id"])
+        record["last_active"] = "2099-01-01T00:00:00+00:00"
+        store.write("sessions", second["id"], record)
+        assert [s["name"] for s in store.list("sessions")][0] == "BRAVO"
+
+        # Sample from the instant of the switch. The assertion that matters is not how
+        # fast the right order arrives — it is how long the WRONG one stays readable.
+        # The hook cannot be instant (it respawns the pane, which costs an interpreter
+        # start), so a sliver at t=0 is expected and harmless. What is not acceptable is
+        # the frame still being there a third of a second later. Measured on this
+        # machine: 1527ms unfixed, 41ms fixed — so this bound fails the defect and
+        # passes the fix with room either side, and a test that simply waited for the
+        # right order would pass against the defect.
+        STALE_BUDGET_MS = 250
+        frame.tmux(["select-window", "-t", win_second])
+        started = time.monotonic()
+        stale_until_ms = 0.0
+        fresh_at_ms = None
+        while time.monotonic() - started < 4.0:
+            shown = frame.tmux(
+                ["capture-pane", "-p", "-t", f"{win_second}.0"]
+            ).stdout
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if "ALPHA" in shown and "BRAVO" in shown:
+                if shown.index("BRAVO") < shown.index("ALPHA"):
+                    fresh_at_ms = elapsed_ms
+                    break
+                stale_until_ms = elapsed_ms
+            time.sleep(0.01)
+        assert stale_until_ms < STALE_BUDGET_MS, (
+            f"the pre-switch order was still on screen {stale_until_ms:.0f}ms after the "
+            f"switch (budget {STALE_BUDGET_MS}ms): the sidebar was not woken, so the "
+            "window is showing the order from the last time it was displayed"
+        )
+        assert fresh_at_ms is not None, "sidebar never repainted in the new order"
+        pid_after = frame.tmux(
+            ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
+        ).stdout.strip()
+        assert pid_after and pid_after != pid_before, (pid_before, pid_after)
     finally:
         frame.tmux(["kill-server"])

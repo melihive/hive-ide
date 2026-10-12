@@ -614,6 +614,61 @@ class IdeSidebar:
         )
         return max(0, width - status_width)
 
+    SIDEBAR_ROLE = "sidebar"
+
+    @staticmethod
+    def _wake_sidebar_pane(socket: str, window: str) -> int:
+        """Repaint the sidebar of the window tmux has just switched to.
+
+        Only the DISPLAYED window runs a sidebar process: the render loop returns the
+        moment its window stops being current, and the keep-alive shell re-probes just
+        once a second. A backgrounded pane therefore keeps the frame it last painted,
+        and the list is activity-ordered, so the frame goes out of date while you are
+        away. Switching to that window then shows an order that was true whenever you
+        last looked at it — measured at 600ms of visibly stale rows, long enough to
+        read as a sort bug — until the keep-alive notices and repaints.
+
+        So the frame's `session-window-changed` hook calls this, and respawning the
+        pane restarts the keep-alive immediately instead of waiting out its sleep.
+
+        The pane is resolved by its `@hive_ide_pane` ROLE, never by index. Pane order
+        drifts and `relayout --mode=adopt` re-sorts panes on this very hook, so an
+        index would race it — and index 0 holding the agent at that instant would make
+        this kill the agent the user is talking to. No role, no respawn.
+        """
+        rows = IdeSidebar._tmux_capture(
+            socket, ["list-panes", "-t", window, "-F", "#{@hive_ide_pane}\t#{pane_id}"]
+        )
+        if rows is None:
+            return 0        # could not observe the window: never guess a pane
+        panes = [
+            pane_id
+            for line in rows.splitlines()
+            for role, _, pane_id in [line.partition("\t")]
+            if role == IdeSidebar.SIDEBAR_ROLE and pane_id
+        ]
+        if len(panes) != 1:
+            return 0        # no sidebar, or an ambiguous window — leave it alone
+        pane = panes[0]
+        if pane == os.environ.get("TMUX_PANE"):
+            return 0        # never respawn the pane this call is running in
+        IdeSidebar._tmux_capture(socket, ["respawn-pane", "-k", "-t", pane])
+        return 0
+
+    @staticmethod
+    def _tmux_capture(socket: str, args: list[str]) -> str | None:
+        """Run one tmux command on an explicit socket. None means "could not observe"."""
+        try:
+            r = subprocess.run(
+                ["tmux", "-L", socket, *args],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout if r.returncode == 0 else None
+
     @staticmethod
     def _initial_focus() -> bool:
         """tmux only reports focus on CHANGE, so seed the state for this pane."""
@@ -1227,6 +1282,15 @@ class IdeSidebar:
     @staticmethod
     def main(argv: list[str] | None = None) -> int:
         args = argv if argv is not None else sys.argv[1:]
+        if "--wake" in args:
+            # Frame hook entry point: no rendering, no state read — resolve this
+            # window's sidebar pane and restart it. See `_wake_sidebar_pane`.
+            waker = argparse.ArgumentParser(prog="python -m hive_ide.sidebar --wake")
+            waker.add_argument("--wake", action="store_true")
+            waker.add_argument("--window", required=True)
+            waker.add_argument("--tmux-socket", required=True)
+            woken = waker.parse_args(args)
+            return IdeSidebar._wake_sidebar_pane(woken.tmux_socket, woken.window)
         if "--state-home" in args:
             parser = argparse.ArgumentParser(prog="python -m hive_ide.sidebar")
             parser.add_argument("--state-home", required=True)
