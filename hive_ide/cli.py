@@ -1507,7 +1507,7 @@ def build_parser() -> argparse.ArgumentParser:
     capabilities = command("capabilities")
     capabilities.set_defaults(handler=lambda _args: {
         "protocol_version": PROTOCOL_VERSION, "version": __version__,
-        "features": ["pane-lease"],
+        "features": ["pane-lease", "plan-set-defer-pane"],
     })
 
     version = command("version")
