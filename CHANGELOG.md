@@ -4,6 +4,14 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Test-only: three pane-lease tests waited on a file's EXISTENCE and then read it,
+  which races the write that follows the open — the file is there before its
+  contents are. Reliable on an idle machine, reliable the other way on a loaded
+  one: it failed the 1.0.93 publish in CI while the same suite passed locally.
+  They now wait for the contents.
+
 ## [1.0.93] - 2026-10-13
 
 ### Fixed

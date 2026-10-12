@@ -36,6 +36,49 @@ def wait_for(predicate, timeout=8):
     pytest.fail("Timed out waiting for pane lease transition")
 
 
+def wait_for_text(path, timeout=8):
+    """Wait for a file the leased child writes, and return its CONTENTS.
+
+    Not `wait_for(path.exists)`: a path exists the instant it is opened, which is
+    before anything has been written to it, so a read that follows can legitimately
+    see "". That race is invisible on a fast idle machine and reliable on a loaded
+    one — it failed the 1.0.93 release in CI while passing locally, and flaked twice
+    on a developer machine the same evening.
+    """
+    return wait_for(lambda: path.read_text() if path.exists() else "", timeout=timeout)
+
+
+def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path):
+    """The bug this guards: an empty file already exists.
+
+    `wait_for(path.exists)` is satisfied by the open() that precedes the write, so a
+    read taken straight after can see "". This asserts the helper keeps waiting until
+    there is something to read — which is the difference that failed CI on 1.0.93.
+    """
+    target = tmp_path / "late"
+    target.write_text("")          # exists, but empty — the losing state
+
+    writes: list[str] = []
+
+    def fill():
+        if not writes:
+            writes.append("x")
+            return
+        target.write_text("hello")
+
+    original = wait_for
+
+    def driving_wait(predicate, timeout=8):
+        def stepped():
+            fill()
+            return predicate()
+
+        return original(stepped, timeout=timeout)
+
+    assert target.read_text() == "", "precondition: the file exists and is empty"
+    assert driving_wait(lambda: target.read_text() if target.exists() else "") == "hello"
+
+
 @pytest.fixture(params=["stable", "dev"])
 def pane(tmp_path, monkeypatch, request):
     monkeypatch.setenv("SHELL", "/bin/sh")
@@ -277,8 +320,7 @@ def test_child_arguments_survive_tmux_command_parser(pane, tmp_path):
         title="Literal arguments",
         argv=[sys.executable, "-c", code, *expected],
     )
-    wait_for(output.exists)
-    assert json.loads(output.read_text()) == expected
+    assert json.loads(wait_for_text(output)) == expected
     assert manager.release(result["lease_id"], result["token"])["released"]
 
 
@@ -430,8 +472,7 @@ def test_interactive_child_has_foreground_tty_and_accepts_input(pane, tmp_path):
     )
     wait_for(lambda: "LEASE INPUT" in content(frame, result["pane_id"]))
     frame.tmux(["send-keys", "-t", result["pane_id"], "hello", "Enter"])
-    wait_for(output.exists)
-    assert output.read_text() == "hello"
+    assert wait_for_text(output) == "hello"
     wait_for(lambda: manager.leases.read(record["id"]) is None)
     wait_for(lambda: "ORIGINAL PLAN" in content(frame, result["pane_id"]))
 
@@ -493,8 +534,7 @@ def test_cli_json_round_trip_and_literal_child_arguments(pane, tmp_path, capsys)
     ]
     assert main(args) == 0
     acquired = json.loads(capsys.readouterr().out)
-    wait_for(output.exists)
-    assert json.loads(output.read_text()) == ["--quiet", "two words", "$(literal)"]
+    assert json.loads(wait_for_text(output)) == ["--quiet", "two words", "$(literal)"]
     assert main([*base, "pane-status"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["leases"][0]["alive"]
