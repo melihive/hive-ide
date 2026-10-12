@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.91] - 2026-10-13
+
 ### Fixed
 
 - Switching to a session no longer shows that window's sidebar in a stale
