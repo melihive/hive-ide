@@ -1,6 +1,7 @@
 """`verify` must name the two conditions that were invisible when they bit.
 
-Both were found on mim on 2026-10-13 and neither was reported by anything:
+Both were found on one fleet machine on 2026-10-13, and neither was reported
+by anything:
 
   - two `_preheat` tmux sessions from 2026-10-05, unattached, one `fish` window
     each, sharing a hive-ide socket and keeping that server alive;
@@ -82,11 +83,11 @@ def test_a_malformed_listing_row_is_skipped_not_guessed_at(store, monkeypatch):
     assert [s["name"] for s in frame.unmanaged_sessions()] == ["_preheat"]
 
 
-REF = "9a9bb400aabbccdd"
+REF = "a1b2c3d4e5f6a7b8"
 
 
 def test_verify_reports_an_orphan_holding_a_conversation(store, monkeypatch, tmp_path):
-    """The mim orphan, named. pid 900 at ppid 1 holds the conversation while the
+    """The orphan, named. pid 900 at ppid 1 holds the conversation while the
     session's own agent pane is a different process tree."""
     from hive_ide.cli import _conversation_holders
 
@@ -104,14 +105,14 @@ def test_verify_reports_an_orphan_holding_a_conversation(store, monkeypatch, tmp
             ]
         ),
     )
-    sessions = [{"id": "s1", "name": "DC MOBILE", "driver": {"resume": {"reference": REF}}}]
+    sessions = [{"id": "s1", "name": "MOBILE", "driver": {"resume": {"reference": REF}}}]
 
     found = _conversation_holders(frame, sessions)
 
     assert len(found) == 1, found
     assert found[0]["pid"] == 900
     assert found[0]["orphaned"] is True
-    assert found[0]["session"] == "DC MOBILE"
+    assert found[0]["session"] == "MOBILE"
 
 
 def test_verify_does_not_report_the_sessions_own_agent_as_a_holder(store, monkeypatch):
@@ -240,3 +241,126 @@ def test_verify_is_ok_when_none_of_the_three_conditions_is_present(tmp_path, mon
     assert result["client_findings"] == []
     assert result["unmanaged_findings"] == []
     assert result["holder_findings"] == []
+
+
+def _agent_session(name, driver_id="claude", sleeping=False, reference=None):
+    session = {"id": f"id-{name}", "name": name, "driver": {"id": driver_id}}
+    if reference:
+        session["driver"]["resume"] = {"reference": reference}
+    if sleeping:
+        session["sleep"] = {"state": "sleeping"}
+    return session
+
+
+def _agentless(frame, sessions, rows):
+    from hive_ide.cli import _agentless_sessions
+
+    return _agentless_sessions(frame, sessions, rows)
+
+
+def test_an_agent_pane_with_no_driver_is_reported(store, monkeypatch):
+    """A pane with no agent in it looks exactly like a working one: the frame is up,
+    the layout is right, and the last frame the agent painted is still on screen.
+    That is the shape of every "frozen session" that turned out to be a dead agent."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "/bin/sh -c agent"), (101, 100, "fish")]
+
+    found = _agentless(frame, [_agent_session("STATZ")], rows)
+
+    assert [f["session"] for f in found] == ["STATZ"], found
+    assert found[0]["driver"] == "claude"
+
+
+def test_an_agent_pane_with_a_live_driver_is_not_reported(store, monkeypatch):
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "/bin/sh -c agent"), (101, 100, "claude")]
+
+    assert _agentless(frame, [_agent_session("HIDE")], rows) == []
+
+
+def test_a_driver_nested_deeper_in_the_pane_still_counts(store, monkeypatch):
+    """The pane runs `sh -c`, which may run a shell, which runs the driver."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "sh -c agent"), (101, 100, "fish"), (102, 101, "codex")]
+
+    assert _agentless(frame, [_agent_session("ADMIN", "codex")], rows) == []
+
+
+def test_a_sleeping_session_is_not_reported(store, monkeypatch):
+    """A sleeping session has deliberately stopped its own driver, so an absent one
+    is correct. On the live frame 10 of 13 sessions were sleeping — without this
+    exclusion verify would cry wolf about every one of them, every run."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "sh -c agent")]
+
+    assert _agentless(frame, [_agent_session("HIVE DEV", sleeping=True)], rows) == []
+
+
+def test_a_terminal_session_is_not_reported(store, monkeypatch):
+    """A `term` session has no driver by definition."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "sh -c agent")]
+
+    assert _agentless(frame, [_agent_session("TERMINAL", "term")], rows) == []
+
+
+def test_a_pane_whose_pid_cannot_be_read_is_not_called_broken(store, monkeypatch):
+    """Unknown is not a verdict: an unobservable pane is not a missing agent."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: None)
+
+    assert _agentless(frame, [_agent_session("STATZ")], [(1, 0, "init")]) == []
+
+
+def test_verify_is_not_ok_when_a_session_has_no_agent(tmp_path, monkeypatch):
+    from hive_ide import cli
+
+    (tmp_path / "workspace").mkdir()
+    monkeypatch.setattr(cli, "_refresh_workspace_sources", lambda store: None)
+    monkeypatch.setattr(cli, "inspect_interpreter", lambda interp: {"package_version": "0"})
+    monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
+    monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions: [])
+    monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: [(1, 0, "init")]))
+    monkeypatch.setattr(
+        cli,
+        "_agentless_sessions",
+        lambda frame, sessions, rows: [{"session": "STATZ", "driver": "claude", "pane_id": "%2"}],
+    )
+    monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
+
+    result = cli.cmd_verify(_verify_args(tmp_path))
+
+    assert result["ok"] is False
+    assert result["agent_findings"] and "STATZ" in result["agent_findings"][0]
+
+
+def test_a_pane_whose_ROOT_process_is_the_driver_is_not_reported(store, monkeypatch):
+    """An agent pane is spawned as `sh -c '<argv>'`, and a shell given a simple
+    command `exec`s it instead of forking — so the pane's root pid can BE the
+    driver, with no child at all.
+
+    Found by mutation: excluding the root passed the whole suite, which meant
+    nothing covered this shape. It is the expensive direction to get wrong, because
+    flagging healthy sessions is how a verify finding gets ignored.
+    """
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "/opt/homebrew/bin/claude --resume abc")]   # exec'd: no child
+
+    assert _agentless(frame, [_agent_session("HIDE")], rows) == []
+    assert [d["pid"] for d in ConversationHolders.drivers_in_tree(100, rows)] == [100]

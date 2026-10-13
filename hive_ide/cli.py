@@ -1118,6 +1118,48 @@ def _conversation_holders(frame: Frame, sessions: list[dict[str, Any]]) -> list[
     return out
 
 
+def _agentless_sessions(
+    frame: Frame, sessions: list[dict[str, Any]], rows: list[tuple[int, int, str]]
+) -> list[dict[str, Any]]:
+    """Sessions whose agent pane holds no driver process.
+
+    A pane with no agent in it looks exactly like a working one — the frame is up,
+    the layout is right, the last frame the agent painted is still on screen. That
+    is the shape of every "session is frozen" report that turned out to be a dead
+    agent rather than a busy one.
+
+    This belongs in `verify` and NOT in `open`: asserting an agent is present
+    straight after launching it races the launch, and an immediate check would
+    report healthy panes as broken. `verify` runs with nothing in flight.
+
+    Excluded, because for these an absent driver is correct rather than a fault: a
+    `term` session has no driver at all, and a sleeping session has deliberately
+    stopped its own.
+    """
+    out: list[dict[str, Any]] = []
+    for session in sessions:
+        driver = session.get("driver") or {}
+        if driver.get("id") in (None, "term"):
+            continue
+        if (session.get("sleep") or {}).get("state") == "sleeping":
+            continue
+        agent_pane = (frame.role_panes(session["id"]) or {}).get("agent")
+        if not agent_pane:
+            continue
+        pane_pid = frame.pane_pid(agent_pane)
+        if pane_pid is None:
+            continue           # could not observe this pane; do not call it broken
+        if not ConversationHolders.drivers_in_tree(pane_pid, rows):
+            out.append(
+                {
+                    "session": session.get("name") or session["id"],
+                    "driver": driver.get("id"),
+                    "pane_id": agent_pane,
+                }
+            )
+    return out
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
@@ -1168,7 +1210,16 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         f"{frame.socket} kill-session -t {s['name']}` once you are sure it is idle."
         for s in unmanaged
     ]
+    process_rows = ConversationHolders.snapshot() if frame.exists() else []
     held = _conversation_holders(frame, sessions)
+    agentless = _agentless_sessions(frame, sessions, process_rows) if process_rows else []
+    agent_findings = [
+        f"{a['session']}: the agent pane holds no {a['driver']} process — the pane is "
+        "alive and still showing whatever the agent last painted, which is why this "
+        "reads as a frozen session rather than an absent one. Run `hive-ide chat` to "
+        "restart it."
+        for a in agentless
+    ]
     holder_findings = [
         f"{h['session']}: conversation {h['reference'][:8]} is held by pid {h['pid']}"
         + (" (orphaned — ppid 1, nothing will reap it)" if h["orphaned"] else "")
@@ -1188,6 +1239,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not client_findings
             and not holder_findings
             and not unmanaged_findings
+            and not agent_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1205,6 +1257,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "unmanaged_sessions": unmanaged,
         "holder_findings": holder_findings,
         "conversation_holders": held,
+        "agent_findings": agent_findings,
+        "agentless_sessions": agentless,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
             for driver_id in registry.ids()

@@ -6,7 +6,7 @@ still there. It cannot answer who is currently using it, and that is the questio
 that matters before launching an agent on one.
 
 The gap cost a visible freeze on 2026-10-13. An orphaned `claude` (ppid 1, no
-controlling tty, 16h40m old) still held conversation `9a9bb400`. Re-opening the
+controlling tty, 16h40m old) still held its conversation. Re-opening the
 frame respawned the agent pane, the fresh `claude --resume` of that same
 conversation never painted, and the pane sat on its stale frame looking exactly
 like a hung session. Two processes on one conversation is the fault; neither the
@@ -156,6 +156,30 @@ class ConversationHolders:
         name = os.path.basename(head).lower()
         name = name.split(".")[0]
         return any(name.startswith(driver) for driver in cls.DRIVER_EXECUTABLES)
+
+    @classmethod
+    def drivers_in_tree(
+        cls, pid: int, rows: list[tuple[int, int, str]] | None = None
+    ) -> list[dict[str, object]]:
+        """Driver processes running under `pid`.
+
+        Used to tell an agent pane that is doing something from one that is just a
+        shell. A pane with no driver under it is pixel-identical to a working one:
+        the frame is up, the layout is right, and the agent simply is not there.
+
+        The pane's ROOT process counts. An agent pane is spawned as `sh -c '<argv>'`,
+        and a shell handed a simple enough command `exec`s it rather than forking — so
+        the pane's root pid can BE the driver, with no child at all. Excluding the root
+        would then report a perfectly healthy session as having no agent, which is the
+        more expensive mistake: a verify that flags working sessions gets ignored.
+        """
+        rows = cls._ps() if rows is None else rows
+        tree = cls.descendants(pid, rows)
+        return [
+            {"pid": p, "ppid": pp, "command": c}
+            for p, pp, c in rows
+            if p in tree and cls._is_driver(c)
+        ]
 
     @classmethod
     def observable(cls, rows: list[tuple[int, int, str]] | None = None) -> bool:

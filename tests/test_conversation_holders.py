@@ -1,8 +1,8 @@
 """Who is holding a conversation, and the refusal that depends on it.
 
 `ConversationGuard` answers whether a conversation exists. It cannot say who is
-USING one, and that gap froze mim on 2026-10-13: an orphaned `claude` at ppid 1
-still held conversation `9a9bb400`, re-opening the frame started a second
+USING one, and that gap froze a session on 2026-10-13: an orphaned `claude` at
+ppid 1 still held its conversation, re-opening the frame started a second
 `--resume` on it, the pane never painted, and it looked exactly like a hung agent.
 
 Two failure directions matter here and they pull against each other. Missing a
@@ -96,7 +96,7 @@ def test_a_holder_outside_the_pane_tree_is_found():
     rows = _rows(
         (100, 1, "sh -c agent"),
         (101, 100, "fish"),
-        (900, 1, f"claude --resume {REF}"),     # the mim orphan
+        (900, 1, f"claude --resume {REF}"),     # the orphan
     )
     assert [h["pid"] for h in ConversationHolders.holders(REF, exclude_tree=100, rows=rows)] == [900]
 
@@ -135,7 +135,7 @@ def _session(store, reference: str | None):
 def test_respawn_agent_refuses_when_another_process_holds_the_conversation(
     store, monkeypatch
 ):
-    """The mim freeze, prevented. It RAISES rather than returning False because
+    """The freeze, prevented. It RAISES rather than returning False because
     `open` records a HiveIdeError per session in `failed` — so the condition is
     reported instead of silently skipped, which is how it went unnoticed."""
     record = _session(store, REF)
