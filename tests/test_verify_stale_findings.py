@@ -18,6 +18,7 @@ import time
 
 import pytest
 
+from hive_ide.cli import _agentless_sessions, _conversation_holders
 from hive_ide.frame import Frame
 from hive_ide.holders import ConversationHolders
 from hive_ide.store import StateStore
@@ -107,7 +108,7 @@ def test_verify_reports_an_orphan_holding_a_conversation(store, monkeypatch, tmp
     )
     sessions = [{"id": "s1", "name": "MOBILE", "driver": {"resume": {"reference": REF}}}]
 
-    found = _conversation_holders(frame, sessions)
+    found = _conversation_holders(frame, sessions, ConversationHolders.snapshot())
 
     assert len(found) == 1, found
     assert found[0]["pid"] == 900
@@ -136,7 +137,7 @@ def test_verify_does_not_report_the_sessions_own_agent_as_a_holder(store, monkey
     )
     sessions = [{"id": "s1", "name": "ALPHA", "driver": {"resume": {"reference": REF}}}]
 
-    assert _conversation_holders(frame, sessions) == []
+    assert _conversation_holders(frame, sessions, ConversationHolders.snapshot()) == []
 
 
 def test_verify_reports_nothing_when_the_process_table_is_unreadable(store, monkeypatch):
@@ -149,22 +150,86 @@ def test_verify_reports_nothing_when_the_process_table_is_unreadable(store, monk
     monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: []))
     sessions = [{"id": "s1", "name": "ALPHA", "driver": {"resume": {"reference": REF}}}]
 
-    assert _conversation_holders(frame, sessions) == []
+    assert _conversation_holders(frame, sessions, ConversationHolders.snapshot()) == []
 
 
-def test_verify_skips_the_scan_entirely_when_no_frame_is_running(store, monkeypatch):
-    from hive_ide.cli import _conversation_holders
+def test_verify_does_not_read_the_process_table_with_no_frame_running(tmp_path, monkeypatch):
+    """No frame means nothing to compare processes against, so the scan is skipped
+    at the caller — which is also what keeps `verify` cheap on an unopened
+    workspace."""
+    from hive_ide import cli
 
-    frame = Frame(store, socket="sock")
-    monkeypatch.setattr(Frame, "exists", lambda self: False)
+    (tmp_path / "workspace").mkdir()
     called: list = []
+    monkeypatch.setattr(cli, "_refresh_workspace_sources", lambda store: None)
+    monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
+    monkeypatch.setattr(Frame, "exists", lambda self: False)
+    monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
     monkeypatch.setattr(
         ConversationHolders, "snapshot", classmethod(lambda cls: called.append(1) or [])
     )
-    sessions = [{"id": "s1", "name": "ALPHA", "driver": {"resume": {"reference": REF}}}]
+    monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
 
-    assert _conversation_holders(frame, sessions) == []
-    assert called == [], "no frame means nothing to compare against; do not read ps"
+    result = cli.cmd_verify(_verify_args(tmp_path))
+
+    assert called == [], "read ps with no frame to compare it against"
+    assert result["incomplete"] == [], "no frame is not an incomplete check"
+
+
+def test_an_unreadable_process_table_makes_verify_incomplete_not_ok(tmp_path, monkeypatch):
+    """A check that could not run is not a check that passed.
+
+    Without this, an unreadable process table silently skips two findings and
+    `verify` reports a confidently healthy frame it never inspected. Note this is
+    the OPPOSITE policy to a driver launch, which proceeds when it cannot observe —
+    a launch must stay available, while a report must not overstate what it saw.
+    """
+    from hive_ide import cli
+
+    (tmp_path / "workspace").mkdir()
+    monkeypatch.setattr(cli, "_refresh_workspace_sources", lambda store: None)
+    monkeypatch.setattr(cli, "inspect_interpreter", lambda interp: {"package_version": "0"})
+    monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
+    monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: []))
+    monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
+
+    result = cli.cmd_verify(_verify_args(tmp_path))
+
+    assert result["incomplete"], "the skipped checks were not reported"
+    assert result["ok"] is False, "verify claimed healthy without running two checks"
+
+
+def test_an_unmanaged_session_is_reported_but_does_not_fail_verify(tmp_path, monkeypatch):
+    """A frame does not own its socket by contract — `Frame` takes a configured
+    socket independently of its workspace-derived session name, so another
+    workspace pointed at the same socket is legitimate. Reported as inventory;
+    failing this machine's verify over someone else's frame would be wrong."""
+    from hive_ide import cli
+
+    (tmp_path / "workspace").mkdir()
+    monkeypatch.setattr(cli, "_refresh_workspace_sources", lambda store: None)
+    monkeypatch.setattr(cli, "inspect_interpreter", lambda interp: {"package_version": "0"})
+    monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    monkeypatch.setattr(
+        Frame,
+        "unmanaged_sessions",
+        lambda self: [{"name": "other", "created_epoch": 1, "attached": False, "windows": 1}],
+    )
+    monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: [(1, 0, "init")]))
+    monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions, rows: [])
+    monkeypatch.setattr(cli, "_agentless_sessions", lambda frame, sessions, rows: [])
+    monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
+
+    result = cli.cmd_verify(_verify_args(tmp_path))
+
+    assert result["unmanaged_findings"], "the session was not reported at all"
+    assert result["ok"] is True, "an unmanaged session must not fail verify"
+
 
 
 def _verify_args(tmp_path):
@@ -183,7 +248,6 @@ def _verify_args(tmp_path):
     [
         ("clients", [{"client": "/dev/pts/0", "size": "80x24", "last_active_epoch": 1},
                      {"client": "/dev/pts/1", "size": "200x50", "last_active_epoch": 2}]),
-        ("unmanaged", [{"name": "_preheat", "created_epoch": 1, "attached": False, "windows": 1}]),
         ("holders", [{"session": "ALPHA", "reference": REF, "pid": 900, "ppid": 1, "orphaned": True}]),
     ],
 )
@@ -203,19 +267,18 @@ def test_each_stale_condition_makes_verify_not_ok(tmp_path, monkeypatch, field, 
     monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(Frame, "attached_clients", lambda self: value if field == "clients" else [])
+    monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
     monkeypatch.setattr(
-        Frame, "unmanaged_sessions", lambda self: value if field == "unmanaged" else []
-    )
-    monkeypatch.setattr(
-        cli, "_conversation_holders", lambda frame, sessions: value if field == "holders" else []
+        cli,
+        "_conversation_holders",
+        lambda frame, sessions, rows: value if field == "holders" else [],
     )
     monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
 
     result = cli.cmd_verify(_verify_args(tmp_path))
 
     assert result["ok"] is False, f"{field} did not affect ok: {result}"
-    key = {"clients": "client_findings", "unmanaged": "unmanaged_findings",
-           "holders": "holder_findings"}[field]
+    key = {"clients": "client_findings", "holders": "holder_findings"}[field]
     assert result[key], f"{key} was empty although {field} was present"
 
 
@@ -232,7 +295,7 @@ def test_verify_is_ok_when_none_of_the_three_conditions_is_present(tmp_path, mon
         Frame, "attached_clients", lambda self: [{"client": "/dev/pts/0", "size": "200x50", "last_active_epoch": 1}]
     )
     monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
-    monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions: [])
+    monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions, rows: [])
     monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
 
     result = cli.cmd_verify(_verify_args(tmp_path))
@@ -333,7 +396,7 @@ def test_verify_is_not_ok_when_a_session_has_no_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
     monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
-    monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions: [])
+    monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions, rows: [])
     monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: [(1, 0, "init")]))
     monkeypatch.setattr(
         cli,
@@ -364,3 +427,62 @@ def test_a_pane_whose_ROOT_process_is_the_driver_is_not_reported(store, monkeypa
 
     assert _agentless(frame, [_agent_session("HIDE")], rows) == []
     assert [d["pid"] for d in ConversationHolders.drivers_in_tree(100, rows)] == [100]
+
+
+@pytest.mark.parametrize("driver_id", ["someplugin", "unknown-driver", "term", None])
+def test_only_drivers_this_can_recognise_are_judged_for_a_missing_agent(
+    store, monkeypatch, driver_id
+):
+    """Reporting "no agent" for a driver there is no way to see flags healthy
+    sessions, and a diagnostic that cries wolf gets ignored.
+
+    The package supports declarative and plugin drivers this module knows nothing
+    about, and `term` has no driver at all. `antigravity` is deliberately NOT in this
+    list — its `agy` executable IS recognisable, so it can be judged; it just never
+    carries its conversation in argv, which limits the holder check and not this one.
+    """
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "sh -c agent")]        # no driver anywhere in the tree
+
+    session = {"id": "s1", "name": "X", "driver": {"id": driver_id} if driver_id else {}}
+    assert _agentless(frame, [session], rows) == [], driver_id
+
+
+def test_a_claude_session_IS_still_judged(store, monkeypatch):
+    """The inverse, so the parametrisation above is not passing by excluding
+    everything."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+
+    found = _agentless(frame, [_agent_session("STATZ", "claude")], [(100, 1, "sh -c agent")])
+    assert [f["session"] for f in found] == ["STATZ"]
+
+
+def test_a_holder_is_not_reported_when_the_pane_pid_is_unknown(store, monkeypatch):
+    """Review finding: without the pane's pid, the session's OWN healthy driver
+    cannot be told from an outside one — and reporting it would make this finding
+    noise on every healthy session."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: None)
+    rows = [(100, 1, "sh -c agent"), (101, 100, f"claude --resume {REF}")]
+    sessions = [{"id": "s1", "name": "ALPHA", "driver": {"id": "claude", "resume": {"reference": REF}}}]
+
+    assert _conversation_holders(frame, sessions, rows) == []
+
+
+def test_a_healthy_antigravity_pane_is_not_reported(store, monkeypatch):
+    """Antigravity launches as `agy -c`. Review finding: with `agy` missing from the
+    known executables a perfectly healthy tree was reported as having no agent —
+    the expensive direction, since flagging working sessions is how a finding gets
+    ignored."""
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    rows = [(100, 1, "sh -c agent"), (101, 100, "agy -c")]
+
+    assert _agentless(frame, [_agent_session("DESIGN", "antigravity")], rows) == []

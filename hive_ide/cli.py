@@ -1080,7 +1080,9 @@ def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
-def _conversation_holders(frame: Frame, sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _conversation_holders(
+    frame: Frame, sessions: list[dict[str, Any]], rows: list[tuple[int, int, str]]
+) -> list[dict[str, Any]]:
     """Live processes holding a session's conversation from outside its agent pane.
 
     This is the check whose absence produced the mim freeze: an orphaned driver at
@@ -1088,12 +1090,12 @@ def _conversation_holders(frame: Frame, sessions: list[dict[str, Any]]) -> list[
     surfaced when reopening the frame started a second driver on it and the pane
     never painted. `verify` would have named it.
 
-    Reads the process table ONCE for every session rather than per session — this is
-    a diagnostic, not a hot path, but `ps` on a busy machine is not free either.
+    The process table is read once by the caller and passed in: `verify` runs several
+    process checks and a scan per check both doubles the cost and lets the checks
+    disagree about what they saw.
     """
     if not frame.exists():
         return []
-    rows = ConversationHolders.snapshot()
     if not rows:
         return []          # could not observe; report nothing rather than guess
     out: list[dict[str, Any]] = []
@@ -1103,6 +1105,11 @@ def _conversation_holders(frame: Frame, sessions: list[dict[str, Any]]) -> list[
             continue
         agent_pane = (frame.role_panes(session["id"]) or {}).get("agent")
         pane_pid = frame.pane_pid(agent_pane) if agent_pane else None
+        if agent_pane and pane_pid is None:
+            # Without the pane's pid the session's OWN driver cannot be told from an
+            # outside one, and reporting its own agent as a foreign holder would make
+            # this finding noise on every healthy session.
+            continue
         for holder in ConversationHolders.holders(
             reference, exclude_tree=pane_pid, rows=rows
         ):
@@ -1139,7 +1146,13 @@ def _agentless_sessions(
     out: list[dict[str, Any]] = []
     for session in sessions:
         driver = session.get("driver") or {}
-        if driver.get("id") in (None, "term"):
+        if driver.get("id") not in ConversationHolders.KNOWN_DRIVERS:
+            # A `term` session has no driver, and a declarative or plugin driver is
+            # one this module cannot see — reporting "no agent" for a driver it has
+            # no way of recognising flags healthy sessions, which is how a finding
+            # gets ignored. Antigravity is recognised but never carries its
+            # conversation in argv, so only its presence can be judged, not its
+            # conversation.
             continue
         if (session.get("sleep") or {}).get("state") == "sleeping":
             continue
@@ -1195,6 +1208,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     )
     # Two conditions that were completely invisible when they caused a visible
     # freeze on 2026-10-13, and that nothing else reports.
+    process_rows = ConversationHolders.snapshot() if frame.exists() else []
     unmanaged = frame.unmanaged_sessions() if frame.exists() else []
     now = time.time()
     unmanaged_findings = [
@@ -1206,18 +1220,27 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             if s["created_epoch"]
             else ""
         )
-        + "). It keeps this tmux server alive; close it with `tmux -L "
-        f"{frame.socket} kill-session -t {s['name']}` once you are sure it is idle."
+        + "). It may be another workspace configured onto the same socket, or a "
+        "leftover that is keeping this tmux server alive; if it is the latter, close "
+        f"it with `tmux -L {frame.socket} kill-session -t {s['name']}`."
         for s in unmanaged
     ]
-    process_rows = ConversationHolders.snapshot() if frame.exists() else []
-    held = _conversation_holders(frame, sessions)
+    held = _conversation_holders(frame, sessions, process_rows)
     agentless = _agentless_sessions(frame, sessions, process_rows) if process_rows else []
+    # A check that could not run is not a check that passed. Without this, an
+    # unreadable process table silently skips two findings and `verify` reports a
+    # confidently healthy frame it never actually inspected.
+    incomplete = (
+        ["could not read the process table, so the conversation-holder and "
+         "missing-agent checks did not run"]
+        if frame.exists() and not process_rows
+        else []
+    )
     agent_findings = [
-        f"{a['session']}: the agent pane holds no {a['driver']} process — the pane is "
-        "alive and still showing whatever the agent last painted, which is why this "
-        "reads as a frozen session rather than an absent one. Run `hive-ide chat` to "
-        "restart it."
+        f"{a['session']}: the agent pane holds no {a['driver']} process. The driver "
+        "has exited or was never started; the pane is alive and still showing "
+        "whatever it last painted, which is why an idle session and a dead one look "
+        "identical from the sidebar. Run `hive-ide chat` to start it again."
         for a in agentless
     ]
     holder_findings = [
@@ -1238,8 +1261,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not hook_findings
             and not client_findings
             and not holder_findings
-            and not unmanaged_findings
             and not agent_findings
+            and not incomplete
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1253,8 +1276,12 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "hook_findings": hook_findings,
         "client_findings": client_findings,
         "clients": clients,
+        # Informational, and deliberately NOT part of `ok`: a frame does not own its
+        # socket by contract, so another workspace configured onto the same one is
+        # legitimate and must not fail this machine's verify.
         "unmanaged_findings": unmanaged_findings,
         "unmanaged_sessions": unmanaged,
+        "incomplete": incomplete,
         "holder_findings": holder_findings,
         "conversation_holders": held,
         "agent_findings": agent_findings,

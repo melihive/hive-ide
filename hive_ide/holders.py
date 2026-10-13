@@ -33,15 +33,38 @@ class ConversationHolders:
     #: REFUSES a launch the user asked for.
     MIN_REFERENCE = 8
 
-    #: Only a process whose EXECUTABLE is one of these counts as a holder, matched on
-    #: the basename of argv[0] — never on the command line as a whole.
-    #:
-    #: Substring matching looked fine and was wrong: the first probe of this module
-    #: flagged the very `bash -c` running it, because `~/.claude/` appears in an
-    #: unrelated path in its argv and the reference was one of its arguments. A grep,
-    #: an editor, a diagnostic or a capture script can all name a conversation without
-    #: holding it, and a false holder REFUSES a launch the user asked for.
-    DRIVER_EXECUTABLES = ("claude", "codex")
+    #: A reference shorter than this is too weak to match on: a few hex characters
+    #: appear in unrelated command lines by chance, and a false positive here
+    #: REFUSES a launch the user asked for.
+    MIN_REFERENCE_LEN = 8
+
+    #: EXACT executable basenames, matched against argv[0] — never a substring of the
+    #: command line. Substring matching looked fine and was wrong: the first live
+    #: probe of this module flagged the very `bash -c` running it, because
+    #: `~/.claude/` appeared in an unrelated path in its argv. Exact rather than
+    #: `startswith` so a `claude-helper` is not mistaken for a driver.
+    DRIVER_EXECUTABLES = frozenset({"claude", "codex", "agy"})
+
+    #: Drivers whose processes this module can actually recognise. A diagnostic must
+    #: not report "no agent" for a driver it has no way of seeing — so callers gate
+    #: on this rather than on "not a terminal session". Declarative and plugin
+    #: drivers are deliberately absent.
+    KNOWN_DRIVERS = frozenset({"claude", "codex", "antigravity"})
+
+    #: An interpreter is a driver only when its argv names a known entrypoint. An
+    #: npm-installed `claude` runs as `node …/@anthropic-ai/claude-code/cli.js`, so
+    #: argv[0] alone would miss it — and missing it reports a healthy session as
+    #: having no agent, which is the expensive direction.
+    INTERPRETERS = frozenset({"node", "nodejs", "bun", "deno", "python", "python3"})
+    ENTRYPOINT_MARKERS = ("claude-code/", "@anthropic-ai/claude", "codex/cli", "codex-cli")
+
+    #: The reference must follow one of these in argv. Carrying a conversation id is
+    #: NOT holding it: `claude -p "Explain transcript <ref>"` and
+    #: `codex exec explain <ref>` both name one while owning nothing, and an agent
+    #: investigating an incident is exactly the process that would. The real drivers
+    #: select a conversation as `claude --resume <ref>` and
+    #: `codex resume -C <dir> <ref>`.
+    SELECTION_TOKENS = frozenset({"--resume", "resume", "--continue"})
 
     @staticmethod
     def _ps() -> list[tuple[int, int, str]]:
@@ -119,7 +142,7 @@ class ConversationHolders:
         here on purpose: this returns observations, and the decision about what an
         absence of observation means belongs to the caller that has to act on it.
         """
-        if not reference or len(reference) < cls.MIN_REFERENCE:
+        if not reference or len(reference) < cls.MIN_REFERENCE_LEN:
             return []
         rows = cls._ps() if rows is None else rows
         skip = cls.descendants(exclude_tree, rows) if exclude_tree else set()
@@ -128,7 +151,7 @@ class ConversationHolders:
         for pid, ppid, command in rows:
             if pid in skip or reference not in command:
                 continue
-            if not cls._is_driver(command):
+            if not cls._is_driver(command) or not cls._selects(command, reference):
                 continue
             found.append(
                 {
@@ -145,17 +168,40 @@ class ConversationHolders:
 
     @classmethod
     def _is_driver(cls, command: str) -> bool:
-        """Is argv[0] one of the driver executables?
+        """Is this process a driver, judged by argv[0]?
 
-        Deliberately strict: the basename, lowercased, with any extension dropped,
-        must START one of the known driver names — so `claude`, `/opt/x/claude`,
-        `claude.cmd` and `codex-cli` match, while `bash`, `python3`, `grep` and
-        `/bin/sh` do not, however much of a conversation id they are carrying.
+        The basename, lowercased, with any extension dropped, must be EXACTLY one of
+        the known driver names — so `claude`, `/opt/x/claude` and `claude.cmd` match
+        while `bash`, `python3`, `grep`, `/bin/sh` and `claude-helper` do not,
+        however much of a conversation id they happen to be carrying.
+
+        An interpreter counts only when its argv also names a known driver
+        entrypoint, which is how an npm-installed `claude` appears.
         """
-        head = command.split(None, 1)[0] if command.split() else ""
-        name = os.path.basename(head).lower()
-        name = name.split(".")[0]
-        return any(name.startswith(driver) for driver in cls.DRIVER_EXECUTABLES)
+        tokens = command.split()
+        if not tokens:
+            return False
+        name = os.path.basename(tokens[0]).lower().split(".")[0]
+        if name in cls.DRIVER_EXECUTABLES:
+            return True
+        if name in cls.INTERPRETERS:
+            lowered = command.lower()
+            return any(marker in lowered for marker in cls.ENTRYPOINT_MARKERS)
+        return False
+
+    @classmethod
+    def _selects(cls, command: str, reference: str) -> bool:
+        """Does this argv SELECT `reference`, rather than merely mention it?
+
+        The reference must appear as its own whitespace-delimited token (not as part
+        of a path or a longer string) and the argv must carry a recognised selection
+        token. Both halves matter: the first stops a filename matching, the second
+        stops a prompt that quotes a conversation id from looking like ownership.
+        """
+        tokens = command.split()
+        if reference not in tokens:
+            return False
+        return any(token in cls.SELECTION_TOKENS for token in tokens)
 
     @classmethod
     def drivers_in_tree(

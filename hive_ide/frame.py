@@ -1233,7 +1233,13 @@ class Frame:
         return int(raw) if raw.isdigit() else None
 
     def prepare_agent_launch(self, record: dict[str, Any]) -> None:
-        """Drop confirmed-gone conversation refs before a driver launches."""
+        """Drop confirmed-gone conversation refs, and refuse a held conversation.
+
+        Every driver launch goes through here — `respawn_agent` and the window
+        `build` both call it — which is why the collision check lives here rather
+        than in either caller. Putting it in `respawn_agent` alone left `open`
+        exposed, and `open` is the path that produced the original fault.
+        """
         try:
             ConversationGuard(self.store).check(
                 record, working_dir=self.safe_working_dir(record), apply=True
@@ -1241,6 +1247,47 @@ class Frame:
         except (HiveIdeError, OSError):
             # A failed reconcile must never stop a window from opening.
             pass
+        self.refuse_held_conversation(record)
+
+    def refuse_held_conversation(self, record: dict[str, Any]) -> None:
+        """Raise when a process outside this session's own agent pane holds its
+        conversation.
+
+        Starting a second driver on one conversation is what produced a session that
+        looked frozen: the orphan went on holding it, the fresh `--resume` never
+        painted, and the pane kept its stale frame. Raising rather than returning
+        lets `open` record it per session in `failed`, so it is reported instead of
+        silently skipped.
+
+        Three things are deliberately NOT a refusal, because each would block a
+        launch the user asked for:
+
+        - the session's own agent pane, whose driver this launch is replacing;
+        - an unreadable process table, which is not proof of anything — refusing
+          every relaunch there would make the IDE unopenable;
+        - a pane whose pid tmux will not report, since without it the session's own
+          driver cannot be told from an outside one, and treating "unknown" as
+          "outside" blocks a healthy session from relaunching.
+        """
+        reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        if not reference:
+            return
+        agent_pane = (self.role_panes(record["id"]) or {}).get("agent")
+        exclude = self.pane_pid(agent_pane) if agent_pane else None
+        if agent_pane and exclude is None:
+            return      # cannot establish ownership; do not refuse on a guess
+        held = ConversationHolders.holders(reference, exclude_tree=exclude)
+        if not held:
+            return
+        who = ", ".join(
+            f"pid {h['pid']}" + (" (orphaned)" if h["orphaned"] else "") for h in held
+        )
+        raise HiveIdeError(
+            f"Conversation {reference[:8]} is already held by {who}; not starting a "
+            "second agent on it. A second driver on one conversation leaves the pane "
+            "permanently blank. Stop that process, or use `hive-ide chat` to attach a "
+            "fresh conversation."
+        )
 
     def pane_pid(self, pane_id: str) -> int | None:
         """The pane's root process, or None when tmux will not say."""
@@ -1255,37 +1302,13 @@ class Frame:
 
         False, and nothing killed, unless the pane is provably not the caller's.
 
-        Refuses outright when a live process OUTSIDE this pane already holds the
-        session's conversation. Starting a second driver on one conversation is what
-        froze mim on 2026-10-13: a 16h orphaned `claude` at ppid 1 still held
-        conversation `9a9bb400`, the fresh `--resume` never painted, and the pane kept
-        its stale frame — indistinguishable from a hung agent. Raising rather than
-        returning False is deliberate: `open` records a HiveIdeError per session in
-        `failed`, so the condition is reported instead of being silently skipped, and
-        the message names the pid so it can be dealt with.
-
-        Only a PROVEN holder refuses. An unreadable process table is not proof, and
-        refusing every relaunch on a machine where `ps` fails would make the IDE
-        unopenable — so that case proceeds, exactly as it did before this check.
+        `prepare_agent_launch` refuses a conversation another process already holds;
+        see `refuse_held_conversation`. It lives there rather than here because the
+        window `build` launches drivers too, and a check in this method alone left
+        that path — the one the original fault came through — unguarded.
         """
         if self.pane_is_caller(pane_id) is not False:
             return False
-        reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
-        if reference:
-            held = ConversationHolders.holders(
-                reference, exclude_tree=self.pane_pid(pane_id)
-            )
-            if held:
-                who = ", ".join(
-                    f"pid {h['pid']}" + (" (orphaned)" if h["orphaned"] else "")
-                    for h in held
-                )
-                raise HiveIdeError(
-                    f"Conversation {reference[:8]} is already held by {who}; not "
-                    "starting a second agent on it. A second driver on one "
-                    "conversation leaves the pane permanently blank. Stop that "
-                    "process, or use `hive-ide chat` to attach a fresh conversation."
-                )
         self.prepare_agent_launch(record)
         result = self.tmux(
             [
