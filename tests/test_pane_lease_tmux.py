@@ -48,35 +48,42 @@ def wait_for_text(path, timeout=8):
     return wait_for(lambda: path.read_text() if path.exists() else "", timeout=timeout)
 
 
-def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path):
+def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path, monkeypatch):
     """The bug this guards: an empty file already exists.
 
     `wait_for(path.exists)` is satisfied by the open() that precedes the write, so a
     read taken straight after can see "". This asserts the helper keeps waiting until
     there is something to read — which is the difference that failed CI on 1.0.93.
+
+    It calls `wait_for_text` itself, and the file only gains contents on the SECOND
+    poll, so an existence-only helper returns "" here and the test goes red. Patching
+    the module's `wait_for` is what drives the writer between polls — without that the
+    test would exercise a copied predicate and keep passing with the helper deleted.
     """
     target = tmp_path / "late"
     target.write_text("")          # exists, but empty — the losing state
 
-    writes: list[str] = []
-
-    def fill():
-        if not writes:
-            writes.append("x")
-            return
-        target.write_text("hello")
-
+    polls: list[int] = []
     original = wait_for
 
     def driving_wait(predicate, timeout=8):
         def stepped():
-            fill()
+            polls.append(1)
+            if len(polls) > 1:      # first poll sees the empty file, as CI did
+                target.write_text("hello")
             return predicate()
 
         return original(stepped, timeout=timeout)
 
+    monkeypatch.setattr(
+        sys.modules[test_wait_for_text_waits_for_CONTENT_not_mere_existence.__module__],
+        "wait_for",
+        driving_wait,
+    )
+
     assert target.read_text() == "", "precondition: the file exists and is empty"
-    assert driving_wait(lambda: target.read_text() if target.exists() else "") == "hello"
+    assert wait_for_text(target) == "hello"
+    assert len(polls) > 1, "the helper must have polled again rather than read once"
 
 
 @pytest.fixture(params=["stable", "dev"])
