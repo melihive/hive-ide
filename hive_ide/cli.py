@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .adoption import AdoptableConversation, ConversationAdopter
 from .agents import AgentResumeState
+from .holders import ConversationHolders
 from .config import configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
@@ -1078,6 +1080,44 @@ def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _conversation_holders(frame: Frame, sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Live processes holding a session's conversation from outside its agent pane.
+
+    This is the check whose absence produced the mim freeze: an orphaned driver at
+    ppid 1 held a conversation for over 16 hours, nothing noticed, and it only
+    surfaced when reopening the frame started a second driver on it and the pane
+    never painted. `verify` would have named it.
+
+    Reads the process table ONCE for every session rather than per session — this is
+    a diagnostic, not a hot path, but `ps` on a busy machine is not free either.
+    """
+    if not frame.exists():
+        return []
+    rows = ConversationHolders.snapshot()
+    if not rows:
+        return []          # could not observe; report nothing rather than guess
+    out: list[dict[str, Any]] = []
+    for session in sessions:
+        reference = AgentResumeState.reference_from_driver(session.get("driver") or {})
+        if not reference:
+            continue
+        agent_pane = (frame.role_panes(session["id"]) or {}).get("agent")
+        pane_pid = frame.pane_pid(agent_pane) if agent_pane else None
+        for holder in ConversationHolders.holders(
+            reference, exclude_tree=pane_pid, rows=rows
+        ):
+            out.append(
+                {
+                    "session": session.get("name") or session["id"],
+                    "reference": reference,
+                    "pid": holder["pid"],
+                    "ppid": holder["ppid"],
+                    "orphaned": holder["orphaned"],
+                }
+            )
+    return out
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
@@ -1111,6 +1151,31 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         if len(clients) > 1
         else []
     )
+    # Two conditions that were completely invisible when they caused a visible
+    # freeze on 2026-10-13, and that nothing else reports.
+    unmanaged = frame.unmanaged_sessions() if frame.exists() else []
+    now = time.time()
+    unmanaged_findings = [
+        f"tmux session {s['name']!r} shares this frame's socket but is not managed by "
+        f"hive-ide ({s['windows']} window(s), "
+        f"{'attached' if s['attached'] else 'unattached'}"
+        + (
+            f", {int((now - s['created_epoch']) // 86400)}d old"
+            if s["created_epoch"]
+            else ""
+        )
+        + "). It keeps this tmux server alive; close it with `tmux -L "
+        f"{frame.socket} kill-session -t {s['name']}` once you are sure it is idle."
+        for s in unmanaged
+    ]
+    held = _conversation_holders(frame, sessions)
+    holder_findings = [
+        f"{h['session']}: conversation {h['reference'][:8]} is held by pid {h['pid']}"
+        + (" (orphaned — ppid 1, nothing will reap it)" if h["orphaned"] else "")
+        + ", outside its own agent pane. A second driver on one conversation leaves "
+        "the pane permanently blank; stop that process before reopening the session."
+        for h in held
+    ]
     hook_findings = HookInstaller(
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
@@ -1121,6 +1186,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not source_errors
             and not hook_findings
             and not client_findings
+            and not holder_findings
+            and not unmanaged_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1134,6 +1201,10 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "hook_findings": hook_findings,
         "client_findings": client_findings,
         "clients": clients,
+        "unmanaged_findings": unmanaged_findings,
+        "unmanaged_sessions": unmanaged,
+        "holder_findings": holder_findings,
+        "conversation_holders": held,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
             for driver_id in registry.ids()

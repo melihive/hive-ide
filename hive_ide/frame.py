@@ -135,6 +135,53 @@ class Frame:
     def exists(self) -> bool:
         return self.tmux(["has-session", "-t", self.target]).returncode == 0
 
+    def tmux_sessions(self) -> list[dict[str, Any]]:
+        """Every tmux session on this frame's socket, newest first."""
+        result = self.tmux(
+            [
+                "list-sessions",
+                "-F",
+                "#{session_name}\t#{session_created}\t#{session_attached}\t"
+                "#{session_windows}",
+            ]
+        )
+        if result.returncode != 0:
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 4:
+                continue
+            name, created, attached, windows = (f.strip() for f in fields)
+            rows.append(
+                {
+                    "name": name,
+                    "created_epoch": int(created) if created.isdigit() else None,
+                    "attached": attached == "1",
+                    "windows": int(windows) if windows.isdigit() else None,
+                }
+            )
+        rows.sort(key=lambda r: r["created_epoch"] or 0, reverse=True)
+        return rows
+
+    def unmanaged_sessions(self) -> list[dict[str, Any]]:
+        """Sessions on this socket that are not this frame.
+
+        A frame owns exactly one tmux session, so anything else sharing its socket
+        is something nobody is tracking. mim was found carrying two `_preheat`
+        sessions created 2026-10-05 and still alive on 2026-10-13 — unattached, one
+        `fish` window, no ide hooks. A warm-up session is not meant to outlive its
+        warm-up, and it is what keeps an otherwise-idle server alive long enough to
+        accumulate the duplicate clients that reflow windows and, on the `select`
+        backend macOS forces tmux onto, can spin a core.
+
+        Reported rather than reaped on purpose: nothing in this package creates a
+        `_preheat` session — it appears on no branch, in no tag, and in no installed
+        copy — so there is no producer to guard against and no safe general rule for
+        killing someone else's tmux session. Naming it is the durable part.
+        """
+        return [s for s in self.tmux_sessions() if s["name"] != self.target]
+
     def windows(self) -> dict[str, str]:
         if not self.exists():
             return {}

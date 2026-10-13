@@ -75,6 +75,15 @@ class ConversationHolders:
         return rows
 
     @classmethod
+    def snapshot(cls) -> list[tuple[int, int, str]]:
+        """One read of the process table, for callers checking several sessions.
+
+        Public because `verify` checks every session at once and should not pay for a
+        `ps` per session, and should not reach into a private helper to avoid it.
+        """
+        return cls._ps()
+
+    @classmethod
     def descendants(cls, pid: int, rows: list[tuple[int, int, str]] | None = None) -> set[int]:
         """`pid` and every process beneath it."""
         rows = cls._ps() if rows is None else rows
