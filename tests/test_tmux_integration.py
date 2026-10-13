@@ -575,19 +575,36 @@ def test_open_isolates_and_reports_a_missing_session_directory(tmp_path, monkeyp
         frame.tmux(["kill-server"])
 
 
-def test_switching_windows_repaints_the_sidebar_before_its_order_can_look_stale(
+def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
     tmp_path, monkeypatch
 ):
-    """A backgrounded sidebar keeps its last painted frame, and the list is ordered by
-    activity — so the frame goes stale while you are away and switching back shows a
-    WRONG ORDER until the keep-alive shell next probes, up to a second later.
+    """A window switch must leave a correct sidebar on screen, and must never show
+    an empty one on the way there.
 
-    This asserts the order is right within a budget far tighter than that poll, so a
-    run against the unfixed code fails instead of settling into a pass. It also pins
-    the mechanism: the pane is respawned, so its pid changes on the switch.
+    Measures three things from the instant of the switch, because the first two can
+    be traded for each other and reading only one hides the regression:
+
+      blank - samples where NEITHER session name is on screen
+      stale - how long the pre-switch ORDER stays readable
+      fresh - when the correct order is on screen
+
+    Measured on one machine across the three implementations:
+
+      no wake at all     blank    0ms   stale 1492ms   fresh 1504ms
+      wake by respawn    blank  401ms   stale   60ms   fresh  413ms
+      wake by painting   blank    0ms   stale   61ms   fresh   73ms
+
+    The earlier version of this test asserted ONLY `stale`, and a blank pane has no
+    order in it at all — so its sampling loop skipped every blank frame and scored
+    the respawn as a near-perfect 60ms. Clearing the pane was the fastest possible
+    way to pass it. That shipped, and the sidebar blinked empty on every switch.
+
+    `blank == 0` and an unchanged pane pid are the assertions that discriminate, and
+    neither depends on timing, so a loaded machine cannot turn them green. The fresh
+    budget is deliberately loose: it guards "it did repaint promptly", nothing more.
     """
     monkeypatch.setenv("SHELL", "/bin/sh")
-    # The frame's hooks run `<python> -m hive_ide.sidebar` as tmux-server children, and
+    # The frame's hooks run `<python> -m hive_ide.<module>` as tmux-server children, and
     # a bare interpreter resolves the INSTALLED hive-ide, not this working tree. Without
     # this the test would silently grade the released package instead of the change in
     # front of it — and pass or fail for reasons that have nothing to do with it.
@@ -609,9 +626,7 @@ def test_switching_windows_repaints_the_sidebar_before_its_order_can_look_stale(
 
     first = _make("ALPHA")
     second = _make("BRAVO")
-    frame = Frame(
-        store, socket=f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    )
+    frame = Frame(store, socket=f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
         frame.open(no_attach=True)
         windows = frame.windows()
@@ -639,39 +654,50 @@ def test_switching_windows_repaints_the_sidebar_before_its_order_can_look_stale(
         store.write("sessions", second["id"], record)
         assert [s["name"] for s in store.list("sessions")][0] == "BRAVO"
 
-        # Sample from the instant of the switch. The assertion that matters is not how
-        # fast the right order arrives — it is how long the WRONG one stays readable.
-        # The hook cannot be instant (it respawns the pane, which costs an interpreter
-        # start), so a sliver at t=0 is expected and harmless. What is not acceptable is
-        # the frame still being there a third of a second later. Measured on this
-        # machine: 1527ms unfixed, 41ms fixed — so this bound fails the defect and
-        # passes the fix with room either side, and a test that simply waited for the
-        # right order would pass against the defect.
         STALE_BUDGET_MS = 250
+        FRESH_BUDGET_MS = 900
         frame.tmux(["select-window", "-t", win_second])
         started = time.monotonic()
         stale_until_ms = 0.0
         fresh_at_ms = None
+        blank_samples: list[float] = []
         while time.monotonic() - started < 4.0:
             shown = frame.tmux(
                 ["capture-pane", "-p", "-t", f"{win_second}.0"]
             ).stdout
             elapsed_ms = (time.monotonic() - started) * 1000
-            if "ALPHA" in shown and "BRAVO" in shown:
+            has_alpha, has_bravo = "ALPHA" in shown, "BRAVO" in shown
+            if not has_alpha and not has_bravo:
+                # Neither name anywhere: the pane is empty. This is the sample the old
+                # test discarded, and the whole defect lived in it.
+                blank_samples.append(elapsed_ms)
+            elif has_alpha and has_bravo:
                 if shown.index("BRAVO") < shown.index("ALPHA"):
                     fresh_at_ms = elapsed_ms
                     break
                 stale_until_ms = elapsed_ms
             time.sleep(0.01)
+
+        assert not blank_samples, (
+            f"the sidebar was EMPTY at {[round(ms) for ms in blank_samples]}ms after "
+            f"the switch (last blank {blank_samples[-1]:.0f}ms): the pane was cleared "
+            "rather than painted over, which is the regression this test exists for"
+        )
         assert stale_until_ms < STALE_BUDGET_MS, (
             f"the pre-switch order was still on screen {stale_until_ms:.0f}ms after the "
             f"switch (budget {STALE_BUDGET_MS}ms): the sidebar was not woken, so the "
             "window is showing the order from the last time it was displayed"
         )
-        assert fresh_at_ms is not None, "sidebar never repainted in the new order"
+        assert fresh_at_ms is not None and fresh_at_ms < FRESH_BUDGET_MS, (
+            f"the correct order arrived at {fresh_at_ms}ms (budget {FRESH_BUDGET_MS}ms)"
+        )
+        # The mechanism, pinned without a clock: the pane was painted, not rebuilt.
         pid_after = frame.tmux(
             ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
         ).stdout.strip()
-        assert pid_after and pid_after != pid_before, (pid_before, pid_after)
+        assert pid_after and pid_after == pid_before, (
+            f"the pane was respawned ({pid_before} -> {pid_after}); a respawn clears it, "
+            "which is what made the sidebar blink empty on every switch"
+        )
     finally:
         frame.tmux(["kill-server"])

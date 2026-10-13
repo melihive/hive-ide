@@ -1239,6 +1239,94 @@ class IdeSidebar:
             return f"protocol {protocol} is incompatible with {PROTOCOL_VERSION}"
         return None
 
+    @classmethod
+    def canonical_frame(
+        cls, skill_dir: Path, repo: str, this_session_id: str, width: int, height: int
+    ) -> str:
+        """The frame an UNFOCUSED sidebar paints, rendered without a sidebar process.
+
+        A sidebar that is not being browsed always shows the canonical view — no
+        filter, no archive browsing, cursor on the session whose window it belongs to.
+        That is exactly what the interactive loop resets to at the top of every tick
+        when `focused` is false, so the frame is reproducible from the store alone.
+        The window-switch painter uses it to put the right frame on screen without
+        starting, or restarting, anything inside the pane.
+        """
+        cls._repo_hint = repo
+        snapshot = StateIO.read_config_snapshot(skill_dir, repo) or {}
+        sidebar_settings = snapshot.get("sidebar") or _DEFAULT_SIDEBAR
+        providers = SidebarProviderRegistry.from_snapshot(
+            sidebar_settings.get("providers") or _DEFAULT_SIDEBAR["providers"]
+        )
+        sessions = cls._filter(StateIO.list_sessions(skill_dir, repo), "")
+        session_ids = [s.get("id") or "" for s in sessions]
+        active_session_id = cls._current_session_id(this_session_id)
+        cursor, _ = cls._reconcile_cursor(
+            session_ids,
+            -1,
+            focused=False,
+            free=False,
+            archive_mode=False,
+            current_session_id=active_session_id,
+            cursor_session_id="",
+        )
+        entry_rows = cls._entry_rows(len(sessions), height, False)
+        visible_sessions, visible_cursor, _ = cls._viewport(
+            sessions, cursor, height, entry_rows, False
+        )
+        lines = cls.render_lines(
+            skill_dir,
+            visible_sessions,
+            repo,
+            active_session_id,
+            visible_cursor,
+            width,
+            "",
+            False,
+            False,
+            False,
+            False,
+            False,
+            entry_rows,
+            sidebar_settings,
+            providers,
+            cls._tmux_alerts(),
+        )
+        lines = cls._pin_footer(lines, height, cls.FOOTER_ROWS)[:height]
+        return cls._paint(lines, height)
+
+    @classmethod
+    def paint_tty(cls, skill_dir: Path, repo: str, session_id: str, tty: str) -> bool:
+        """Paint one session's canonical frame straight onto its pane's tty.
+
+        Writing to the pane's tty puts bytes exactly where the pane's own process
+        would have written them, so tmux renders them as that pane's output and the
+        frame is drawn OVER whatever was on screen. That is the entire point:
+        respawning the pane to make it repaint CLEARS it first, and a cleared pane
+        waiting on an interpreter is a blank sidebar — measured at 401ms on every
+        window switch, which is what the fix for a stale order traded it for.
+
+        One `_paint` is one complete frame (home, clear screen, rows) written in a
+        single call, so the pane's own sidebar starting a moment later repaints the
+        same bytes rather than fighting this one.
+        """
+        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY)
+        try:
+            try:
+                size = os.get_terminal_size(fd)
+                width, height = max(8, size.columns), max(4, size.lines)
+            except OSError:
+                # Same fallback as `_width`/`_height`: a pane we cannot measure still
+                # gets a readable frame rather than no frame at all.
+                width, height = 24, 24
+            os.write(
+                fd,
+                cls.canonical_frame(skill_dir, repo, session_id, width, height).encode(),
+            )
+        finally:
+            os.close(fd)
+        return True
+
     @staticmethod
     def main(argv: list[str] | None = None) -> int:
         args = argv if argv is not None else sys.argv[1:]

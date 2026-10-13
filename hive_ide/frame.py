@@ -250,6 +250,19 @@ class Frame:
             return False
         return None
 
+    def pane_tty(self, pane_id: str) -> str:
+        """The pane's tty device, or "" when tmux cannot say.
+
+        A process outside the pane can paint it by writing here: tmux owns the master
+        side, so bytes written to the slave are rendered as that pane's own output.
+        That is how a window switch repaints a sidebar WITHOUT respawning the pane,
+        which would clear it and leave it blank until an interpreter started.
+        """
+        result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_tty}"])
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+
     def pane_is_caller(self, pane_id: str) -> bool | None:
         """Is `pane_id` the pane this process runs in? Tri-state.
 
@@ -2085,7 +2098,11 @@ class Frame:
         # Third command on the same hook: the window tmux has just switched to only
         # starts painting its sidebar when its keep-alive shell next probes, up to a
         # second later, so until then it shows the frame it painted when you last left
-        # it — with a stale order. `wake` respawns that pane so it repaints at once.
+        # it — with a stale order. `wake` paints the correct frame onto that pane's tty
+        # immediately, drawing OVER the stale one. It deliberately does NOT respawn the
+        # pane: respawning clears it, which replaced a 1.5s stale frame with a 401ms
+        # blank one — worse to look at, and invisible to a test that only measured how
+        # long the stale ORDER stayed readable.
         # `-b` so it runs alongside `seen`/`adopt` rather than after them.
         wake = self._module(
             "wake",

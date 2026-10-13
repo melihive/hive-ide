@@ -1,40 +1,52 @@
-"""The sidebar of the window tmux just switched to must repaint at once.
+"""The sidebar of the window tmux just switched to must repaint at once — and must
+never go blank doing it.
 
 Only the displayed window runs a sidebar process, so a backgrounded pane keeps the
 frame it last painted — and because the list is activity-ordered, that frame goes
 stale while you are away. Switching to the window then showed a wrong ORDER until
 the keep-alive shell next probed, up to a second later.
 
-The wake respawns that pane. It must do so through `Frame.respawn_role_pane` and
-never a bare tmux `respawn-pane`, because the helper carries three guarantees a
-bare respawn silently drops: the pane is found by ROLE (pane order drifts, and
-`relayout --mode=adopt` re-sorts panes on this same hook), it is spawned with THIS
-record's `HIVE_IDE_*` variables rather than whatever identity the tmux session
-environment is holding, and a pane that cannot be proven not to be the caller's
-own is left alone. These cover that contract and the fail-open promise.
+The first fix respawned the pane. That DID repaint it, but `respawn-pane -k` clears
+the pane first and then waits on a shell probe and an interpreter, so every switch
+showed an empty sidebar instead of a stale one. Measured: 1492ms stale before,
+401ms blank after, 73ms correct once it paints instead.
+
+So the wake now PAINTS: it renders the canonical frame and writes it to the pane's
+tty, where the pane's own process writes, so tmux renders it as that pane's output
+drawn over the stale frame. Nothing is cleared and nothing is started in the pane.
+These cover that contract, the "never respawn again" regression, the refusal to
+paint a pane it cannot address, and the fail-open promise.
 """
 from __future__ import annotations
 
 import pytest
 
 from hive_ide.frame import Frame
+from hive_ide.sidebar import IdeSidebar
 from hive_ide.wake import IdeWake
 
 
+class _Ok:
+    returncode = 0
+    stdout = "/dev/pts/7"
+    stderr = ""
+
+
 @pytest.fixture
-def woken(monkeypatch):
-    """Record which (session, role, pane) a wake would respawn."""
-    calls: list[tuple[str, str, str]] = []
+def painted(monkeypatch):
+    """Record what a wake would paint, and onto which tty."""
+    calls: list[tuple[str, str]] = []
     panes: dict[str, dict[str, str]] = {"roles": {"sidebar": "%8", "agent": "%9"}}
 
+    monkeypatch.setattr(Frame, "role_panes", lambda self, session_id: panes["roles"])
+    monkeypatch.setattr(Frame, "pane_tty", lambda self, pane_id: f"/dev/pts/{pane_id}")
     monkeypatch.setattr(
-        Frame, "role_panes", lambda self, session_id: panes["roles"]
-    )
-    monkeypatch.setattr(
-        Frame,
-        "respawn_role_pane",
-        lambda self, record, role, pane_id, **kw: (
-            calls.append((record["id"], role, pane_id)) or True
+        IdeSidebar,
+        "paint_tty",
+        classmethod(
+            lambda cls, skill_dir, repo, session_id, tty: (
+                calls.append((session_id, tty)) or True
+            )
         ),
     )
     return calls, panes
@@ -63,54 +75,57 @@ def store(tmp_path):
     return StateStore(tmp_path / "state", workspace)
 
 
-def test_wake_respawns_the_pane_holding_the_sidebar_role(store, woken):
-    calls, _panes = woken
+def test_wake_paints_the_pane_holding_the_sidebar_role(store, painted):
+    calls, _panes = painted
     record = _session(store)
 
     assert IdeWake.wake(store.home, store.workspace_key, record["id"], "sock") is True
-    assert calls == [(record["id"], "sidebar", "%8")]
+    assert calls == [(record["id"], "/dev/pts/%8")]
 
 
-def test_wake_goes_through_the_role_respawn_not_a_bare_tmux_respawn(store, monkeypatch):
-    """A bare `respawn-pane` rebuilds the pane's env from the tmux SESSION
-    environment, which holds whichever identity the frame's first window left
-    there — so every woken sidebar would claim the wrong session. The wake must
-    delegate to the helper that passes this record's own `HIVE_IDE_*` values."""
+def test_wake_does_not_respawn_the_pane(store, monkeypatch):
+    """The regression this file exists for.
+
+    Respawning is what made the sidebar blank on every switch: the pane is cleared
+    and then nothing is on screen until a shell probe and an interpreter have run.
+    The wake must paint the existing pane and issue no respawn of any kind — neither
+    a bare tmux `respawn-pane` nor the role helper.
+    """
     record = _session(store, "BRAVO")
-    monkeypatch.setattr(
-        Frame, "role_panes", lambda self, session_id: {"sidebar": "%4"}
-    )
+    monkeypatch.setattr(Frame, "role_panes", lambda self, session_id: {"sidebar": "%4"})
     tmux_calls: list[list[str]] = []
     monkeypatch.setattr(
-        Frame,
-        "tmux",
-        lambda self, args, **kw: tmux_calls.append(list(args)) or _Ok(),
+        Frame, "tmux", lambda self, args, **kw: tmux_calls.append(list(args)) or _Ok()
     )
-    respawned: list[tuple[str, str]] = []
+
+    def must_not_respawn(self, rec, role, pane_id, **kw):
+        raise AssertionError("the wake respawned the pane, which blanks it")
+
+    monkeypatch.setattr(Frame, "respawn_role_pane", must_not_respawn)
     monkeypatch.setattr(
-        Frame,
-        "respawn_role_pane",
-        lambda self, rec, role, pane_id, **kw: (
-            respawned.append((role, pane_id)) or True
-        ),
+        IdeSidebar, "paint_tty", classmethod(lambda cls, *a: True)
     )
+
+    assert IdeWake.wake(store.home, store.workspace_key, record["id"], "sock") is True
+    assert not [a for a in tmux_calls if a and a[0] in ("respawn-pane", "kill-pane")], (
+        f"the wake destroyed or respawned the pane: {tmux_calls}"
+    )
+
+
+def test_wake_resolves_the_pane_by_role_not_by_index(store, painted):
+    """Pane order drifts, and `relayout --mode=adopt` re-sorts panes on this same
+    hook — so an index-based target races it and paints the agent pane."""
+    calls, panes = painted
+    panes["roles"] = {"agent": "%1", "plan": "%2", "sidebar": "%3"}
+    record = _session(store)
 
     IdeWake.wake(store.home, store.workspace_key, record["id"], "sock")
 
-    assert respawned == [("sidebar", "%4")]
-    assert not [args for args in tmux_calls if args and args[0] == "respawn-pane"], (
-        "the wake issued its own respawn-pane and bypassed the role helper"
-    )
+    assert calls == [(record["id"], "/dev/pts/%3")]
 
 
-class _Ok:
-    returncode = 0
-    stdout = ""
-    stderr = ""
-
-
-def test_wake_does_nothing_when_the_window_has_no_sidebar_role(store, woken):
-    calls, panes = woken
+def test_wake_does_nothing_when_the_window_has_no_sidebar_role(store, painted):
+    calls, panes = painted
     panes["roles"] = {"agent": "%9", "plan": "%10"}
     record = _session(store)
 
@@ -118,22 +133,42 @@ def test_wake_does_nothing_when_the_window_has_no_sidebar_role(store, woken):
     assert calls == []
 
 
-def test_wake_does_nothing_for_an_unknown_session(store, woken):
-    calls, _panes = woken
+def test_wake_does_not_paint_a_pane_whose_tty_it_cannot_resolve(store, monkeypatch):
+    """`pane_tty` returns "" when tmux cannot answer. That is "could not observe",
+    not "paint it anyway" — writing to a guessed path is how you scribble on another
+    terminal. The stale frame is the correct outcome here."""
+    record = _session(store)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"sidebar": "%8"})
+    monkeypatch.setattr(Frame, "pane_tty", lambda self, pane_id: "")
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        IdeSidebar,
+        "paint_tty",
+        classmethod(lambda cls, *a: calls.append(a) or True),
+    )
+
+    assert IdeWake.wake(store.home, store.workspace_key, record["id"], "sock") is False
+    assert calls == []
+
+
+def test_wake_does_nothing_for_an_unknown_session(store, painted):
+    calls, _panes = painted
 
     assert IdeWake.wake(store.home, store.workspace_key, "nosuchsession", "sock") is False
     assert calls == []
 
 
-def test_wake_is_fail_open_when_the_respawn_raises(store, monkeypatch):
-    """A lease on the pane, or any tmux failure, must not wedge the window switch."""
+def test_wake_is_fail_open_when_the_paint_raises(store, monkeypatch):
+    """A pane that disappeared mid-switch, or any tmux failure, must not wedge the
+    window switch."""
     record = _session(store)
     monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"sidebar": "%8"})
+    monkeypatch.setattr(Frame, "pane_tty", lambda self, pane_id: "/dev/pts/7")
 
-    def boom(self, rec, role, pane_id, **kw):
-        raise RuntimeError("pane is leased")
+    def boom(cls, *a):
+        raise RuntimeError("pane vanished")
 
-    monkeypatch.setattr(Frame, "respawn_role_pane", boom)
+    monkeypatch.setattr(IdeSidebar, "paint_tty", classmethod(boom))
 
     assert IdeWake.main(
         [
@@ -148,9 +183,7 @@ def test_wake_is_fail_open_when_the_respawn_raises(store, monkeypatch):
 def test_wake_main_reaches_the_wake_with_the_hooks_arguments(monkeypatch):
     seen: list[tuple] = []
     monkeypatch.setattr(
-        IdeWake,
-        "wake",
-        staticmethod(lambda *a: seen.append(a) or True),
+        IdeWake, "wake", staticmethod(lambda *a: seen.append(a) or True)
     )
 
     rc = IdeWake.main(

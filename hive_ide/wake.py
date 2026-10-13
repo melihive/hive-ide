@@ -12,18 +12,22 @@ as its window stops being current, and the keep-alive shell then re-probes just
 once a second. A backgrounded pane therefore keeps the frame it last painted — and
 the list is ordered by activity, which changes every time any agent takes a turn.
 So the frame goes out of date while you are away, and switching back showed the
-order from the last time you looked at that window. Measured at ~1500ms before the
-keep-alive repainted, which is long enough to read as the sidebar sorting itself
-differently for every session. Waking it on the switch cuts that to ~40ms.
+order from the last time you looked at that window.
 
-The respawn goes through `Frame.respawn_role_pane`, never a bare tmux
-`respawn-pane`, and that is the whole point of this module being more than one
-line. That helper resolves the pane by its `@hive_ide_pane` ROLE (pane order
-drifts, and `relayout --mode=adopt` re-sorts panes on this very hook), spawns it
-with THIS record's `HIVE_IDE_*` variables instead of the tmux session environment
-— which holds whichever identity the frame's first window happened to leave there
-— honours an outstanding pane lease, and refuses any pane it cannot prove is not
-the caller's own.
+**This module used to respawn the pane, and that was the wrong fix.** Respawning
+makes the pane repaint, but `respawn-pane -k` CLEARS it first and then waits on a
+shell probe and an interpreter, so every window switch showed an empty sidebar for
+~400ms. Measured on one machine: 1492ms of stale order before, 401ms of blank
+after. The test written at the time measured only how long the stale ORDER stayed
+readable, and a blank pane contains no order at all — so it scored the blank as a
+near-perfect pass. Both numbers were bad; the second was just bad in a way the
+test could not see.
+
+So now it PAINTS instead. It renders the canonical frame for that session and
+writes it to the pane's tty, which is where the pane's own process writes, so tmux
+renders it as that pane's output — drawn over the stale frame, clearing nothing,
+starting nothing in the pane. The pane's own sidebar still comes up on its usual
+schedule and repaints the same bytes.
 
 Stdlib only, fail-open, fast — it runs on every window switch and must never make
 switching feel slow or wedge the frame.
@@ -35,26 +39,32 @@ import argparse
 from pathlib import Path
 
 from .frame import Frame
+from .sidebar import IdeSidebar
 from .store import StateStore
 
 
 class IdeWake:
-    """Respawn one session's sidebar pane so it repaints without waiting a tick."""
+    """Paint one session's sidebar pane so it shows the right frame at once."""
 
     ROLE = "sidebar"
 
     @staticmethod
     def wake(skill_dir: Path, repo: str, session_id: str, socket: str) -> bool:
-        """True when the sidebar pane was respawned."""
+        """True when the sidebar pane was painted."""
         store = StateStore(skill_dir, repo)
         record = store.find_session(session_id)
         if record is None:
             return False
         frame = Frame(store, socket=socket)
+        # By ROLE, never by index: pane order drifts, and `relayout --mode=adopt`
+        # re-sorts panes on this very hook, so an index-based target races it.
         pane_id = (frame.role_panes(record["id"]) or {}).get(IdeWake.ROLE)
         if not pane_id:
-            return False      # no sidebar role in this window: nothing to wake
-        return frame.respawn_role_pane(record, IdeWake.ROLE, pane_id)
+            return False      # no sidebar role in this window: nothing to paint
+        tty = frame.pane_tty(pane_id)
+        if not tty:
+            return False      # cannot address the pane; leave the stale frame alone
+        return IdeSidebar.paint_tty(skill_dir, repo, record["id"], tty)
 
     @staticmethod
     def main(argv: list[str] | None = None) -> int:
