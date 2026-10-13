@@ -4,6 +4,29 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.95] - 2026-10-13
+
+### Fixed
+
+- Switching sessions no longer blanks the sidebar. The repaint added in 1.0.91
+  worked by respawning the pane, and `respawn-pane -k` clears a pane before
+  anything redraws it — so every window switch showed an empty sidebar for about
+  400ms while a shell probe and an interpreter ran. Measured from the instant of
+  the switch (blank / stale order / correct frame): 0/1492/1504ms with no repaint
+  at all, 401/60/413ms with the respawn, 0/61/74ms now. The switch instead renders
+  the frame and writes it to the pane's tty, where the pane's own process writes,
+  so it is drawn over the stale frame — nothing is cleared and nothing is started
+  inside the pane.
+- A repaint will not write to a pane it cannot still prove is the live sidebar. A
+  pane kept after its process exits still reports its old tty while tmux has closed
+  that pty, and the kernel may hand the same `/dev/pts/N` to the next pane, so the
+  reported path can belong to something else entirely. The descriptor is opened
+  first and the pane's liveness, role, session and tty are re-checked while it is
+  held.
+- The repaint cannot hang a tmux hook or leave half a frame on screen: the write is
+  non-blocking and counts only when the whole frame went out, otherwise the pane's
+  own next repaint handles it.
+
 ## [1.0.94] - 2026-10-13
 
 ### Fixed
