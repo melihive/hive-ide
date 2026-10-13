@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.94] - 2026-10-13
+
 ### Fixed
 
 - Test-only: three pane-lease tests waited on a file's EXISTENCE and then read it,
@@ -12,7 +14,14 @@ All notable changes to `hive-ide` will be documented in this file.
   one: it failed the 1.0.93 publish in CI while the same suite passed locally.
   They now wait for the contents.
 
-## [1.0.93] - 2026-10-13
+### Note
+
+- **1.0.93 was tagged but never published.** Its CI test job failed on the race
+  fixed above, so the publish job never ran and PyPI has no 1.0.93. The tag is
+  burned and will not be retargeted. 1.0.94 is therefore the first installable
+  release carrying the `attach -d` one-client fix described under 1.0.93 below.
+
+## [1.0.93] - 2026-10-13 — tagged, never published
 
 ### Fixed
 
