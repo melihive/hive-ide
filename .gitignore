@@ -12,3 +12,4 @@ build/
 temp/
 .env
 .env.*
+logs/
