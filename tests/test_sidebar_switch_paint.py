@@ -182,3 +182,102 @@ def test_paint_tty_refuses_a_path_it_cannot_open(store):
         IdeSidebar.paint_tty(
             store.home, store.workspace_key, target["id"], "/dev/does-not-exist-xyz"
         )
+
+
+def test_paint_fd_reports_failure_rather_than_a_half_drawn_frame(store, monkeypatch):
+    """A short write leaves half a frame on screen. The caller is fail-open and logs
+    nothing, so returning True would be indistinguishable from a real paint — and the
+    pane would keep the fragment until its own next repaint with nobody any the wiser.
+    """
+    target = _make(store, "ALPHA", "2022-01-01T00:00:00+00:00")
+    master, slave = os.openpty()
+    try:
+        monkeypatch.setattr(os, "write", lambda fd, data: len(data) // 2)
+        assert (
+            IdeSidebar.paint_fd(store.home, store.workspace_key, target["id"], slave)
+            is False
+        )
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_paint_fd_reports_failure_when_the_pane_cannot_accept_output(store, monkeypatch):
+    """The descriptor is non-blocking precisely so a pty whose reader has stopped
+    consuming cannot hang a tmux hook. That has to surface as a failure, not a hang
+    and not a false success."""
+    target = _make(store, "ALPHA", "2022-01-01T00:00:00+00:00")
+    master, slave = os.openpty()
+
+    def would_block(fd, data):
+        raise BlockingIOError(11, "Resource temporarily unavailable")
+
+    try:
+        monkeypatch.setattr(os, "write", would_block)
+        assert (
+            IdeSidebar.paint_fd(store.home, store.workspace_key, target["id"], slave)
+            is False
+        )
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_the_painter_and_the_real_sidebar_loop_draw_the_same_frame(store, monkeypatch):
+    """Differential check against drift.
+
+    `canonical_frame` reproduces the interactive loop's UNFOCUSED render path rather
+    than the loop being refactored to call it — a deliberate choice, because that loop
+    also drives input handling and hit-testing. The risk of duplicating it is that the
+    two quietly diverge and the switch paints a frame the sidebar then redraws
+    differently, which the user sees as a flicker on every switch.
+
+    So this runs the REAL loop for exactly one unfocused tick, captures what it wrote,
+    and compares it byte-for-byte. It deliberately does not rebuild the expectation out
+    of the same helper calls — that would just duplicate the duplication.
+    """
+    import io
+    import contextlib
+
+    _make(store, "ALPHA", "2021-01-01T00:00:00+00:00")
+    target = _make(store, "BRAVO", "2099-01-01T00:00:00+00:00")
+    _make(store, "CHARLIE", "2020-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(IdeSidebar, "_pane_visibility", staticmethod(lambda: (True, False)))
+    monkeypatch.setattr(IdeSidebar, "_tmux_alerts", staticmethod(lambda: {}))
+    monkeypatch.setattr(IdeSidebar, "_version_error", staticmethod(lambda: None))
+    # Exit after the first draw through the loop's own stale-code path: the first call
+    # establishes the baseline, the second differs, so it returns having drawn once.
+    ticks = iter([1, 1, 2, 2, 2])
+    monkeypatch.setattr(IdeSidebar, "_reload_watch", staticmethod(lambda: next(ticks)))
+
+    buffer = io.StringIO()
+    # `main` takes sys.stdin.fileno(); pytest's captured stdin has none. A real
+    # non-tty descriptor keeps the loop on its non-interactive path, which is the
+    # path that draws and then ticks.
+    devnull = open(os.devnull)
+    monkeypatch.setattr("sys.stdin", devnull)
+    with contextlib.redirect_stdout(buffer):
+        rc = IdeSidebar.main(
+            [
+                "--state-home", str(store.home),
+                "--workspace-key", str(store.workspace_key),
+                "--session-id", target["id"],
+                "--tmux-socket", "sock",
+            ]
+        )
+    devnull.close()
+    assert rc == 0
+    from_loop = buffer.getvalue()
+    assert "BRAVO" in from_loop, from_loop
+
+    # A StringIO has no fileno, so the loop's own `_width`/`_height` fell back to 24x24.
+    from_painter = IdeSidebar.canonical_frame(
+        store.home, store.workspace_key, target["id"], 24, 24
+    )
+
+    assert from_painter == from_loop, (
+        "the switch painter and the sidebar loop render different frames, so every "
+        "switch would visibly redraw when the pane's own sidebar starts\n"
+        f"painter: {from_painter!r}\nloop:    {from_loop!r}"
+    )

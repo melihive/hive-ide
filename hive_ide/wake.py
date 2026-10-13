@@ -34,6 +34,7 @@ switching feel slow or wedge the frame.
 """
 from __future__ import annotations
 
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -63,8 +64,23 @@ class IdeWake:
             return False      # no sidebar role in this window: nothing to paint
         tty = frame.pane_tty(pane_id)
         if not tty:
-            return False      # cannot address the pane; leave the stale frame alone
-        return IdeSidebar.paint_tty(skill_dir, repo, record["id"], tty)
+            return False      # dead or undescribable pane; leave the stale frame alone
+        # Open FIRST, then re-verify while holding the descriptor. A pane kept after
+        # its process exited still reports its old tty, tmux has closed that pty, and
+        # the kernel may hand the same `/dev/pts/N` to the next pane — so a path that
+        # checked out a moment ago can belong to someone else by the time it is opened.
+        # Re-opening after a second check would only move that race; holding the fd and
+        # confirming the pane is still live, still the sidebar, and still on this tty is
+        # what actually rules it out.
+        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            if not frame.pane_still_is(
+                pane_id, role=IdeWake.ROLE, session_id=record["id"], tty=tty
+            ):
+                return False
+            return IdeSidebar.paint_fd(skill_dir, repo, record["id"], fd)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def main(argv: list[str] | None = None) -> int:

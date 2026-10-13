@@ -1296,36 +1296,50 @@ class IdeSidebar:
         return cls._paint(lines, height)
 
     @classmethod
-    def paint_tty(cls, skill_dir: Path, repo: str, session_id: str, tty: str) -> bool:
-        """Paint one session's canonical frame straight onto its pane's tty.
+    def paint_fd(cls, skill_dir: Path, repo: str, session_id: str, fd: int) -> bool:
+        """Paint one session's canonical frame onto an ALREADY-OPEN pane tty.
 
-        Writing to the pane's tty puts bytes exactly where the pane's own process
-        would have written them, so tmux renders them as that pane's output and the
-        frame is drawn OVER whatever was on screen. That is the entire point:
-        respawning the pane to make it repaint CLEARS it first, and a cleared pane
-        waiting on an interpreter is a blank sidebar — measured at 401ms on every
-        window switch, which is what the fix for a stale order traded it for.
+        The caller opens the descriptor so it can re-verify, while holding it, that the
+        tty still belongs to the pane it meant — see `IdeWake.wake`. Reopening after a
+        check would just move the race.
 
-        One `_paint` is one complete frame (home, clear screen, rows) written in a
-        single call, so the pane's own sidebar starting a moment later repaints the
-        same bytes rather than fighting this one.
+        One `_paint` is one complete frame (home, clear screen, rows) in a single write.
+        On Linux the tty layer serialises a whole write against other writers, so the
+        pane's own sidebar starting a moment later repaints the same bytes rather than
+        landing inside this frame; the last complete frame wins, which is correct here
+        because every frame is rendered from the same store.
+
+        The descriptor is expected to be non-blocking: a pty whose reader has stopped
+        consuming would otherwise block this call indefinitely, and this runs inside a
+        tmux hook on every window switch. A write that cannot complete is reported as a
+        failure and left for the pane's own next repaint — never retried in a loop, and
+        never reported as a paint that did not happen.
         """
-        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY)
         try:
-            try:
-                size = os.get_terminal_size(fd)
-                width, height = max(8, size.columns), max(4, size.lines)
-            except OSError:
-                # Same fallback as `_width`/`_height`: a pane we cannot measure still
-                # gets a readable frame rather than no frame at all.
-                width, height = 24, 24
-            os.write(
-                fd,
-                cls.canonical_frame(skill_dir, repo, session_id, width, height).encode(),
-            )
+            size = os.get_terminal_size(fd)
+            width, height = max(8, size.columns), max(4, size.lines)
+        except OSError:
+            # Same fallback as `_width`/`_height`: a pane we cannot measure still gets
+            # a readable frame rather than no frame at all.
+            width, height = 24, 24
+        payload = cls.canonical_frame(skill_dir, repo, session_id, width, height).encode()
+        try:
+            written = os.write(fd, payload)
+        except BlockingIOError:
+            return False
+        # A short write leaves a half-drawn frame. Say so: the caller is fail-open and
+        # logs nothing, so returning True here would be indistinguishable from success.
+        return written == len(payload)
+
+    @classmethod
+    def paint_tty(cls, skill_dir: Path, repo: str, session_id: str, tty: str) -> bool:
+        """Open a pane's tty and paint it. Convenience for callers with nothing to
+        re-verify; `IdeWake` opens its own descriptor so it can."""
+        fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            return cls.paint_fd(skill_dir, repo, session_id, fd)
         finally:
             os.close(fd)
-        return True
 
     @staticmethod
     def main(argv: list[str] | None = None) -> int:
