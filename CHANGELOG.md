@@ -4,6 +4,36 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.96] - 2026-10-14
+
+### Added
+
+- A second agent will not be started on a conversation another driver already
+  holds. Nothing used to stop it: both the agent-pane respawn and the window
+  build launched a driver with the session's conversation reference without
+  asking whether one was already attached to it, so two drivers could own one
+  conversation — which is how a session ends up accepting input and never
+  answering. The check sits at the single point both launches pass through, and
+  the refusal names the holding processes rather than just declining.
+- `verify` reports three states it previously could not observe, each of which
+  it used to call healthy: sessions sharing the tmux socket that no session
+  record claims, a conversation held by a driver outside its own agent pane,
+  and a session whose agent pane holds no driver at all because it exited or
+  was never started.
+- `verify` distinguishes a check that failed from one that never ran. When the
+  process table cannot be read it reports `incomplete` and is not `ok`, instead
+  of reporting a healthy frame on evidence it never gathered. Unmanaged
+  sessions are inventory rather than a failure, so they are listed without
+  making a frame unhealthy.
+
+### Note
+
+- Ownership is established from the process tree, so a conversation reference
+  that merely appears in a prompt is not mistaken for a driver holding it, and
+  a pane whose owning process cannot be identified does not refuse a launch on
+  a guess — an unobservable pane lets the launch proceed, while `verify`
+  refuses to call a frame healthy on a check it could not run.
+
 ## [1.0.95] - 2026-10-13
 
 ### Fixed
