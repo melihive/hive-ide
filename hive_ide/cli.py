@@ -1085,10 +1085,10 @@ def _conversation_holders(
 ) -> list[dict[str, Any]]:
     """Live processes holding a session's conversation from outside its agent pane.
 
-    This is the check whose absence produced the mim freeze: an orphaned driver at
-    ppid 1 held a conversation for over 16 hours, nothing noticed, and it only
-    surfaced when reopening the frame started a second driver on it and the pane
-    never painted. `verify` would have named it.
+    This is the check whose absence produced the freeze this guard exists for: an
+    orphaned driver at ppid 1 held a conversation for over 16 hours, nothing
+    noticed, and it only surfaced when reopening the frame started a second driver
+    on it and the pane never painted. `verify` would have named it.
 
     The process table is read once by the caller and passed in: `verify` runs several
     process checks and a scan per check both doubles the cost and lets the checks

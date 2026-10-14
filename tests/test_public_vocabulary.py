@@ -40,6 +40,22 @@ PRIVATE_PHRASES = (
     "hive" + "-tech-support",
     "HIVE" + "_SCOPE_",
 )
+# Fleet machine names. A docstring that names the host an incident happened on
+# reads as internal infrastructure to every reader outside the fleet, and the word
+# list above never covered that class — two such names shipped in 1.0.96's source
+# and the check stayed green. Scoped to the package tree on purpose: test fixtures
+# and changelog history still carry older host names, and widening to them is a
+# larger scrub than this guard is here to hold.
+PRIVATE_HOSTS = (
+    "vi" + "vo",
+    "g" + "pd",
+    "m" + "im",
+    "z" + "en",
+)
+HOST_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(host) for host in PRIVATE_HOSTS) + r")\b",
+    re.IGNORECASE,
+)
 WORD_PATTERN = re.compile(
     r"\b(?:" + "|".join(re.escape(term) for term in PRIVATE_WORDS) + r")\b",
     re.IGNORECASE,
@@ -83,3 +99,27 @@ def test_pane_lease_commands_are_public():
     help_text = build_parser().format_help()
     for command in ("pane-lease", "pane-release", "pane-status", "capabilities"):
         assert command in help_text
+
+
+def host_violations(root: Path) -> list[str]:
+    violations: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if any(
+            part in SKIP_PARTS or part.startswith(".venv") for part in path.parts
+        ):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), 1):
+            if HOST_PATTERN.search(line):
+                violations.append(f"{path.relative_to(root)}:{line_number}")
+    return violations
+
+
+def test_package_source_names_no_fleet_host():
+    assert host_violations(ROOT / "hive_ide") == []
+
+
+def test_host_check_observes_a_real_violation(tmp_path):
+    bad = tmp_path / "frame.py"
+    bad.write_text(f"# the freeze was seen on {PRIVATE_HOSTS[2]}\n", encoding="utf-8")
+    assert host_violations(tmp_path) == ["frame.py:1"]

@@ -168,12 +168,12 @@ class Frame:
         """Sessions on this socket that are not this frame.
 
         A frame owns exactly one tmux session, so anything else sharing its socket
-        is something nobody is tracking. mim was found carrying two `_preheat`
-        sessions created 2026-10-05 and still alive on 2026-10-13 — unattached, one
-        `fish` window, no ide hooks. A warm-up session is not meant to outlive its
-        warm-up, and it is what keeps an otherwise-idle server alive long enough to
-        accumulate the duplicate clients that reflow windows and, on the `select`
-        backend macOS forces tmux onto, can spin a core.
+        is something nobody is tracking. One host was found carrying two `_preheat`
+        sessions eight days after they were created — unattached, one shell window,
+        no ide hooks. A warm-up session is not meant to outlive its warm-up, and it
+        is what keeps an otherwise-idle server alive long enough to accumulate the
+        duplicate clients that reflow windows and, on the `select` backend macOS
+        forces tmux onto, can spin a core.
 
         Reported rather than reaped on purpose: nothing in this package creates a
         `_preheat` session — it appears on no branch, in no tag, and in no installed
