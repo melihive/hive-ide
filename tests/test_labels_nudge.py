@@ -878,3 +878,38 @@ def test_hook_process_waits_for_a_label_write_and_keeps_it(tmp_path):
     assert proc.wait(30) == 0
     assert store.find_session(record["id"])["labels"] == {"relay": "Eva"}
     assert store.read("status", record["id"])["turns"]["turn"] == 1
+
+
+def test_a_timed_out_rename_fails_clearly_and_releases_the_lock(tmp_path, monkeypatch, capsys):
+    store, record = _session(tmp_path, "claude")
+    frame = Frame(store)
+    monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
+    fake = FakeTmux(command="claude", screen=IDLE_CLAUDE_SCREEN)
+    timeouts = []
+
+    def tmux(args, **kwargs):
+        if args[0] == "send-keys":
+            timeouts.append(kwargs.get("timeout"))
+            return SimpleNamespace(
+                returncode=124, stdout="", stderr="tmux timed out after 3.0s"
+            )
+        return fake(args, **kwargs)
+
+    monkeypatch.setattr(frame, "tmux", tmux)
+    monkeypatch.setattr("hive_ide.cli.Frame", lambda *_args, **_kwargs: frame)
+    base = ["--state-home", str(store.home), "--workspace-key", store.workspace_key]
+    assert main([*base, "driver-rename", f"--session-id={record['id']}"]) == 2
+    assert "Could not send driver rename: tmux timed out after 3.0s" in capsys.readouterr().err
+    assert timeouts == [AgentNudge.TMUX_TIMEOUT]
+    # the CLI took the workspace lock around the command; it must be free again
+    with store.mutation_lock(blocking=False):
+        pass
+    assert not store.mutation_lock_held()
+
+
+def test_rename_send_keys_carry_the_timeout(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(command="claude", screen=IDLE_CLAUDE_SCREEN)
+    _frame(store, monkeypatch, fake).driver_rename(record)
+    sends = [t for call, t in zip(fake.calls, fake.timeouts) if call[0] == "send-keys"]
+    assert sends == [AgentNudge.TMUX_TIMEOUT, AgentNudge.TMUX_TIMEOUT]

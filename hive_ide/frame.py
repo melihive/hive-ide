@@ -1538,14 +1538,16 @@ class Frame:
                 "sent so it cannot answer a dialog or merge into a draft. Retry "
                 "once the dialog is closed and the input box is empty."
             )
-        result = self.tmux(
-            ["send-keys", "-l", "-t", pane_id, f"/rename {display_name}"]
-        )
-        if result.returncode != 0:
-            raise HiveIdeError(result.stderr.strip() or "Could not send driver rename.")
-        result = self.tmux(["send-keys", "-t", pane_id, "Enter"])
-        if result.returncode != 0:
-            raise HiveIdeError(result.stderr.strip() or "Could not send driver rename.")
+        # Bounded like the gate's probes: a wedged tmux must never hold the
+        # workspace lock the CLI takes around this command.
+        for keys in (["-l", "-t", pane_id, f"/rename {display_name}"], ["-t", pane_id, "Enter"]):
+            result = self.tmux(["send-keys", *keys], timeout=gate.TMUX_TIMEOUT)
+            if result.returncode != 0:
+                detail = (result.stderr or "").strip()
+                raise HiveIdeError(
+                    "Could not send driver rename"
+                    + (f": {detail}" if detail else ".")
+                )
         return {
             "session_id": record["id"],
             "driver": driver_id,
