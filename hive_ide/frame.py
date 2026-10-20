@@ -1479,8 +1479,18 @@ class Frame:
         return b"hive_ide.sidebar" in cmdline and b"window_active" not in cmdline
 
     def driver_rename(
-        self, record: dict[str, Any], *, name: str | None = None
+        self,
+        record: dict[str, Any],
+        *,
+        name: str | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
+        """Type `/rename <name>` into the live agent pane.
+
+        Same per-driver rule as `nudge`: Claude queues typed input, so any time;
+        Codex treats typing mid-turn as an interrupt, so only on proof of idle
+        (hook turn sequence + empty-composer signature) unless `force`.
+        """
         driver = record.get("driver") or {}
         driver_id = driver.get("id")
         display_name = " ".join(str(name or record.get("name") or "").split())
@@ -1493,6 +1503,16 @@ class Frame:
         pane_id = (self.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             raise UsageError("The session has no live agent pane to rename.")
+        if driver_id == "codex":
+            from .nudge import AgentNudge
+
+            allowed, reason = AgentNudge(self).driver_gate(record, pane_id, force=force)
+            if not allowed:
+                raise UsageError(
+                    f"Codex is not provably idle ({reason}); /rename was not sent "
+                    "because typing into Codex mid-turn interrupts it. Retry once "
+                    "its turn has ended, or pass --force to send it anyway."
+                )
         result = self.tmux(
             ["send-keys", "-l", "-t", pane_id, f"/rename {display_name}"]
         )

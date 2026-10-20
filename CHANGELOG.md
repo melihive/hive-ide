@@ -4,6 +4,33 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Session labels: a small generic key -> short-text map on each session record
+  (at most 8 keys, strict key pattern, values at most 32 printable characters).
+  `hive-ide label --session-id=<ID> --key=<KEY> (--value=<V> | --clear)` sets
+  or clears one under the same workspace lock the hooks write under, so a
+  concurrent hook cannot overwrite it. The session card shows one row per label.
+  Records written before this release read as having no labels; no migration.
+- Turn sequencing in hook state. `UserPromptSubmit` opens a numbered turn,
+  `Stop` records the turn it closes and whether it is part of a stop-hook
+  continuation. The status document carries `turns` and a derived
+  `idle_proven`; `Notification` and `SessionStart` never count as idle proof.
+- `hive-ide nudge --session-id=<ID> --text=<LINE> [--force]` types one
+  caller-supplied constant line plus Enter into the agent pane and returns a
+  structured `{sent, reason}`. Claude is nudged any time (it queues input);
+  Codex only on hook idle proof plus its empty-composer screen signature, or
+  with an explicit `--force`. Every driver is refused on unsafe text, a recent
+  human keystroke in the pane, copy mode, or an agent that has exited to a shell.
+- `capabilities` reports `labels`, `nudge`, `turn-sequencing` and
+  `driver-rename-guard`.
+
+### Changed
+
+- `driver-rename` no longer types `/rename` into a Codex pane mid-turn, where
+  it interrupted the running turn. It now refuses unless Codex is provably idle
+  or `--force` is passed. Claude is unchanged.
+
 ## [1.0.96] - 2026-10-14
 
 ### Added

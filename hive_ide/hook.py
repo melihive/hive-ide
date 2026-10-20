@@ -50,6 +50,7 @@ from .config import configured_registry, load_config
 from .paths import config_path
 from .python_cmd import PythonCommand
 from .store import StateStore, utc_now
+from .turns import TurnSequence
 
 
 class IdeHook:
@@ -249,6 +250,18 @@ class IdeHook:
                 record = store.find_session(session_id)
                 if record is None:
                     return 0
+                try:
+                    previous = store.read("status", session_id)
+                except Exception:
+                    previous = None
+                status["turns"] = TurnSequence.advance(
+                    previous,
+                    driver=parsed.driver,
+                    event=TurnSequence.event_name(payload, parsed.state),
+                    payload=payload,
+                    observed_at=status["observed_at"],
+                )
+                status["idle_proven"] = TurnSequence.idle_proven(status)
                 store.write("status", session_id, status)
                 record["last_active"] = status["observed_at"]
                 current_driver = record.get("driver") or {}

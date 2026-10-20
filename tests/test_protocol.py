@@ -4950,7 +4950,7 @@ def test_current_chat_selects_existing_agent_pane_without_respawning(
     ]
 
 
-def test_driver_rename_sends_slash_command_to_agent_pane(tmp_path, monkeypatch):
+def test_driver_rename_sends_slash_command_to_forced_codex_agent_pane(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -4974,7 +4974,7 @@ def test_driver_rename_sends_slash_command_to_agent_pane(tmp_path, monkeypatch):
         or SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
-    result = frame.driver_rename(record)
+    result = frame.driver_rename(record, force=True)
 
     assert result == {
         "session_id": record["id"],
