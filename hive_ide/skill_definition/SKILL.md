@@ -92,13 +92,15 @@ card shows one row per label. Old records read as having no labels.
 
 `nudge` types one caller-supplied constant line plus Enter into the agent pane
 and returns `{sent, reason}`; it never composes text. The line must be printable
-ASCII, at most 200 characters, and must not start with `/`, `!` or `#`. Claude
-queues typed input, so it is nudged any time. Codex is interrupted by typing
+ASCII, at most 200 characters, and must not start with `/`, `!`, `#` or `-`.
+Claude queues typed input, so it needs no turn state, but it is refused while a
+permission-type notification is pending, while a dialog shows, or unless its
+input box is recognised and empty. Codex is interrupted by typing
 mid-turn, so it is nudged only when the hook turn sequence proves its last turn
 ended cleanly AND its pane shows an empty composer; otherwise it is refused
-unless `--force`. Any driver is refused while a human typed in that pane within
-60 seconds, while the pane is in copy mode, or when the agent has exited to a
-shell. `driver-rename` follows the same per-driver rule. Probe `capabilities`
+unless `--force` (which skips only those Codex checks). Any driver is refused
+while a human typed in that pane within 60 seconds, while the pane is in copy
+mode or dead, or when the agent has exited to a shell. `driver-rename` follows the same per-driver rule. Probe `capabilities`
 for `labels`, `nudge` and `turn-sequencing` before relying on them.
 
 Pane leases lend the PLAN pane until the child command exits or is released. The

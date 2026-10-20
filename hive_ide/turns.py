@@ -14,7 +14,9 @@ ask a narrower question: did the most recent turn END, cleanly?
   `last_event`: none of them is proof the agent is idle.
 
 `idle_proven` is True only when the latest `Stop` closes the latest turn, was
-not blocked, and the status still says waiting. Anything missing, malformed,
+not blocked, and the status still says waiting (or `idle`, which is what a
+viewed `waiting` becomes). It is always recomputed from `turns`, never
+persisted, so another writer changing `state` can never leave a stale proof. Anything missing, malformed,
 reset or from another driver is NOT proof — unknown routes to "not idle".
 
 Limitation: a `Stop` that ANOTHER hook blocks (decision "block") is invisible at
@@ -33,6 +35,10 @@ from typing import Any
 class TurnSequence:
     PROMPT = "UserPromptSubmit"
     STOP = "Stop"
+    NOTIFICATION = "Notification"
+    HARMLESS_NOTIFICATIONS = frozenset({"idle_prompt"})
+    # `seen.py` acks a viewed `waiting` session to `idle`; both mean "not working".
+    RESTING_STATES = frozenset({"waiting", "idle"})
 
     @staticmethod
     def event_name(payload: dict[str, Any], requested_state: str) -> str | None:
@@ -78,6 +84,9 @@ class TurnSequence:
                 "last_event": turns.get("last_event")
                 if isinstance(turns.get("last_event"), str)
                 else None,
+                "notification_type": turns.get("notification_type")
+                if isinstance(turns.get("notification_type"), str)
+                else None,
             }
         return {
             "driver": driver,
@@ -85,6 +94,7 @@ class TurnSequence:
             "stopped_turn": None,
             "stop_blocked": False,
             "last_event": None,
+            "notification_type": None,
         }
 
     @staticmethod
@@ -106,12 +116,30 @@ class TurnSequence:
                 payload.get("stop_hook_active") if isinstance(payload, dict) else None
             )
         turns["last_event"] = event
+        kind = payload.get("notification_type") if isinstance(payload, dict) else None
+        turns["notification_type"] = (
+            kind[:40] if event == TurnSequence.NOTIFICATION and isinstance(kind, str) else None
+        )
         turns["observed_at"] = observed_at
         return turns
 
     @staticmethod
+    def attention_pending(status: dict[str, Any] | None) -> bool:
+        """Is the agent's latest hook event a Notification that may be a dialog?
+
+        Claude raises `Notification` for permission prompts, plan approval,
+        elicitation and more; Enter on any of them picks the highlighted option.
+        Only the idle reminder is known to be harmless, so every other type —
+        including a missing one — counts as pending until the next event.
+        """
+        turns = (status or {}).get("turns")
+        if not isinstance(turns, dict) or turns.get("last_event") != TurnSequence.NOTIFICATION:
+            return False
+        return turns.get("notification_type") not in TurnSequence.HARMLESS_NOTIFICATIONS
+
+    @staticmethod
     def idle_proven(status: dict[str, Any] | None) -> bool:
-        if not isinstance(status, dict) or status.get("state") != "waiting":
+        if not isinstance(status, dict) or status.get("state") not in TurnSequence.RESTING_STATES:
             return False
         turns = status.get("turns")
         if not isinstance(turns, dict) or turns.get("driver") != status.get("driver"):

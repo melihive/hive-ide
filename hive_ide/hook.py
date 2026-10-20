@@ -261,7 +261,6 @@ class IdeHook:
                     payload=payload,
                     observed_at=status["observed_at"],
                 )
-                status["idle_proven"] = TurnSequence.idle_proven(status)
                 store.write("status", session_id, status)
                 record["last_active"] = status["observed_at"]
                 current_driver = record.get("driver") or {}

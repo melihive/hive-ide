@@ -108,15 +108,27 @@ class Frame:
         return output
 
     def tmux(
-        self, args: list[str], *, clean_start: bool = False
+        self,
+        args: list[str],
+        *,
+        clean_start: bool = False,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """Run tmux on this frame's socket.
+
+        `timeout` bounds probes made while holding the workspace lock; a timed-out
+        call comes back as a failed result (returncode 124), never an exception,
+        so callers' existing failure handling covers a wedged server.
+        """
         generated = self._ide_conf() if clean_start else None
         config = ["-f", str(generated)] if generated else []
-        return subprocess.run(
-            ["tmux", "-L", self.socket, *config, *args],
-            capture_output=True,
-            text=True,
-        )
+        argv = ["tmux", "-L", self.socket, *config, *args]
+        try:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                argv, 124, stdout="", stderr=f"tmux timed out after {timeout}s"
+            )
 
     def require_tmux(self) -> None:
         if shutil.which("tmux") is None:
@@ -1487,9 +1499,10 @@ class Frame:
     ) -> dict[str, Any]:
         """Type `/rename <name>` into the live agent pane.
 
-        Same per-driver rule as `nudge`: Claude queues typed input, so any time;
-        Codex treats typing mid-turn as an interrupt, so only on proof of idle
-        (hook turn sequence + empty-composer signature) unless `force`.
+        Same gates as `nudge` (`nudge.AgentNudge`): the pane must be a live,
+        observable agent outside copy mode; Claude must show no dialog and an
+        empty composer; Codex must be provably idle unless `force`. The recent-
+        human-keystroke check is skipped: the requester IS the human.
         """
         driver = record.get("driver") or {}
         driver_id = driver.get("id")
@@ -1503,16 +1516,28 @@ class Frame:
         pane_id = (self.role_panes(record["id"]) or {}).get("agent")
         if not pane_id:
             raise UsageError("The session has no live agent pane to rename.")
-        if driver_id == "codex":
-            from .nudge import AgentNudge
+        from .nudge import AgentNudge
 
-            allowed, reason = AgentNudge(self).driver_gate(record, pane_id, force=force)
-            if not allowed:
+        gate = AgentNudge(self)
+        allowed, reason, detail = gate.pane_gate(pane_id, check_human=False)
+        if not allowed:
+            raise UsageError(
+                f"The agent pane is not safe to type into ({reason}"
+                f"{': ' + detail if detail else ''}); /rename was not sent."
+            )
+        allowed, reason = gate.driver_gate(record, pane_id, force=force)
+        if not allowed:
+            if driver_id == "codex":
                 raise UsageError(
                     f"Codex is not provably idle ({reason}); /rename was not sent "
                     "because typing into Codex mid-turn interrupts it. Retry once "
                     "its turn has ended, or pass --force to send it anyway."
                 )
+            raise UsageError(
+                f"Claude is not ready for typed input ({reason}); /rename was not "
+                "sent so it cannot answer a dialog or merge into a draft. Retry "
+                "once the dialog is closed and the input box is empty."
+            )
         result = self.tmux(
             ["send-keys", "-l", "-t", pane_id, f"/rename {display_name}"]
         )

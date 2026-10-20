@@ -765,6 +765,15 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
     if args.subagents_running is not None:
         document["subagents"] = {"running": max(0, args.subagents_running)}
         document["subagents_running"] = max(0, args.subagents_running)
+    # Carry the hook's turn sequence: dropping it would reset idle proof, and
+    # `idle_proven` is recomputed from it with THIS document's state and driver,
+    # so a carried sequence can never prove idle for a working or other-driver status.
+    try:
+        previous = store.read("status", args.session_id)
+    except HiveIdeError:
+        previous = None
+    if isinstance((previous or {}).get("turns"), dict):
+        document["turns"] = previous["turns"]
     store.write("status", args.session_id, document)
     record = store.find_session(args.session_id)
     if record is not None:
