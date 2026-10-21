@@ -83,6 +83,15 @@ def _row(icon: str, label: str, value: str) -> str:
     return f"{icon} {label:<9}{value}"
 
 
+def _label_rows(record: dict) -> list[str]:
+    """One row per session label, sorted by key; values are validated on write."""
+    labels = StateStore.labels(record)
+    return [
+        _row("🔖", key if len(key) < 9 else f"{key} ", labels[key])
+        for key in sorted(labels)
+    ]
+
+
 def _memory_summary(
     *, home: str | Path, workspace_key: str, session_id: str
 ) -> dict | None:
@@ -167,6 +176,9 @@ def _card(
         )
     else:
         rows.extend(["", _row("· ", "plan", "(none)")])
+    label_rows = _label_rows(record)
+    if label_rows:
+        rows.extend(["", *label_rows])
     memory_rows = _memory_rows(memory)
     if memory_rows:
         rows.extend(["", *memory_rows])

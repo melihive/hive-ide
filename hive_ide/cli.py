@@ -25,6 +25,7 @@ from .frame import Frame
 from .handoff import HandoffPackage
 from .hooks import HookInstaller
 from .monitor import monitor_state
+from .nudge import AgentNudge
 from .pane_lease import LeaseError, LeaseStore, PaneLeases
 from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
@@ -45,6 +46,8 @@ WORKSPACE_MUTATIONS = frozenset(
         "create",
         "driver-rename",
         "force-rebuild",
+        "label",
+        "nudge",
         "open",
         "plan-set",
         "purge",
@@ -542,7 +545,26 @@ def cmd_driver_rename(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, None)
     return Frame(store, socket=_socket(store, args.tmux_socket)).driver_rename(
-        record, name=args.name
+        record, name=args.name, force=args.force
+    )
+
+
+def cmd_label(args: argparse.Namespace) -> dict[str, Any]:
+    if args.clear == (args.value is not None):
+        raise UsageError("Pass exactly one of --value or --clear.")
+    store, _ = _context(args)
+    record = store.set_label(args.session_id, args.key, None if args.clear else args.value)
+    return {
+        "session_id": record["id"],
+        "labels": StateStore.labels(record),
+    }
+
+
+def cmd_nudge(args: argparse.Namespace) -> dict[str, Any]:
+    store, _ = _context(args)
+    record = _session(store, args.session_id, None)
+    return AgentNudge(Frame(store, socket=_socket(store, args.tmux_socket))).nudge(
+        record, args.text, force=args.force
     )
 
 
@@ -743,6 +765,15 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
     if args.subagents_running is not None:
         document["subagents"] = {"running": max(0, args.subagents_running)}
         document["subagents_running"] = max(0, args.subagents_running)
+    # Carry the hook's turn sequence: dropping it would reset idle proof, and
+    # `idle_proven` is recomputed from it with THIS document's state and driver,
+    # so a carried sequence can never prove idle for a working or other-driver status.
+    try:
+        previous = store.read("status", args.session_id)
+    except HiveIdeError:
+        previous = None
+    if isinstance((previous or {}).get("turns"), dict):
+        document["turns"] = previous["turns"]
     store.write("status", args.session_id, document)
     record = store.find_session(args.session_id)
     if record is not None:
@@ -1371,6 +1402,8 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "driver-rename": "Send the IDE display name into a supported live driver pane.",
+        "label": "Set or clear one short label on a session.",
+        "nudge": "Type one constant line into a session's agent pane when safe.",
         "working-dir-set": "Move a session to an existing working directory.",
         "force-rebuild": "Force replace one tmux window from its session record.",
         "relayout": "Reapply or adopt the tmux frame geometry.",
@@ -1487,7 +1520,28 @@ def build_parser() -> argparse.ArgumentParser:
     driver_rename.add_argument("--session-id", required=True)
     driver_rename.add_argument("--name")
     driver_rename.add_argument("--tmux-socket")
+    driver_rename.add_argument(
+        "--force", action="store_true",
+        help="Send to Codex even when it is not provably idle (may interrupt its turn).",
+    )
     driver_rename.set_defaults(handler=cmd_driver_rename)
+
+    label = command("label")
+    label.add_argument("--session-id", "--session", dest="session_id", required=True)
+    label.add_argument("--key", required=True)
+    label.add_argument("--value")
+    label.add_argument("--clear", action="store_true")
+    label.set_defaults(handler=cmd_label)
+
+    nudge = command("nudge")
+    nudge.add_argument("--session-id", "--session", dest="session_id", required=True)
+    nudge.add_argument("--text", required=True)
+    nudge.add_argument("--tmux-socket")
+    nudge.add_argument(
+        "--force", action="store_true",
+        help="Type into Codex even when it is not provably idle (may interrupt its turn).",
+    )
+    nudge.set_defaults(handler=cmd_nudge)
 
     plan = command("plan-set")
     plan.add_argument("--session-id", required=True)
@@ -1677,7 +1731,14 @@ def build_parser() -> argparse.ArgumentParser:
     capabilities = command("capabilities")
     capabilities.set_defaults(handler=lambda _args: {
         "protocol_version": PROTOCOL_VERSION, "version": __version__,
-        "features": ["pane-lease", "plan-set-defer-pane"],
+        "features": [
+            "pane-lease",
+            "plan-set-defer-pane",
+            "labels",
+            "nudge",
+            "turn-sequencing",
+            "driver-rename-guard",
+        ],
     })
 
     version = command("version")

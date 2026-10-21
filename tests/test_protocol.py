@@ -4950,7 +4950,7 @@ def test_current_chat_selects_existing_agent_pane_without_respawning(
     ]
 
 
-def test_driver_rename_sends_slash_command_to_agent_pane(tmp_path, monkeypatch):
+def test_driver_rename_sends_slash_command_to_forced_codex_agent_pane(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -4967,14 +4967,19 @@ def test_driver_rename_sends_slash_command_to_agent_pane(tmp_path, monkeypatch):
     frame = Frame(store)
     calls = []
     monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
-    monkeypatch.setattr(
-        frame,
-        "tmux",
-        lambda args, **_kwargs: calls.append(args)
-        or SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
+    screen = ''
 
-    result = frame.driver_rename(record)
+    def tmux(args, **_kwargs):
+        calls.append(args)
+        if args[0] == "display-message":
+            return SimpleNamespace(returncode=0, stdout="0\tcodex\t0\n", stderr="")
+        if args[0] == "capture-pane":
+            return SimpleNamespace(returncode=0, stdout=screen, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", tmux)
+
+    result = frame.driver_rename(record, force=True)
 
     assert result == {
         "session_id": record["id"],
@@ -4983,6 +4988,8 @@ def test_driver_rename_sends_slash_command_to_agent_pane(tmp_path, monkeypatch):
         "sent": "/rename",
     }
     assert calls == [
+        ["display-message", "-p", "-t", "%2",
+         "#{pane_in_mode}\t#{pane_current_command}\t#{pane_dead}"],
         ["send-keys", "-l", "-t", "%2", "/rename HIVE DRIVE"],
         ["send-keys", "-t", "%2", "Enter"],
     ]
@@ -5005,17 +5012,25 @@ def test_driver_rename_supports_claude_agent_pane(tmp_path, monkeypatch):
     frame = Frame(store)
     calls = []
     monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
-    monkeypatch.setattr(
-        frame,
-        "tmux",
-        lambda args, **_kwargs: calls.append(args)
-        or SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
+    screen = '──────────────────────────\n>\n──────────────────────────\n'
+
+    def tmux(args, **_kwargs):
+        calls.append(args)
+        if args[0] == "display-message":
+            return SimpleNamespace(returncode=0, stdout="0\tclaude\t0\n", stderr="")
+        if args[0] == "capture-pane":
+            return SimpleNamespace(returncode=0, stdout=screen, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(frame, "tmux", tmux)
 
     result = frame.driver_rename(record)
 
     assert result["driver"] == "claude"
-    assert calls == [
+    assert [call[0] for call in calls] == [
+        "display-message", "capture-pane", "send-keys", "send-keys",
+    ]
+    assert calls[-2:] == [
         ["send-keys", "-l", "-t", "%2", "/rename CLAUDE SESSION"],
         ["send-keys", "-t", "%2", "Enter"],
     ]

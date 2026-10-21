@@ -32,6 +32,9 @@ managed environment, use `pipx install hive-ide`.
 - `hive-ide show --session-id=<ID>`
 - `hive-ide current`
 - `hive-ide capabilities`
+- `hive-ide label --session-id=<ID> --key=<KEY> (--value=<VALUE> | --clear)`
+- `hive-ide nudge --session-id=<ID> --text=<LINE> [--force]`
+- `hive-ide driver-rename --session-id=<ID> [--name=<NAME>] [--force]`
 - `hive-ide pane-lease --session-id=<ID> --role=plan --title=<TITLE> -- <argv…>`
 - `hive-ide pane-status [--session-id=<ID>]`
 - `hive-ide pane-release --lease=<ID> --token=<TOKEN>`
@@ -82,6 +85,23 @@ To edit from a long-lived `micro` plan pane, press `Ctrl-e`, run `reload`, then 
 Plan paths may be relative to the workspace/current working directory or absolute.
 Absolute paths are accepted as-is, so standalone/non-Hive users can attach personal
 plan files outside the repository root.
+
+Labels are a small key -> short-text map on a session (at most 8 keys; key
+`^[a-z][a-z0-9_-]{0,15}$`; value at most 32 printable characters). The session
+card shows one row per label. Old records read as having no labels.
+
+`nudge` types one caller-supplied constant line plus Enter into the agent pane
+and returns `{sent, reason}`; it never composes text. The line must be printable
+ASCII, at most 200 characters, and must not start with `/`, `!`, `#` or `-`.
+Claude queues typed input, so it needs no turn state, but it is refused while a
+permission-type notification is pending, while a dialog shows, or unless its
+input box is recognised and empty. Codex is interrupted by typing
+mid-turn, so it is nudged only when the hook turn sequence proves its last turn
+ended cleanly AND its pane shows an empty composer; otherwise it is refused
+unless `--force` (which skips only those Codex checks). Any driver is refused
+while a human typed in that pane within 60 seconds, while the pane is in copy
+mode or dead, or when the agent has exited to a shell. `driver-rename` follows the same per-driver rule. Probe `capabilities`
+for `labels`, `nudge` and `turn-sequencing` before relying on them.
 
 Pane leases lend the PLAN pane until the child command exits or is released. The
 package restores the currently linked plan; `repair` recovers a dead supervisor.

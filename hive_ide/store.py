@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -488,6 +489,70 @@ class StateStore:
         agents.mark_active(driver_id if isinstance(driver_id, str) else None)
         self.write("sessions", record["id"], record)
         return record
+
+    # Labels: a small, generic key -> short-text map any integration can hang on a
+    # session (the info card shows one row per label). Old records carry no
+    # `labels` field and read as `{}` — no migration.
+    LABEL_MAX_KEYS = 8
+    LABEL_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,15}$")
+    LABEL_VALUE_MAX = 32
+
+    @staticmethod
+    def labels(record: dict[str, Any] | None) -> dict[str, str]:
+        """The record's labels, `{}` when absent or malformed."""
+        raw = (record or {}).get("labels")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            key: value
+            for key, value in raw.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+
+    @classmethod
+    def validate_label(cls, key: str, value: str | None) -> None:
+        if not isinstance(key, str) or not cls.LABEL_KEY_RE.fullmatch(key):
+            raise UsageError(
+                "Label key must match ^[a-z][a-z0-9_-]{0,15}$ "
+                "(lowercase, starts with a letter, at most 16 chars)."
+            )
+        if value is None:
+            return
+        if not isinstance(value, str) or not value:
+            raise UsageError("Label value cannot be empty; use --clear to remove it.")
+        if len(value) > cls.LABEL_VALUE_MAX:
+            raise UsageError(
+                f"Label value must be at most {cls.LABEL_VALUE_MAX} characters."
+            )
+        if not value.isprintable():
+            raise UsageError(
+                "Label value must be printable text with no control characters."
+            )
+
+    def set_label(self, session_id: str, key: str, value: str | None) -> dict[str, Any]:
+        """Set (or, with `value=None`, clear) one label as a locked mutation.
+
+        Hook writes read-modify-write the same session record under this lock, so
+        taking it here is what keeps a concurrent hook from overwriting the label.
+        """
+        self.validate_label(key, value)
+        with self.mutation_lock():
+            record = self.read("sessions", session_id)
+            if record is None:
+                raise UsageError(f"No session with id {session_id}.")
+            labels = self.labels(record)
+            if value is None:
+                labels.pop(key, None)
+            else:
+                if key not in labels and len(labels) >= self.LABEL_MAX_KEYS:
+                    raise UsageError(
+                        f"A session holds at most {self.LABEL_MAX_KEYS} labels; "
+                        "clear one first."
+                    )
+                labels[key] = value
+            record["labels"] = labels
+            self.write("sessions", session_id, record)
+            return record
 
     def archive_session(self, session_id: str) -> dict[str, Any]:
         record = self.read("sessions", session_id)

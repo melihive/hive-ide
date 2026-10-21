@@ -4,6 +4,50 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Session labels: a small generic key -> short-text map on each session record
+  (at most 8 keys, strict key pattern, values at most 32 printable characters).
+  `hive-ide label --session-id=<ID> --key=<KEY> (--value=<V> | --clear)` sets
+  or clears one under the same workspace lock the hooks write under, so a
+  concurrent hook cannot overwrite it. The session card shows one row per label.
+  Records written before this release read as having no labels; no migration.
+- Turn sequencing in hook state. `UserPromptSubmit` opens a numbered turn,
+  `Stop` records the turn it closes and whether it is part of a stop-hook
+  continuation; a `Notification` records its type. The status document carries
+  `turns`, and idle proof is recomputed from it on every read (never
+  persisted), accepting a `waiting` status or the `idle` it becomes once the
+  window is viewed. `Notification` and `SessionStart` never count as idle proof.
+- `hive-ide nudge --session-id=<ID> --text=<LINE> [--force]` types one
+  caller-supplied constant line plus Enter into the agent pane and returns a
+  structured `{sent, reason}`. The text is passed to tmux after `--` and may
+  not start with `/`, `!`, `#` or `-`. Claude needs no turn state (it queues
+  input) but is refused while a permission-type notification is its latest
+  event, while a dialog shows, or unless its input box is recognised and empty.
+  Codex is nudged only on hook idle proof plus its empty-composer screen
+  signature, or with an explicit `--force` (which skips only those two checks).
+  Every driver is refused on a recent human keystroke in the pane, copy mode, a
+  dead pane, or an agent that has exited to a shell. tmux probes time out.
+- `capabilities` reports `labels`, `nudge`, `turn-sequencing` and
+  `driver-rename-guard`.
+
+### Changed
+
+- `driver-rename` no longer types `/rename` into a Codex pane mid-turn, where
+  it interrupted the running turn. It now refuses unless Codex is provably idle
+  or `--force` is passed, and for every driver it refuses a dead, shell, or
+  copy-mode pane; for Claude it also refuses an open dialog or a non-empty
+  input box.
+- `status-event` keeps the hook's turn sequence instead of dropping it.
+
+### Note
+
+- Idle proof starts accumulating with this release. An existing Codex session
+  needs one prompt -> Stop cycle after upgrading (and after `hook-setup` is
+  current) before it is provably idle; until then nudge and `driver-rename` to
+  it are refused unless `--force` is passed. A new Codex session is likewise
+  not idle-proven until its first turn ends.
+
 ## [1.0.96] - 2026-10-14
 
 ### Added
