@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.97] - 2026-10-21
+
 ### Added
 
 - Session labels: a small generic key -> short-text map on each session record
