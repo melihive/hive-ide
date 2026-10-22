@@ -4,6 +4,45 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.103] - 2026-10-22
+
+### Fixed
+
+- The test suite no longer leaves tmux sockets in the machine's own tmux
+  directory. tmux keeps the socket FILE after its server exits, and a test's
+  `kill-server` does not remove it, so every test that started a real server
+  dropped one file that nothing in the suite ever collected — 462 had accumulated,
+  which is not merely untidy: it made the socket listing unusable for reading a
+  real frame. The whole run now gets its own private tmux directory, so nothing a
+  test starts can reach the real one even when its teardown never runs at all.
+- `verify` reports a half-built window: one pane, no role tag, which is a build
+  that created the window and then aborted before tagging it. Nothing maps a
+  session to an untagged window, so it can never be opened from the sidebar while
+  its sidebar loop keeps probing tmux once a second. The finding names the window
+  and the command that closes it.
+- `verify` reports how many of this package's socket files have no server behind
+  them, as inventory rather than a verdict — a dead socket file is clutter, not a
+  fault. The count is taken independently of what the reaper may delete right now:
+  reporting the reaper's candidates instead answered zero on an afternoon that had
+  just produced 150, because candidates exclude anything under an hour old and stop
+  at the removal cap.
+- A failed pane scan is now distinguishable from a clean frame. The scan returned
+  an empty list when it could not run at all, which `verify` read as "nothing
+  found" and reported as healthy; it now marks the run incomplete instead, so a
+  check that never ran cannot pass.
+
+### Note
+
+- The run's tmux directory is created atomically and privately rather than at a
+  predictable path. A predictable one could be pre-created by another local user
+  with the per-uid subdirectory symlinked at the real tmux directory, which would
+  have pointed the suite's own cleanup at it. The cleanup also no longer follows a
+  symlink or addresses anything that is not a socket.
+- That directory is placed under `/tmp` rather than the platform temporary
+  directory, which is long on macOS: a unix socket path is capped near 108 bytes
+  and tmux appends its own per-uid path, so honouring the platform value makes
+  real-tmux tests fail to start instead of being isolated.
+
 ## [1.0.102] - 2026-10-22
 
 ### Fixed
