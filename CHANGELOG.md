@@ -14,6 +14,14 @@ All notable changes to `hive-ide` will be documented in this file.
   sidebar) close that turn when Codex's own rollout records its end
   (`task_complete`, which Codex also writes after an error, or `turn_aborted`).
   A rollout that cannot be read is unknown and changes nothing.
+- `test_deferred_driver_switch_completes_from_outside_on_the_marker` no longer
+  flakes. tmux returns from building a pane before the pane's child has exec'd,
+  and for that moment `#{pane_pid}` is a forked copy of the tmux server carrying
+  the test process's environment — another session's `HIVE_IDE_SESSION_ID` when
+  the suite runs inside an ide pane — so a repair that read it then saw a "stale
+  agent environment" and rebuilt a healthy window. The test (and the shared live
+  fixture) now waits, with a deadline, for the agent pane to carry its own
+  session id before repairing.
 
 ## [1.0.103] - 2026-10-22
 
