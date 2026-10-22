@@ -1,4 +1,13 @@
-"""Session labels, hook turn sequencing, nudge, and the driver-rename guard."""
+"""Session labels, hook turn sequencing, nudge, and the driver-rename guard.
+
+TEST OF RECORD for the nudge gate: every change to how nudge reads a pane
+(composer, rules, placeholder, dialogs, Codex signature) must be checked
+against a REAL captured pane — a fixture taken read-only (`capture-pane -p`
+and `-p -e`) from a live session, sanitised, and kept here — not only against
+a hand-written screen. Hand-written screens encode what we think the CLI
+draws; 1.0.99 shipped green on them and still refused every fresh Claude in a
+narrow pane. Never send keys to a live session to make a fixture.
+"""
 
 from __future__ import annotations
 
@@ -77,6 +86,45 @@ LABELLED_CLAUDE_SCREEN = [
 ]
 LABELLED_DRAFT_CLAUDE_SCREEN = [*LABELLED_CLAUDE_SCREEN[:5], "❯ half-typed human draft", *LABELLED_CLAUDE_SCREEN[6:]]
 HINT_CLAUDE_SCREEN = [RULE, '> Try "write a test for app.py"', RULE]
+# Captured read-only from a FRESH Claude Code 2.1 in a 19-column hive-ide pane
+# (bottom rows; sanitised). The labelled top rule keeps only 6 rule chars and
+# the first-run hint is truncated with `…`. With `capture-pane -e` the hint
+# row is drawn dim (SGR 2) after a default-colour glyph; typed text is not dim.
+NARROW_FRESH_CLAUDE_SCREEN = [
+    "  ⎿  SessionStart:s",
+    "     tartup says:",
+    "     Hive repo:",
+    "     clean",
+    "────── AGENT CHAT ─",
+    '❯\u00a0Try "fix lint er…',
+    "─" * 19,
+    "  ⏵⏵ auto mode on",
+]
+NARROW_FRESH_CLAUDE_SCREEN_E = [
+    *NARROW_FRESH_CLAUDE_SCREEN[:5],
+    '\x1b[39m❯\u00a0\x1b[2mTry "fix lint er…',
+    *NARROW_FRESH_CLAUDE_SCREEN[6:],
+]
+# The same pane after a human typed `Try "x"`: same words, not dim.
+NARROW_TYPED_TRY_CLAUDE_SCREEN_E = [
+    *NARROW_FRESH_CLAUDE_SCREEN[:5],
+    '\x1b[39m❯\u00a0Try "x"',
+    *NARROW_FRESH_CLAUDE_SCREEN[6:],
+]
+# A permission dialog wrapped at 19 columns, below the same transcript.
+NARROW_DIALOG_CLAUDE_SCREEN = [
+    *NARROW_FRESH_CLAUDE_SCREEN[:4],
+    "Bash command",
+    "  pnpm test",
+    "Do you want to",
+    "proceed?",
+    "❯ 1. Yes",
+    "  2. Yes, and don't",
+    "  ask again for pnpm",
+    "  3. No, and tell",
+    "  Claude what to do",
+    "  differently (esc)",
+]
 DRAFT_CLAUDE_SCREEN = ["⏺ Done.", RULE, "> half-typed human draft", RULE, "  ? for shortcuts"]
 MULTILINE_DRAFT_CLAUDE_SCREEN = ["⏺ Done.", RULE, ">", "  second line of a draft", RULE]
 UNRECOGNIZED_CLAUDE_SCREEN = ["⏺ Done.", "> something without rules"]
@@ -830,13 +878,82 @@ def test_nudge_claude_refuses_dialogs_drafts_and_unknown_screens_even_forced(
 
 
 @pytest.mark.parametrize(
-    "screen", [IDLE_CLAUDE_SCREEN, BOX_CLAUDE_SCREEN, HINT_CLAUDE_SCREEN, LABELLED_CLAUDE_SCREEN]
+    "screen",
+    [
+        IDLE_CLAUDE_SCREEN,
+        BOX_CLAUDE_SCREEN,
+        HINT_CLAUDE_SCREEN,
+        LABELLED_CLAUDE_SCREEN,
+        NARROW_FRESH_CLAUDE_SCREEN,
+        NARROW_FRESH_CLAUDE_SCREEN_E,
+    ],
 )
 def test_nudge_claude_empty_composer_styles_are_sent(tmp_path, monkeypatch, screen):
     store, record = _session(tmp_path, "claude")
     fake = FakeTmux(command="claude", screen=screen)
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result["sent"] is True
+    assert ["capture-pane", "-p", "-e", "-t", "%2"] in fake.calls
+
+
+@pytest.mark.parametrize(
+    ("screen", "reason"),
+    [
+        (NARROW_TYPED_TRY_CLAUDE_SCREEN_E, "claude_draft_present"),
+        (NARROW_DIALOG_CLAUDE_SCREEN, "claude_dialog_open"),
+        (
+            [*NARROW_FRESH_CLAUDE_SCREEN_E[:4], *NARROW_DIALOG_CLAUDE_SCREEN[4:]],
+            "claude_dialog_open",
+        ),
+        (NARROW_FRESH_CLAUDE_SCREEN[:6], "claude_composer_not_recognized"),
+    ],
+)
+def test_nudge_claude_narrow_pane_drafts_and_dialogs_are_refused(
+    tmp_path, monkeypatch, screen, reason
+):
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(command="claude", screen=screen)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
+        record, "wake up", force=True
+    )
+    assert result["reason"] == reason
+    assert fake.sent == []
+
+
+@pytest.mark.parametrize(
+    ("prompt_row", "state"),
+    [
+        ('\x1b[39m❯\u00a0\x1b[2mTry "fix lint er…', "empty"),
+        ("\x1b[39m❯\u00a0\x1b[2mAnything dim at all\x1b[0m", "empty"),
+        ('\x1b[39m❯\u00a0\x1b[2mTry "fix\x1b[22m lint er…', "draft"),
+        ('\x1b[39m❯\u00a0\x1b[2mTry\x1b[0m "x"', "draft"),
+        ('\x1b[39m❯\u00a0\x1b[38;2;2;2;2mTry "x"', "draft"),
+        ('\x1b[39m❯\u00a0\x1b[38;5;2mTry "x"', "draft"),
+        ('\x1b[39m❯\u00a0Try "fix lint er…', "draft"),
+        ("\x1b[39m❯\u00a0", "empty"),
+    ],
+)
+def test_claude_hint_is_decided_by_the_dim_attribute_when_escapes_exist(prompt_row, state):
+    screen = [*NARROW_FRESH_CLAUDE_SCREEN[:5], prompt_row, *NARROW_FRESH_CLAUDE_SCREEN[6:]]
+    assert AgentNudge.claude_composer(screen) == state
+
+
+@pytest.mark.parametrize(
+    ("row", "is_rule"),
+    [
+        ("─" * 8, True),
+        ("─" * 7, False),
+        ("────── AGENT CHAT ─", True),
+        ("── X ─", True),
+        ("─ X ─", False),
+        ("── X", False),
+        ("── A ── B ─", False),
+        ("── AGENT CHAT ─ x", False),
+        ("text ── A ─", False),
+    ],
+)
+def test_claude_rule_is_width_independent_but_strict(row, is_rule):
+    assert bool(AgentNudge.CLAUDE_RULE_RE.match(row)) is is_rule
 
 
 @pytest.mark.parametrize("kind", ["permission_prompt", "elicitation_dialog", None])

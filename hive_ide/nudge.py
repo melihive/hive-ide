@@ -112,10 +112,22 @@ class AgentNudge:
     # Claude's composer sits between two horizontal rules (or inside a box) with
     # a `>`/`❯` prompt; an empty one shows nothing after the glyph, or the
     # first-run `Try "…"` hint. Claude Code 2.1 writes the session name into the
-    # top rule (`──── DC WEB DEV ─`), so a rule may carry one inset label.
-    CLAUDE_RULE_RE = re.compile(r"^\s*[╭╰]?[─━]{8,}(?: [^─━]+ [─━]+)?[╮╯]?\s*$")
+    # top rule (`──── DC WEB DEV ─`), so a rule may carry one inset label. A rule
+    # is width-independent: a bare rule needs 8 rule chars, a labelled one only
+    # rule chars around one label (a 19-column pane leaves `────── AGENT CHAT ─`).
+    CLAUDE_RULE_RE = re.compile(
+        r"^\s*[╭╰]?(?:[─━]{8,}|[─━]{2,} [^─━]+ [─━]+)[╮╯]?\s*$"
+    )
     CLAUDE_PROMPT_RE = re.compile(r"^\s*│?\s*[>❯]\s?(?P<text>.*?)\s*│?\s*$")
-    CLAUDE_PLACEHOLDER_RE = re.compile(r'^Try ".*"$')
+    # The hint is drawn DIM (SGR 2) and typed text is not, so with escape codes
+    # the attribute decides. This text shape is only the fallback for a capture
+    # with no escape codes; a narrow pane truncates the hint with `…`.
+    CLAUDE_PLACEHOLDER_RE = re.compile(r'^Try ".*(?:"|…)$')
+    # What `capture-pane -e` can emit: SGR (named, so its params can be read),
+    # other CSI sequences, and OSC (e.g. hyperlinks). Stripped for every text check.
+    ESCAPE_RE = re.compile(
+        r"\x1b\[(?P<sgr>[0-9;:]*)m|\x1b\[[0-9;:?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
+    )
     COMPOSER_ROWS = 8
     BUSY_ROWS = 15
     DIALOG_ROWS = 20
@@ -232,8 +244,10 @@ class AgentNudge:
                 return True
         return False
 
-    def pane_lines(self, pane_id: str) -> list[str] | None:
-        result = self._tmux(["capture-pane", "-p", "-t", pane_id])
+    def pane_lines(self, pane_id: str, *, escapes: bool = False) -> list[str] | None:
+        """The pane's visible rows; with `escapes`, attributes kept as SGR codes."""
+        flags = ["-p", "-e"] if escapes else ["-p"]
+        result = self._tmux(["capture-pane", *flags, "-t", pane_id])
         if result.returncode != 0:
             return None
         return result.stdout.splitlines()
@@ -241,6 +255,50 @@ class AgentNudge:
     @staticmethod
     def _rows(lines: list[str] | None) -> list[str]:
         return [line.rstrip() for line in (lines or []) if line.strip()]
+
+    @classmethod
+    def _plain(cls, line: str) -> str:
+        return cls.ESCAPE_RE.sub("", line)
+
+    @classmethod
+    def _dim_after_glyph(cls, row: str) -> bool:
+        """Is every visible character after the prompt glyph drawn dim (SGR 2)?
+
+        Walks the row tracking the dim attribute. Spaces and a box edge are
+        ignored; any other character drawn without dim — or no character at
+        all — is False. Extended-colour arguments (`38;5;n`, `38;2;r;g;b`) are
+        skipped so their `2`/`5` are never read as attributes.
+        """
+        dim = seen_glyph = seen_text = False
+        position = 0
+        for match in [*cls.ESCAPE_RE.finditer(row), None]:
+            chunk = row[position:match.start()] if match else row[position:]
+            for char in chunk:
+                if not seen_glyph:
+                    seen_glyph = char in ">❯"
+                elif not (char.isspace() or char == "│"):
+                    if not dim:
+                        return False
+                    seen_text = True
+            if match is None:
+                break
+            position = match.end()
+            if match.group("sgr") is None:
+                continue
+            params = (match.group("sgr") or "0").split(";")
+            index = 0
+            while index < len(params):
+                param = params[index].split(":")[0]
+                if param in ("", "0", "22"):
+                    dim = False
+                elif param == "2":
+                    dim = True
+                elif param in ("38", "48", "58") and ":" not in params[index]:
+                    mode = params[index + 1] if index + 1 < len(params) else ""
+                    index += {"5": 3, "2": 5}.get(mode, 1)
+                    continue
+                index += 1
+        return seen_text
 
     @classmethod
     def codex_prompt_signature(cls, lines: list[str] | None) -> bool:
@@ -259,7 +317,8 @@ class AgentNudge:
 
     @classmethod
     def claude_dialog_open(cls, lines: list[str] | None) -> bool:
-        bottom = "\n".join(cls._rows(lines)[-cls.DIALOG_ROWS:]).casefold()
+        plain = [cls._plain(line) for line in (lines or [])]
+        bottom = "\n".join(cls._rows(plain)[-cls.DIALOG_ROWS:]).casefold()
         return any(marker in bottom for marker in cls.CLAUDE_DIALOG_MARKERS)
 
     @classmethod
@@ -269,9 +328,15 @@ class AgentNudge:
         The composer is the rows between the LAST two horizontal rules near the
         bottom (transcript echoes of past prompts also start with `>`, so the
         rules are what locate the live input). It is empty only as one prompt
-        row with nothing — or only the `Try "…"` hint — after the glyph.
+        row with nothing — or only the `Try "…"` hint — after the glyph. When
+        the capture carries escape codes the hint is recognised ONLY as a dim
+        run after the glyph (typed text is not dim, whatever it says); the
+        `Try "…"` text shape is the fallback for a capture without them.
         """
-        rows = cls._rows(lines)[-(cls.COMPOSER_ROWS + 4):]
+        raw = [line.rstrip() for line in (lines or []) if cls._plain(line).strip()]
+        escapes = any("\x1b" in line for line in raw)
+        raw = raw[-(cls.COMPOSER_ROWS + 4):]
+        rows = [cls._plain(line).rstrip() for line in raw]
         rules = [index for index, row in enumerate(rows) if cls.CLAUDE_RULE_RE.match(row)]
         if len(rules) < 2:
             return "unrecognized"
@@ -283,9 +348,15 @@ class AgentNudge:
         if prompt is None:
             return "unrecognized"
         text = prompt.group("text")
-        if len(inside) == 1 and (not text or cls.CLAUDE_PLACEHOLDER_RE.match(text)):
+        if len(inside) != 1:
+            return "draft"
+        if not text:
             return "empty"
-        return "draft"
+        if escapes:
+            hint = cls._dim_after_glyph(raw[top + 1])
+        else:
+            hint = cls.CLAUDE_PLACEHOLDER_RE.match(text) is not None
+        return "empty" if hint else "draft"
 
     def _status(self, session_id: str) -> dict[str, Any] | None:
         try:
@@ -329,7 +400,7 @@ class AgentNudge:
         if driver == "claude":
             if TurnSequence.attention_pending(self._status(record["id"])):
                 return False, "claude_notification_pending"
-            lines = self.pane_lines(pane_id)
+            lines = self.pane_lines(pane_id, escapes=True)
             if lines is None:
                 return False, "pane_unobservable"
             if self.claude_dialog_open(lines):
