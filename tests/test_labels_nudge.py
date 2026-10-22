@@ -62,6 +62,20 @@ WORKING_CLAUDE_SCREEN = [
     "  ? for shortcuts",
 ]
 BOX_CLAUDE_SCREEN = ["⏺ Done.", "╭" + "─" * 30 + "╮", "│ >                            │", "╰" + "─" * 30 + "╯"]
+# Sanitised from a live Claude Code 2.1 pane (95 cols): the session name is
+# inset in the top rule, the prompt glyph is followed by a no-break space, and a
+# mode footer sits under the bottom rule.
+LABELLED_CLAUDE_SCREEN = [
+    "  The details are in the log.",
+    "",
+    "✻ Crunched for 6m 52s · done 10:42",
+    "              new task? /clear to save 154.2k tokens · ✔ Update installed · /restart to apply",
+    "─" * 78 + " DC WEB DEV ─",
+    "❯\u00a0",
+    "─" * 95,
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+]
+LABELLED_DRAFT_CLAUDE_SCREEN = [*LABELLED_CLAUDE_SCREEN[:5], "❯ half-typed human draft", *LABELLED_CLAUDE_SCREEN[6:]]
 HINT_CLAUDE_SCREEN = [RULE, '> Try "write a test for app.py"', RULE]
 DRAFT_CLAUDE_SCREEN = ["⏺ Done.", RULE, "> half-typed human draft", RULE, "  ? for shortcuts"]
 MULTILINE_DRAFT_CLAUDE_SCREEN = ["⏺ Done.", RULE, ">", "  second line of a draft", RULE]
@@ -796,7 +810,10 @@ def test_state_compat_update_keeps_turns_and_fails_safe(tmp_path, monkeypatch):
         (QUESTION_CLAUDE_SCREEN, "claude_dialog_open"),
         (DRAFT_CLAUDE_SCREEN, "claude_draft_present"),
         (MULTILINE_DRAFT_CLAUDE_SCREEN, "claude_draft_present"),
+        (LABELLED_DRAFT_CLAUDE_SCREEN, "claude_draft_present"),
+        ([*LABELLED_CLAUDE_SCREEN[:4], *PERMISSION_CLAUDE_SCREEN], "claude_dialog_open"),
         (UNRECOGNIZED_CLAUDE_SCREEN, "claude_composer_not_recognized"),
+        (LABELLED_CLAUDE_SCREEN[:6], "claude_composer_not_recognized"),
         ([], "claude_composer_not_recognized"),
     ],
 )
@@ -812,7 +829,9 @@ def test_nudge_claude_refuses_dialogs_drafts_and_unknown_screens_even_forced(
     assert fake.sent == []
 
 
-@pytest.mark.parametrize("screen", [IDLE_CLAUDE_SCREEN, BOX_CLAUDE_SCREEN, HINT_CLAUDE_SCREEN])
+@pytest.mark.parametrize(
+    "screen", [IDLE_CLAUDE_SCREEN, BOX_CLAUDE_SCREEN, HINT_CLAUDE_SCREEN, LABELLED_CLAUDE_SCREEN]
+)
 def test_nudge_claude_empty_composer_styles_are_sent(tmp_path, monkeypatch, screen):
     store, record = _session(tmp_path, "claude")
     fake = FakeTmux(command="claude", screen=screen)
