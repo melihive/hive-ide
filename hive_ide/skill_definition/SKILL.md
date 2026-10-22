@@ -66,6 +66,7 @@ pane's identity instead of the shared server's first session. This requires a
 Codex CLI that supports that flag. Existing running agents must be relaunched to
 use it; an already misattributed conversation record needs separate repair.
 Custom Codex wrapper commands must pass the flag themselves.
+
 Use the new-session modal's `new` / `adopt existing` toggle to visually adopt
 Claude Code or Codex conversations for the current directory. The CLI `adopt`
 command is mainly for automation or agent-driven maintenance.
