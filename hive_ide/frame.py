@@ -1721,11 +1721,35 @@ class Frame:
             self._retitle_panes(target, record)
         return changed
 
+    @staticmethod
+    def _relay_suffix(record: dict[str, Any]) -> str:
+        """The session's relay agent name, ready to append, or '' when it has none.
+
+        Nine of fifteen live sessions carry no relay label, so the absence is the
+        normal case and must render as nothing at all rather than as empty brackets.
+
+        Sanitised rather than trusted: the value is written by relay registration,
+        not typed here, and the border is drawn through `pane-border-format`, where
+        `#` opens a format or style sequence — so a `#` arriving in the title would
+        distort the border instead of printing. Bounded too, because the chat pane's
+        border is narrow and a long name would crowd out the session name it is
+        meant to annotate.
+        """
+        labels = record.get("labels")
+        if not isinstance(labels, dict):
+            return ""
+        value = labels.get("relay")
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.replace("#", "").split())[:24]
+
     def _pane_titles(self, record: dict[str, Any]) -> dict[str, str]:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
+        name = str(record.get("name") or "chat")
+        relay = self._relay_suffix(record)
         return {
             "sidebar": workspace,
-            "agent": str(record.get("name") or "chat"),
+            "agent": f"{name} ({relay})" if relay else name,
             "plan": (LeaseStore(self.store).live(record["id"]) or {}).get("title")
             or self._plan_title(record),
         }
