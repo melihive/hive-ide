@@ -76,15 +76,26 @@ class AgentNudge:
     UNSAFE_LEADING = ("/", "!", "#", "-")
     HUMAN_QUIET_SECONDS = 60
     TMUX_TIMEOUT = 3.0
+    # A literal line followed at once by Enter arrives as one burst, which the
+    # Codex TUI treats as a paste and keeps the Enter as a newline in the
+    # composer instead of submitting. A short pause makes Enter a keypress.
+    ENTER_DELAY_SECONDS = 0.5
 
     SHELL_COMMANDS = frozenset({"sh", "bash", "fish", "zsh", "dash", "ksh", "tcsh"})
     # `Frame._interactive_command` prefix: every agent pane runs as
     # `sh -c "unset NO_COLOR; <driver>; ...; exec $SHELL"`.
     WRAPPER_PREFIX = "unset NO_COLOR;"
 
-    def __init__(self, frame: Any, *, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        frame: Any,
+        *,
+        clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self.frame = frame
         self.clock = clock
+        self.sleep = sleep
 
     # -- text ------------------------------------------------------------
 
@@ -283,6 +294,7 @@ class AgentNudge:
             sent = self._tmux(["send-keys", "-l", "-t", pane_id, "--", text])
             if sent.returncode != 0:
                 return refuse("send_failed", (sent.stderr or "").strip() or None)
+            self.sleep(self.ENTER_DELAY_SECONDS)
             entered = self._tmux(["send-keys", "-t", pane_id, "Enter"])
             if entered.returncode != 0:
                 return refuse("enter_failed", (entered.stderr or "").strip() or None)

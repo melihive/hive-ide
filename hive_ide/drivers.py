@@ -73,6 +73,7 @@ class CommandDriver:
         name_argv: list[str] | None = None,
         capabilities: tuple[str, ...] = ("launch",),
         conversation_probe: str | None = None,
+        launch_flags: list[str] | None = None,
     ):
         self.id = driver_id
         self.label = label
@@ -83,6 +84,10 @@ class CommandDriver:
         self.name_argv = name_argv or []
         self.capabilities = capabilities
         self.conversation_probe = conversation_probe
+        # Flags every launch must carry, fresh or resumed. They go straight after
+        # the command (and after a resume subcommand) so they bind to the TUI, and
+        # are skipped when the configured command already has them.
+        self.launch_flags = list(launch_flags or [])
 
     def detect(self) -> DriverAvailability:
         executable = shutil.which(self.command[0])
@@ -91,16 +96,16 @@ class CommandDriver:
     def resolve(
         self, *, name: str, working_dir: str, conversation_reference: str | None
     ) -> dict[str, Any]:
-        launch = list(self.command)
+        launch = self._with_launch_flags(self.command)
         launch.extend(self._name_argv(name))
         if conversation_reference and self.resume_strategy == "conversation_id":
-            launch = list(self.resume_argv)
+            launch = self._with_launch_flags(self.resume_argv)
             if self.resume_cwd_flag:
                 launch.extend([self.resume_cwd_flag, working_dir])
             launch.append(conversation_reference)
             launch.extend(self._name_argv(name))
         elif conversation_reference and self.resume_strategy == "workspace_continue":
-            launch = list(self.resume_argv)
+            launch = self._with_launch_flags(self.resume_argv)
             launch.extend(self._name_argv(name))
         return {
             "id": self.id,
@@ -112,6 +117,10 @@ class CommandDriver:
             },
             "capabilities": list(self.capabilities),
         }
+
+    def _with_launch_flags(self, base: list[str]) -> list[str]:
+        missing = [flag for flag in self.launch_flags if flag not in base]
+        return [*base, *missing]
 
     def _name_argv(self, name: str) -> list[str]:
         clean = " ".join(name.split())
@@ -274,6 +283,13 @@ def bundled_drivers() -> dict[str, AgentDriver]:
             resume_cwd_flag="-C",
             capabilities=("launch", "resume", "status", "conversation_check"),
             conversation_probe="codex",
+            # By default every codex TUI attaches to one shared app-server daemon,
+            # and hooks run inside that daemon with the env of whichever pane
+            # started it — so every pane reports that pane's HIVE_IDE_SESSION_ID /
+            # TMUX_PANE. --no-daemon runs the pane's own server, so its hooks carry
+            # its own identity; `codex queue` still reaches it (shared queue db).
+            # Both `codex` and `codex resume` accept the flag (codex-cli 0.163).
+            launch_flags=["--no-daemon"],
         ),
         "antigravity": CommandDriver(
             "antigravity",
@@ -304,6 +320,9 @@ class DriverRegistry:
         command = config.get("command")
         if not isinstance(command, list) or not command or not all(isinstance(v, str) for v in command):
             raise UsageError(f"Declarative driver {driver_id!r} needs a non-empty command array.")
+        # A configured command that replaces a bundled driver keeps that driver's
+        # required launch flags (deduplicated against what it already carries).
+        replaced = self._drivers.get(driver_id)
         self._drivers[driver_id] = CommandDriver(
             driver_id,
             str(config.get("label") or driver_id),
@@ -311,6 +330,7 @@ class DriverRegistry:
             resume_strategy=str(config.get("resume_strategy") or "none"),
             resume_argv=list(config.get("resume_argv") or []),
             capabilities=tuple(config.get("capabilities") or ("launch",)),
+            launch_flags=list(getattr(replaced, "launch_flags", None) or []),
         )
 
     def get(self, driver_id: str) -> AgentDriver:
