@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.105] - 2026-10-22
+
 ### Fixed
 
 - `test_switching_windows_shows_the_right_order_and_never_blanks_the_pane` no
