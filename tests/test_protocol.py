@@ -6634,6 +6634,54 @@ def test_hook_refuses_a_new_conversation_started_outside_the_workspace(
     assert "codex" not in updated.get("agents", {}).get("resume_ids", {})
 
 
+def test_hook_keeps_a_new_conversation_started_in_the_sessions_working_dir(
+    tmp_path, monkeypatch
+):
+    """A workspace can host a session rooted outside it. Codex records the session's
+    working_dir as the rollout origin, so an origin under that working_dir is this
+    session's own conversation, not a misattributed one."""
+    workspace = tmp_path / "probe-workspace"
+    workspace.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    codex = bundled_drivers()["codex"]
+    record = store.create_session(
+        name="PROBE",
+        working_dir=repo,
+        source=_source(),
+        driver=codex.resolve(
+            name="PROBE", working_dir=str(repo), conversation_reference=None
+        ),
+    )
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+    monkeypatch.setattr(
+        "hive_ide.drivers.ConversationProbe.codex_origin",
+        staticmethod(lambda _reference: str(repo)),
+    )
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "codex",
+            '{"session_id":"probe-thread"}',
+        ]
+    ) == 0
+
+    status = store.read("status", record["id"])
+    assert status["conversation_reference"] == "probe-thread"
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["codex"] == "probe-thread"
+
+
 def test_hook_keeps_a_new_conversation_whose_origin_is_unknown(tmp_path, monkeypatch):
     """Unknown is not a verdict. A driver that records no origin — claude — never
     had the shared-daemon problem, so an unanswerable check must not refuse."""
