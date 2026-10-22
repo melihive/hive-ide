@@ -4,6 +4,17 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- A Codex turn that ends in an error (an API 400, a usage limit) no longer reads
+  as `working` forever. Codex runs no hook for a failed turn — no `Stop`, and its
+  hook events have no failure event — so the status left by `UserPromptSubmit`
+  never changed and anything holding work for an idle agent held it indefinitely.
+  The prompt hook now records Codex's `turn_id`, and status readers (`nudge`, the
+  sidebar) close that turn when Codex's own rollout records its end
+  (`task_complete`, which Codex also writes after an error, or `turn_aborted`).
+  A rollout that cannot be read is unknown and changes nothing.
+
 ## [1.0.103] - 2026-10-22
 
 ### Fixed

@@ -19,6 +19,15 @@ viewed `waiting` becomes). It is always recomputed from `turns`, never
 persisted, so another writer changing `state` can never leave a stale proof. Anything missing, malformed,
 reset or from another driver is NOT proof — unknown routes to "not idle".
 
+A Codex turn that ends in an ERROR (an API 400, a usage limit) runs no hook at
+all: codex has no failure hook event and skips `Stop`, so the status written by
+`UserPromptSubmit` would say `working` forever and every caller holding work
+for an idle agent would hold it indefinitely. `UserPromptSubmit` therefore
+records codex's `turn_id`, and `settle` closes that turn on read when codex's
+own rollout records its end (`task_complete`, which codex also writes after an
+error, or `turn_aborted`). The stored document is never rewritten by a reader:
+the next hook event replaces it as usual.
+
 Limitation: a `Stop` that ANOTHER hook blocks (decision "block") is invisible at
 its own arrival; hooks run side by side and none sees the others' verdicts. The
 agent then keeps working with no new `UserPromptSubmit`, so the counter alone
@@ -29,7 +38,7 @@ the screen, which proved unreliable across pane widths.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 
 class TurnSequence:
@@ -39,6 +48,16 @@ class TurnSequence:
     HARMLESS_NOTIFICATIONS = frozenset({"idle_prompt"})
     # `seen.py` acks a viewed `waiting` session to `idle`; both mean "not working".
     RESTING_STATES = frozenset({"waiting", "idle"})
+    # Not a hook event: the `last_event` of a turn `settle` closed from the
+    # driver's own record because no `Stop` ever arrived for it.
+    TURN_ENDED = "TurnEnded"
+    TURN_ID_MAX = 128
+
+    @staticmethod
+    def _turn_id(value: Any) -> str | None:
+        if isinstance(value, str) and 0 < len(value) <= TurnSequence.TURN_ID_MAX:
+            return value
+        return None
 
     @staticmethod
     def event_name(payload: dict[str, Any], requested_state: str) -> str | None:
@@ -77,6 +96,7 @@ class TurnSequence:
             return {
                 "driver": driver,
                 "turn": turns["turn"],
+                "turn_id": TurnSequence._turn_id(turns.get("turn_id")),
                 "stopped_turn": stopped
                 if isinstance(stopped, int) and not isinstance(stopped, bool)
                 else None,
@@ -91,6 +111,7 @@ class TurnSequence:
         return {
             "driver": driver,
             "turn": 0,
+            "turn_id": None,
             "stopped_turn": None,
             "stop_blocked": False,
             "last_event": None,
@@ -109,6 +130,9 @@ class TurnSequence:
         turns = TurnSequence.carried(previous, driver)
         if event == TurnSequence.PROMPT:
             turns["turn"] += 1
+            turns["turn_id"] = TurnSequence._turn_id(
+                payload.get("turn_id") if isinstance(payload, dict) else None
+            )
             turns["stop_blocked"] = False
         elif event == TurnSequence.STOP:
             turns["stopped_turn"] = turns["turn"]
@@ -161,3 +185,58 @@ class TurnSequence:
         if not isinstance(stopped, int) or isinstance(stopped, bool):
             return False
         return stopped == turn and turns.get("stop_blocked") is False
+
+    @staticmethod
+    def settle(
+        status: dict[str, Any] | None,
+        turn_ended: Callable[[str, str], bool | None] | None = None,
+    ) -> dict[str, Any] | None:
+        """`status` with a Codex turn that ended without a `Stop` closed.
+
+        Applies only to a `working` Codex status whose latest event is the
+        `UserPromptSubmit` that opened turn `turns.turn_id`. When codex's rollout
+        records that turn's end (`turn_ended` returns True), the result reads as
+        if a clean `Stop` had closed it: `waiting`, `stopped_turn == turn`, and
+        `last_event` `TurnEnded`. Anything else — another driver, no turn id, a
+        later event, a rollout that cannot be read (None) — returns `status`
+        unchanged: unknown is never proof the turn ended.
+
+        Pure apart from the probe; the caller's document is not mutated.
+        """
+        if not isinstance(status, dict) or status.get("state") != "working":
+            return status
+        if status.get("driver") != "codex":
+            return status
+        turns = status.get("turns")
+        if not isinstance(turns, dict) or turns.get("driver") != "codex":
+            return status
+        if turns.get("last_event") != TurnSequence.PROMPT:
+            return status
+        turn = turns.get("turn")
+        if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
+            return status
+        turn_id = TurnSequence._turn_id(turns.get("turn_id"))
+        reference = status.get("conversation_reference")
+        if turn_id is None or not isinstance(reference, str) or not reference:
+            return status
+        if turn_ended is None:
+            from .drivers import ConversationProbe
+
+            turn_ended = ConversationProbe.codex_turn_ended
+        try:
+            ended = turn_ended(reference, turn_id)
+        except Exception:  # noqa: BLE001 — a probe failure is "unknown", not a verdict
+            return status
+        if ended is not True:
+            return status
+        return {
+            **status,
+            "state": "waiting",
+            "settled_by": "codex_rollout",
+            "turns": {
+                **turns,
+                "stopped_turn": turn,
+                "stop_blocked": False,
+                "last_event": TurnSequence.TURN_ENDED,
+            },
+        }

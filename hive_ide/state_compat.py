@@ -12,6 +12,7 @@ from pathlib import Path
 from . import SCHEMA_VERSION
 from .agents import AgentResumeState
 from .store import StateStore, utc_now
+from .turns import TurnSequence
 
 
 def _version_tuple(value: object) -> tuple[int, ...]:
@@ -109,7 +110,9 @@ class StateIO:
         key = record.get("workspace_key") or record.get("repo")
         if not key or not record.get("id"):
             return None
-        status = StateIO._store(state_home, key).read("status", record["id"])
+        status = TurnSequence.settle(
+            StateIO._store(state_home, key).read("status", record["id"])
+        )
         if status is None:
             return None
         return {

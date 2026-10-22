@@ -32,7 +32,9 @@ process table that cannot be read is refused.
   is shown before any hook runs, and nothing else would reveal it.
 - **Codex** treats typing while it works as interrupting its turn. Without
   `force` it is typed only on positive proof of idle: the latest `Stop` closed
-  the latest turn and was not a stop-hook continuation. `force` skips only that
+  the latest turn and was not a stop-hook continuation — or, for a turn that
+  ended in an error (codex runs no hook then), codex's own rollout records the
+  end of the turn the last prompt opened (`TurnSequence.settle`). `force` skips only that
   check, and only an explicit caller passes it.
 - Any other driver is unsupported.
 
@@ -203,7 +205,8 @@ class AgentNudge:
 
     def _status(self, session_id: str) -> dict[str, Any] | None:
         try:
-            return self.frame.store.read("status", session_id)
+            # A codex turn that ended in an error left `working` (no Stop hook).
+            return TurnSequence.settle(self.frame.store.read("status", session_id))
         except Exception:
             return None
 
