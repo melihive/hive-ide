@@ -4,6 +4,18 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- `nudge` and `driver-rename` decide from hook state and never read the screen.
+  Screen checks failed on narrow (down to one column) or hidden panes and refused
+  safe sessions. Claude is allowed working or idle, refused as `claude_dialog_open`
+  while a dialog-type Notification is its latest hook event and as `state_unknown`
+  before any hook has reported; Codex still needs hook idle proof (`codex_not_idle`)
+  unless `--force`. A recent human keystroke refuses as `human_recent`; an
+  unobservable client list no longer refuses when hook state proved safety (it still
+  does for a forced Codex nudge). Results carry `basis: "hooks"`. Known limit: a
+  human draft left in the composer more than 60 s ago is not detected.
+
 ## [1.0.99] - 2026-10-22
 
 ### Fixed

@@ -23,8 +23,8 @@ Limitation: a `Stop` that ANOTHER hook blocks (decision "block") is invisible at
 its own arrival; hooks run side by side and none sees the others' verdicts. The
 agent then keeps working with no new `UserPromptSubmit`, so the counter alone
 would call it idle. The next `Stop` in that chain carries `stop_hook_active`
-(treated as blocked), and callers that type into a pane must also check the pane
-itself (see `nudge.py`) — the counter is necessary, never sufficient.
+(treated as blocked). `nudge.py` accepts that residual window rather than read
+the screen, which proved unreliable across pane widths.
 """
 
 from __future__ import annotations
@@ -122,6 +122,16 @@ class TurnSequence:
         )
         turns["observed_at"] = observed_at
         return turns
+
+    @staticmethod
+    def observed(status: dict[str, Any] | None, driver: str) -> bool:
+        """Has any hook of `driver` reported for this session?
+
+        False before the first hook runs (e.g. while Claude shows its
+        folder-trust prompt) and for state left by another driver.
+        """
+        turns = (status or {}).get("turns")
+        return isinstance(turns, dict) and turns.get("driver") == driver
 
     @staticmethod
     def attention_pending(status: dict[str, Any] | None) -> bool:

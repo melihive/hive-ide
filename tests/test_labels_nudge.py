@@ -1,4 +1,9 @@
-"""Session labels, hook turn sequencing, nudge, and the driver-rename guard."""
+"""Session labels, hook turn sequencing, nudge, and the driver-rename guard.
+
+The nudge gate decides from hook state, the process table and tmux client
+activity — never from the screen. Pane widths and hidden windows broke every
+screen check; tests that use a narrow pane assert `capture-pane` is never called.
+"""
 
 from __future__ import annotations
 
@@ -27,89 +32,8 @@ from hive_ide.turns import TurnSequence
 
 
 NOW = 1_800_000_000
-IDLE_CODEX_SCREEN = [
-    "• Done. The tests pass.",
-    "",
-    "› Ask Codex to do anything",
-    "",
-    "  ? for shortcuts                                   100% context left",
-]
-WORKING_CODEX_SCREEN = [
-    "• Running the tests",
-    "",
-    "• Working (12s • esc to interrupt)",
-    "",
-    "› Ask Codex to do anything",
-    "",
-    "  tab to queue message                              90% context left",
-]
-APPROVAL_CODEX_SCREEN = [
-    "Would you like to run the following command?",
-    "  $ pnpm test",
-    "› 1. Yes, proceed",
-    "  2. No, and tell Codex what to do differently",
-    "  Press enter to confirm or esc to cancel",
-]
-RULE = "─" * 40
-IDLE_CLAUDE_SCREEN = ["⏺ Done.", "", RULE, "> ", RULE, "  ? for shortcuts"]
-WORKING_CLAUDE_SCREEN = [
-    "> earlier prompt echoed in the transcript",
-    "✻ Working… (12s · esc to interrupt)",
-    "",
-    RULE,
-    ">",
-    RULE,
-    "  ? for shortcuts",
-]
-BOX_CLAUDE_SCREEN = ["⏺ Done.", "╭" + "─" * 30 + "╮", "│ >                            │", "╰" + "─" * 30 + "╯"]
-# Sanitised from a live Claude Code 2.1 pane (95 cols): the session name is
-# inset in the top rule, the prompt glyph is followed by a no-break space, and a
-# mode footer sits under the bottom rule.
-LABELLED_CLAUDE_SCREEN = [
-    "  The details are in the log.",
-    "",
-    "✻ Crunched for 6m 52s · done 10:42",
-    "              new task? /clear to save 154.2k tokens · ✔ Update installed · /restart to apply",
-    "─" * 78 + " DC WEB DEV ─",
-    "❯\u00a0",
-    "─" * 95,
-    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
-]
-LABELLED_DRAFT_CLAUDE_SCREEN = [*LABELLED_CLAUDE_SCREEN[:5], "❯ half-typed human draft", *LABELLED_CLAUDE_SCREEN[6:]]
-HINT_CLAUDE_SCREEN = [RULE, '> Try "write a test for app.py"', RULE]
-DRAFT_CLAUDE_SCREEN = ["⏺ Done.", RULE, "> half-typed human draft", RULE, "  ? for shortcuts"]
-MULTILINE_DRAFT_CLAUDE_SCREEN = ["⏺ Done.", RULE, ">", "  second line of a draft", RULE]
-UNRECOGNIZED_CLAUDE_SCREEN = ["⏺ Done.", "> something without rules"]
-PERMISSION_CLAUDE_SCREEN = [
-    "Bash command",
-    "  pnpm test",
-    "Do you want to proceed?",
-    "❯ 1. Yes",
-    "  2. Yes, and don't ask again for pnpm commands in this project",
-    "  3. No, and tell Claude what to do differently (esc)",
-]
-PLAN_CLAUDE_SCREEN = [
-    "Ready to code?",
-    "Here is Claude's plan:",
-    "  1. Add the guard",
-    "Claude has written up a plan and is ready to execute. Would you like to proceed?",
-    "❯ 1. Yes, and auto-accept edits",
-    "  2. Yes, and manually approve edits",
-    "  3. No, keep planning",
-]
-QUESTION_CLAUDE_SCREEN = [
-    "Which database?",
-    "❯ 1. Postgres",
-    "  2. SQLite",
-    "↑/↓ to navigate · Enter to select · Esc to cancel",
-]
-DRAFT_CODEX_SCREEN = [
-    "• Done.",
-    "",
-    "› half-typed human draft",
-    "",
-    "  ? for shortcuts                                   100% context left",
-]
+# A one-column pane: what `capture-pane` returns there. The gate must never read it.
+ONE_COLUMN_SCREEN = ["❯", "─", "T", "r", "y", "─", "⏵"]
 
 
 def _source() -> dict:
@@ -428,6 +352,32 @@ def test_idle_proof_rejects_missing_or_malformed_state():
 # -- nudge ------------------------------------------------------------------
 
 
+def _read_screen(fake: FakeTmux) -> bool:
+    return any(call[0] == "capture-pane" for call in fake.calls)
+
+
+def _claude_prompt(store, record, monkeypatch, tmp_path):
+    return _hook(store, record, monkeypatch, tmp_path, "working",
+                 {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"}, driver="claude")
+
+
+def _claude_stop(store, record, monkeypatch, tmp_path):
+    return _hook(store, record, monkeypatch, tmp_path, "waiting",
+                 {"hook_event_name": "Stop", "session_id": "c-1"}, driver="claude")
+
+
+def _claude_notification(store, record, monkeypatch, tmp_path, kind):
+    payload = {"hook_event_name": "Notification", "session_id": "c-1", "message": "m"}
+    if kind:
+        payload["notification_type"] = kind
+    return _hook(store, record, monkeypatch, tmp_path, "waiting", payload, driver="claude")
+
+
+def _claude_idle(store, record, monkeypatch, tmp_path):
+    _claude_prompt(store, record, monkeypatch, tmp_path)
+    return _claude_stop(store, record, monkeypatch, tmp_path)
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -455,15 +405,47 @@ def test_nudge_refuses_unsafe_text_without_touching_tmux(tmp_path, monkeypatch, 
     assert fake.calls == []
 
 
+def test_nudge_claude_idle_in_a_one_column_pane_is_sent(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    _claude_idle(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude", screen=ONE_COLUMN_SCREEN)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result == {
+        "session_id": record["id"],
+        "driver": "claude",
+        "forced": False,
+        "sent": True,
+        "basis": "hooks",
+        "reason": "claude_idle",
+        "pane_id": "%2",
+    }
+    assert not _read_screen(fake)
+    assert fake.sent == [
+        ["send-keys", "-l", "-t", "%2", "--", "wake up"],
+        ["send-keys", "-t", "%2", "Enter"],
+    ]
+
+
+def test_nudge_claude_idle_in_a_hidden_window_is_sent(tmp_path, monkeypatch):
+    # the only attached client is on another pane: the window is shown nowhere
+    store, record = _session(tmp_path, "claude")
+    _claude_idle(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude", screen=ONE_COLUMN_SCREEN, clients=f"{NOW - 1}\t%1\n")
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["sent"] is True
+    assert result["reason"] == "claude_idle"
+    assert not _read_screen(fake)
+
+
 def test_nudge_claude_is_allowed_while_working(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
-    _hook(store, record, monkeypatch, tmp_path, "working",
-          {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"}, driver="claude")
-    fake = FakeTmux(command="claude", screen=WORKING_CLAUDE_SCREEN)
+    _claude_prompt(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude")
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
         record, "Relay: unread in agent.abc. Run ./hive relay read."
     )
     assert result["sent"] is True
+    assert result["reason"] == "claude_queues_input"
     assert fake.sent == [
         ["send-keys", "-l", "-t", "%2", "--",
          "Relay: unread in agent.abc. Run ./hive relay read."],
@@ -471,56 +453,106 @@ def test_nudge_claude_is_allowed_while_working(tmp_path, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("kind", ["permission_prompt", "elicitation_dialog", None])
+def test_nudge_claude_refuses_while_a_dialog_notification_is_latest(tmp_path, monkeypatch, kind):
+    store, record = _session(tmp_path, "claude")
+    _claude_prompt(store, record, monkeypatch, tmp_path)
+    _claude_notification(store, record, monkeypatch, tmp_path, kind)
+    fake = FakeTmux(command="claude", screen=ONE_COLUMN_SCREEN)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["sent"] is False
+    assert result["reason"] == "claude_dialog_open"
+    assert result["basis"] == "hooks"
+    assert fake.sent == []
+    assert not _read_screen(fake)
+    # the next Stop is newer than the dialog: the dialog has closed
+    _claude_stop(store, record, monkeypatch, tmp_path)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["sent"] is True
+
+
+def test_nudge_claude_dialog_after_a_stop_is_refused(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    _claude_idle(store, record, monkeypatch, tmp_path)
+    _claude_notification(store, record, monkeypatch, tmp_path, "permission_prompt")
+    fake = FakeTmux(command="claude")
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "claude_dialog_open"
+    assert fake.sent == []
+
+
+def test_nudge_claude_idle_reminder_notification_is_harmless(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    _claude_notification(store, record, monkeypatch, tmp_path, "idle_prompt")
+    fake = FakeTmux(command="claude")
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["sent"] is True
+
+
+def test_nudge_claude_without_hook_state_is_refused(tmp_path, monkeypatch):
+    # no hook has run yet — e.g. the folder-trust prompt; the width is irrelevant
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(command="claude", screen=ONE_COLUMN_SCREEN)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
+        record, "wake up", force=True
+    )
+    assert result["reason"] == "state_unknown"
+    assert fake.sent == []
+    assert not _read_screen(fake)
+
+
+def test_nudge_claude_ignores_another_drivers_hook_state(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    _codex_turn(store, record, monkeypatch, tmp_path)  # left by a codex driver
+    fake = FakeTmux(command="claude")
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "state_unknown"
+    assert fake.sent == []
+
+
 def test_nudge_codex_working_is_refused(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _hook(store, record, monkeypatch, tmp_path, "working",
           {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"})
-    fake = FakeTmux(screen=WORKING_CODEX_SCREEN)
+    fake = FakeTmux()
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result == {
         "session_id": record["id"],
         "driver": "codex",
         "forced": False,
         "sent": False,
-        "reason": "codex_not_idle_proven",
+        "basis": "hooks",
+        "reason": "codex_not_idle",
     }
     assert fake.sent == []
 
 
-def test_nudge_codex_unknown_state_is_refused(tmp_path, monkeypatch):
+@pytest.mark.parametrize("screen", [None, ONE_COLUMN_SCREEN])
+def test_nudge_codex_unknown_state_is_refused_at_any_width(tmp_path, monkeypatch, screen):
     store, record = _session(tmp_path)  # no hook event ever arrived
-    fake = FakeTmux(screen=IDLE_CODEX_SCREEN)
+    fake = FakeTmux(screen=screen)
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["reason"] == "codex_not_idle_proven"
+    assert result["reason"] == "codex_not_idle"
     assert fake.sent == []
 
 
 def test_nudge_codex_blocked_stop_is_refused(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _codex_turn(store, record, monkeypatch, tmp_path, stop_payload={"stop_hook_active": True})
-    fake = FakeTmux(screen=IDLE_CODEX_SCREEN)
+    fake = FakeTmux()
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["reason"] == "codex_not_idle_proven"
+    assert result["reason"] == "codex_not_idle"
     assert fake.sent == []
 
 
-@pytest.mark.parametrize("screen", [WORKING_CODEX_SCREEN, APPROVAL_CODEX_SCREEN, DRAFT_CODEX_SCREEN, []])
-def test_nudge_codex_idle_proof_still_needs_the_prompt_signature(tmp_path, monkeypatch, screen):
+def test_nudge_codex_idle_proven_in_a_one_column_pane_is_sent(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _codex_turn(store, record, monkeypatch, tmp_path)
-    fake = FakeTmux(screen=screen)
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["reason"] == "codex_prompt_not_recognized"
-    assert fake.sent == []
-
-
-def test_nudge_codex_idle_proven_with_signature_is_sent(tmp_path, monkeypatch):
-    store, record = _session(tmp_path)
-    _codex_turn(store, record, monkeypatch, tmp_path)
-    fake = FakeTmux(screen=IDLE_CODEX_SCREEN)
+    fake = FakeTmux(screen=ONE_COLUMN_SCREEN)
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result["sent"] is True
     assert result["reason"] == "codex_idle_proven"
+    assert not _read_screen(fake)
     assert fake.sent == [
         ["send-keys", "-l", "-t", "%2", "--", "wake up"],
         ["send-keys", "-t", "%2", "Enter"],
@@ -531,7 +563,7 @@ def test_nudge_codex_forced_is_sent_while_working(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _hook(store, record, monkeypatch, tmp_path, "working",
           {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"})
-    fake = FakeTmux(screen=WORKING_CODEX_SCREEN)
+    fake = FakeTmux()
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
         record, "wake up", force=True
     )
@@ -542,30 +574,57 @@ def test_nudge_codex_forced_is_sent_while_working(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("driver_id", ["claude", "codex"])
-def test_nudge_refuses_recent_human_keystroke_even_when_forced(tmp_path, monkeypatch, driver_id):
+def test_nudge_refuses_recent_human_keystroke(tmp_path, monkeypatch, driver_id):
     store, record = _session(tmp_path, driver_id)
+    if driver_id == "claude":
+        _claude_idle(store, record, monkeypatch, tmp_path)
+    else:
+        _codex_turn(store, record, monkeypatch, tmp_path)
     fake = FakeTmux(command=driver_id, clients=f"{NOW - 10}\t%2\n")
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "human_recent"
+    assert fake.sent == []
+
+
+def test_nudge_refuses_recent_human_keystroke_even_when_forced(tmp_path, monkeypatch):
+    store, record = _session(tmp_path)
+    fake = FakeTmux(clients=f"{NOW - 10}\t%2\n")
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
         record, "wake up", force=True
     )
-    assert result["reason"] == "human_active"
+    assert result["reason"] == "human_recent"
     assert fake.sent == []
 
 
 def test_nudge_ignores_old_or_other_pane_client_activity(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(
-        command="claude", screen=IDLE_CLAUDE_SCREEN,
-        clients=f"{NOW - 61}\t%2\n{NOW - 1}\t%1\n",
-    )
+    _claude_idle(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude", clients=f"{NOW - 61}\t%2\n{NOW - 1}\t%1\n")
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result["sent"] is True
 
 
-def test_nudge_refuses_when_client_activity_is_unobservable(tmp_path, monkeypatch):
-    store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="claude", clients_rc=1)
+@pytest.mark.parametrize("driver_id", ["claude", "codex"])
+def test_nudge_unobservable_clients_do_not_refuse_when_hooks_prove_safety(
+    tmp_path, monkeypatch, driver_id
+):
+    store, record = _session(tmp_path, driver_id)
+    if driver_id == "claude":
+        _claude_idle(store, record, monkeypatch, tmp_path)
+    else:
+        _codex_turn(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command=driver_id, clients_rc=1)
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["sent"] is True
+
+
+def test_nudge_forced_codex_refuses_unobservable_clients(tmp_path, monkeypatch):
+    # forced = no hook proof, so unknown human input is not "no"
+    store, record = _session(tmp_path)
+    fake = FakeTmux(clients_rc=1)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
+        record, "wake up", force=True
+    )
     assert result["reason"] == "human_activity_unknown"
     assert fake.sent == []
 
@@ -588,8 +647,9 @@ WRAPPER_ARGS = (
 
 def test_nudge_sends_to_claude_running_under_the_pane_wrapper(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
+    _claude_prompt(store, record, monkeypatch, tmp_path)
     fake = FakeTmux(
-        command="sh", screen=IDLE_CLAUDE_SCREEN,
+        command="sh",
         processes=[("1", "4100", WRAPPER_ARGS), ("4100", "4109", "claude --resume c-1")],
     )
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
@@ -600,7 +660,7 @@ def test_nudge_sends_to_claude_running_under_the_pane_wrapper(tmp_path, monkeypa
 def test_nudge_refuses_the_pane_wrapper_with_no_driver_child(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
     fake = FakeTmux(
-        command="sh", screen=IDLE_CLAUDE_SCREEN,
+        command="sh",
         processes=[("1", "4100", WRAPPER_ARGS), ("4100", "4109", "bash -c true")],
     )
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
@@ -613,7 +673,7 @@ def test_nudge_refuses_a_login_shell_even_with_a_child(tmp_path, monkeypatch):
     # from that prompt is not the agent
     store, record = _session(tmp_path, "claude")
     fake = FakeTmux(
-        command="fish", screen=IDLE_CLAUDE_SCREEN,
+        command="fish",
         processes=[("1", "4100", "-fish"), ("4100", "4109", "claude")],
     )
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
@@ -623,7 +683,7 @@ def test_nudge_refuses_a_login_shell_even_with_a_child(tmp_path, monkeypatch):
 
 def test_nudge_refuses_when_the_process_table_is_unreadable(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="sh", screen=IDLE_CLAUDE_SCREEN, ps_ok=False)
+    fake = FakeTmux(command="sh", ps_ok=False)
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result["reason"] == "pane_unobservable"
     assert fake.sent == []
@@ -645,9 +705,19 @@ def test_ps_failure_and_timeout_read_as_unobservable(monkeypatch):
 
 def test_nudge_refuses_a_pane_in_copy_mode(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
+    _claude_idle(store, record, monkeypatch, tmp_path)
     fake = FakeTmux(command="claude", in_mode="1")
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result["reason"] == "pane_in_mode"
+    assert fake.sent == []
+
+
+def test_nudge_refuses_a_dead_pane(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    _claude_idle(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude", dead="1")
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "agent_not_running"
     assert fake.sent == []
 
 
@@ -677,27 +747,16 @@ def test_driver_rename_refuses_codex_mid_turn(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _hook(store, record, monkeypatch, tmp_path, "working",
           {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"})
-    fake = FakeTmux(screen=WORKING_CODEX_SCREEN)
-    with pytest.raises(UsageError, match="codex_not_idle_proven"):
+    fake = FakeTmux()
+    with pytest.raises(UsageError, match="codex_not_idle"):
         _frame(store, monkeypatch, fake).driver_rename(record)
-    assert fake.sent == []
-
-
-def test_driver_rename_refuses_codex_whose_screen_shows_a_turn_running(tmp_path, monkeypatch):
-    # Hook says idle (e.g. a Stop another hook blocked), the screen says working.
-    store, record = _session(tmp_path)
-    _codex_turn(store, record, monkeypatch, tmp_path)
-    fake = FakeTmux(screen=WORKING_CODEX_SCREEN)
-    with pytest.raises(UsageError, match="codex_prompt_not_recognized"):
-        _frame(store, monkeypatch, fake).driver_rename(record)
-    assert any(call[0] == "capture-pane" for call in fake.calls)
     assert fake.sent == []
 
 
 def test_driver_rename_sends_to_idle_proven_codex(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _codex_turn(store, record, monkeypatch, tmp_path)
-    fake = FakeTmux(screen=IDLE_CODEX_SCREEN)
+    fake = FakeTmux(screen=ONE_COLUMN_SCREEN)
     result = _frame(store, monkeypatch, fake).driver_rename(record)
     assert result["sent"] == "/rename"
     assert fake.sent == [
@@ -706,23 +765,24 @@ def test_driver_rename_sends_to_idle_proven_codex(tmp_path, monkeypatch):
     ]
 
 
-def test_driver_rename_claude_while_working_with_an_empty_composer(tmp_path, monkeypatch):
+def test_driver_rename_claude_while_working(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
-    _hook(store, record, monkeypatch, tmp_path, "working",
-          {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"}, driver="claude")
-    fake = FakeTmux(command="claude", screen=WORKING_CLAUDE_SCREEN, clients=f"{NOW}\t%2\n")
+    _claude_prompt(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude", clients=f"{NOW}\t%2\n")
     _frame(store, monkeypatch, fake).driver_rename(record)
-    # no list-clients: the requester of a rename is the human at the keyboard
-    assert [call[0] for call in fake.calls] == [
-        "display-message", "capture-pane", "send-keys", "send-keys",
-    ]
+    # no list-clients (the requester of a rename is the human at the keyboard)
+    # and no capture-pane
+    assert [call[0] for call in fake.calls] == ["display-message", "send-keys", "send-keys"]
 
 
-@pytest.mark.parametrize("screen", [PERMISSION_CLAUDE_SCREEN, PLAN_CLAUDE_SCREEN, DRAFT_CLAUDE_SCREEN])
-def test_driver_rename_refuses_claude_dialog_or_draft(tmp_path, monkeypatch, screen):
+@pytest.mark.parametrize("dialog", [True, False])
+def test_driver_rename_refuses_claude_dialog_or_unknown_state(tmp_path, monkeypatch, dialog):
     store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="claude", screen=screen)
-    with pytest.raises(UsageError, match="Claude is not ready"):
+    if dialog:
+        _claude_notification(store, record, monkeypatch, tmp_path, "permission_prompt")
+    fake = FakeTmux(command="claude")
+    reason = "claude_dialog_open" if dialog else "state_unknown"
+    with pytest.raises(UsageError, match=f"Claude is not ready.*{reason}"):
         _frame(store, monkeypatch, fake).driver_rename(record, force=True)
     assert fake.sent == []
 
@@ -742,24 +802,13 @@ def test_driver_rename_applies_the_pane_gate_even_when_forced(
     tmp_path, monkeypatch, driver_id, fake_kwargs, reason
 ):
     store, record = _session(tmp_path, driver_id)
-    fake = FakeTmux(**{"command": driver_id, "screen": IDLE_CLAUDE_SCREEN, **fake_kwargs})
+    fake = FakeTmux(**{"command": driver_id, **fake_kwargs})
     with pytest.raises(UsageError, match=reason):
         _frame(store, monkeypatch, fake).driver_rename(record, force=True)
     assert fake.sent == []
 
 
-# -- signature unit -----------------------------------------------------------
-
-
-def test_codex_signature_requires_placeholder_near_the_bottom():
-    assert AgentNudge.codex_prompt_signature(IDLE_CODEX_SCREEN) is True
-    assert AgentNudge.codex_prompt_signature(
-        ["› Ask a follow-up question", "  ? for shortcuts"]
-    ) is True
-    far = ["› Ask Codex to do anything", *[f"output {i}" for i in range(20)]]
-    assert AgentNudge.codex_prompt_signature(far) is False
-    assert AgentNudge.codex_prompt_signature(None) is False
-    assert AgentNudge.codex_prompt_signature(["", "   "]) is False
+# -- hook state ---------------------------------------------------------------
 
 
 def test_codex_idle_proof_survives_the_window_being_viewed(tmp_path, monkeypatch):
@@ -767,10 +816,19 @@ def test_codex_idle_proof_survives_the_window_being_viewed(tmp_path, monkeypatch
     _codex_turn(store, record, monkeypatch, tmp_path)
     assert IdeSeen.mark(store.home, store.workspace_key, record["id"]) is True
     assert store.read("status", record["id"])["state"] == "idle"
-    fake = FakeTmux(screen=IDLE_CODEX_SCREEN)
+    fake = FakeTmux()
     result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert result["sent"] is True
     assert result["reason"] == "codex_idle_proven"
+
+
+def test_hook_state_is_observed_only_for_its_own_driver(tmp_path, monkeypatch):
+    store, record = _session(tmp_path)
+    assert TurnSequence.observed(None, "codex") is False
+    status = _codex_turn(store, record, monkeypatch, tmp_path)
+    assert TurnSequence.observed(status, "codex") is True
+    assert TurnSequence.observed(status, "claude") is False
+    assert TurnSequence.observed({"turns": "garbage"}, "codex") is False
 
 
 def test_status_event_carries_turns_but_never_proves_idle_for_working(tmp_path, monkeypatch, capsys):
@@ -799,82 +857,6 @@ def test_state_compat_update_keeps_turns_and_fails_safe(tmp_path, monkeypatch):
     assert TurnSequence.idle_proven(status) is False
 
 
-# -- Claude dialog / draft guard ------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("screen", "reason"),
-    [
-        (PERMISSION_CLAUDE_SCREEN, "claude_dialog_open"),
-        (PLAN_CLAUDE_SCREEN, "claude_dialog_open"),
-        (QUESTION_CLAUDE_SCREEN, "claude_dialog_open"),
-        (DRAFT_CLAUDE_SCREEN, "claude_draft_present"),
-        (MULTILINE_DRAFT_CLAUDE_SCREEN, "claude_draft_present"),
-        (LABELLED_DRAFT_CLAUDE_SCREEN, "claude_draft_present"),
-        ([*LABELLED_CLAUDE_SCREEN[:4], *PERMISSION_CLAUDE_SCREEN], "claude_dialog_open"),
-        (UNRECOGNIZED_CLAUDE_SCREEN, "claude_composer_not_recognized"),
-        (LABELLED_CLAUDE_SCREEN[:6], "claude_composer_not_recognized"),
-        ([], "claude_composer_not_recognized"),
-    ],
-)
-def test_nudge_claude_refuses_dialogs_drafts_and_unknown_screens_even_forced(
-    tmp_path, monkeypatch, screen, reason
-):
-    store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="claude", screen=screen)
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
-        record, "wake up", force=True
-    )
-    assert result["reason"] == reason
-    assert fake.sent == []
-
-
-@pytest.mark.parametrize(
-    "screen", [IDLE_CLAUDE_SCREEN, BOX_CLAUDE_SCREEN, HINT_CLAUDE_SCREEN, LABELLED_CLAUDE_SCREEN]
-)
-def test_nudge_claude_empty_composer_styles_are_sent(tmp_path, monkeypatch, screen):
-    store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="claude", screen=screen)
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["sent"] is True
-
-
-@pytest.mark.parametrize("kind", ["permission_prompt", "elicitation_dialog", None])
-def test_nudge_claude_refuses_while_a_dialog_notification_is_latest(tmp_path, monkeypatch, kind):
-    store, record = _session(tmp_path, "claude")
-    _hook(store, record, monkeypatch, tmp_path, "working",
-          {"hook_event_name": "UserPromptSubmit", "session_id": "c-1"}, driver="claude")
-    payload = {"hook_event_name": "Notification", "session_id": "c-1", "message": "m"}
-    if kind:
-        payload["notification_type"] = kind
-    _hook(store, record, monkeypatch, tmp_path, "waiting", payload, driver="claude")
-    fake = FakeTmux(command="claude", screen=IDLE_CLAUDE_SCREEN)  # screen looks fine
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["reason"] == "claude_notification_pending"
-    assert fake.sent == []
-    _hook(store, record, monkeypatch, tmp_path, "waiting",
-          {"hook_event_name": "Stop", "session_id": "c-1"}, driver="claude")
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["sent"] is True
-
-
-def test_nudge_claude_idle_reminder_notification_is_harmless(tmp_path, monkeypatch):
-    store, record = _session(tmp_path, "claude")
-    _hook(store, record, monkeypatch, tmp_path, "waiting",
-          {"hook_event_name": "Notification", "session_id": "c-1",
-           "notification_type": "idle_prompt"}, driver="claude")
-    fake = FakeTmux(command="claude", screen=IDLE_CLAUDE_SCREEN)
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["sent"] is True
-
-
-def test_nudge_refuses_a_dead_pane(tmp_path, monkeypatch):
-    store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="claude", dead="1", screen=IDLE_CLAUDE_SCREEN)
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
-    assert result["reason"] == "agent_not_running"
-    assert fake.sent == []
-
 
 # -- timeouts -----------------------------------------------------------------
 
@@ -882,7 +864,7 @@ def test_nudge_refuses_a_dead_pane(tmp_path, monkeypatch):
 def test_every_nudge_tmux_call_carries_a_timeout(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _codex_turn(store, record, monkeypatch, tmp_path)
-    fake = FakeTmux(screen=IDLE_CODEX_SCREEN)
+    fake = FakeTmux()
     AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
     assert fake.calls and all(timeout == AgentNudge.TMUX_TIMEOUT for timeout in fake.timeouts)
 
@@ -984,9 +966,10 @@ def test_hook_process_waits_for_a_label_write_and_keeps_it(tmp_path):
 
 def test_a_timed_out_rename_fails_clearly_and_releases_the_lock(tmp_path, monkeypatch, capsys):
     store, record = _session(tmp_path, "claude")
+    _claude_prompt(store, record, monkeypatch, tmp_path)
     frame = Frame(store)
     monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
-    fake = FakeTmux(command="claude", screen=IDLE_CLAUDE_SCREEN)
+    fake = FakeTmux(command="claude")
     timeouts = []
 
     def tmux(args, **kwargs):
@@ -1011,7 +994,8 @@ def test_a_timed_out_rename_fails_clearly_and_releases_the_lock(tmp_path, monkey
 
 def test_rename_send_keys_carry_the_timeout(tmp_path, monkeypatch):
     store, record = _session(tmp_path, "claude")
-    fake = FakeTmux(command="claude", screen=IDLE_CLAUDE_SCREEN)
+    _claude_prompt(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux(command="claude")
     _frame(store, monkeypatch, fake).driver_rename(record)
     sends = [t for call, t in zip(fake.calls, fake.timeouts) if call[0] == "send-keys"]
     assert sends == [AgentNudge.TMUX_TIMEOUT, AgentNudge.TMUX_TIMEOUT]

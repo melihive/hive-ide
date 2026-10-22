@@ -8,7 +8,11 @@ could read as a flag). The text is also passed after `--`, so tmux never parses
 it as options. Integrations decide WHEN to nudge and WHAT the line says; this
 module only decides whether typing into the pane right now is safe.
 
-Two gates, shared by `nudge` and `Frame.driver_rename`:
+Two gates, shared by `nudge` and `Frame.driver_rename`. Neither reads the
+screen: the user resizes and hides panes constantly (a pane can be one column
+wide, or its window shown on no client), and every width variant of a screen
+check needed another regex fix and still refused panes that were safe. Safety is
+decided from what the process table, tmux and the agent's own hooks report.
 
 **Pane gate** (every driver, never bypassed by `force`): the agent pane is
 observable, alive, not a shell left behind after the agent exited (a typed line
@@ -16,34 +20,35 @@ observable, alive, not a shell left behind after the agent exited (a typed line
 interpret the keys). tmux names the pane's process-group leader, and hive-ide
 runs every driver as a child of an `sh -c` wrapper, so a shell there is only
 "no agent" when it is not that wrapper or the wrapper has no non-shell child; a
-process table that cannot be read is refused. `nudge` additionally refuses when a human keystroke in that
-pane in the last 60 s is detectable; `driver_rename` skips that check because
-the human who just asked for the rename would always trip it.
+process table that cannot be read is refused.
 
-tmux exposes no per-PANE input time. It exposes `#{client_activity}`, the last
-input time of each attached CLIENT, and each client's current pane. So the check
-is: any client whose current pane is the target pane and whose last input is
-< 60 s old (attaching also stamps it). It cannot see a human who typed a draft
-and then moved focus elsewhere — the composer checks below cover that. If the
-clients cannot be listed the answer is unknown and the nudge is refused.
+**Driver gate** — hook state (`turns.TurnSequence`) is authoritative:
 
-**Driver gate**:
-
-- **Claude** queues text typed while it works, so no turn state is required.
-  But Enter on a permission / plan-approval / question dialog picks the
-  highlighted option, and typed text merges into a human's draft. So Claude is
-  refused when its latest hook event is a Notification other than the idle
-  reminder, when its bottom rows show a dialog, and unless its composer is
-  recognised AND empty. A composer that cannot be recognised is refused.
+- **Claude** queues text typed while it works, so an open turn and an ended one
+  are both allowed. Enter on a permission / plan-approval / question dialog picks
+  the highlighted option, so Claude is refused (`claude_dialog_open`) while its
+  latest hook event is a Notification other than the idle reminder. A session
+  with no hook state at all is refused (`state_unknown`): the folder-trust prompt
+  is shown before any hook runs, and nothing else would reveal it.
 - **Codex** treats typing while it works as interrupting its turn. Without
-  `force` it is typed only on positive proof of idle: the hook turn sequence
-  says the latest `Stop` closed the latest turn (`turns.TurnSequence`), AND the
-  pane's bottom rows show Codex's empty-composer signature with no working
-  indicator or dialog. `force` skips only these two Codex idle checks.
+  `force` it is typed only on positive proof of idle: the latest `Stop` closed
+  the latest turn and was not a stop-hook continuation. `force` skips only that
+  check, and only an explicit caller passes it.
 - Any other driver is unsupported.
 
-Screen signatures are English strings from specific CLI versions (Claude Code
-2.1, codex-cli 0.160). A reworded UI makes the checks refuse, never send.
+**Human input** (`nudge` only; `driver_rename` skips it because the human who
+just asked for the rename would always trip it). tmux exposes no per-PANE input
+time, only `#{client_activity}` per attached CLIENT plus that client's current
+pane, so the check is: any client whose current pane is the target pane and
+whose last input is < 60 s old refuses (`human_recent`). When the clients cannot
+be listed the answer is unknown, and unknown does NOT refuse once hook state has
+already proved the agent idle or queueing: the input check only guards a human
+mid-typing in the focused pane, and blocking on an unreadable client list would
+strand every nudge on a tmux hiccup. A forced Codex nudge has no hook proof, so
+there unknown still refuses (`human_activity_unknown`).
+
+Known limit: a draft a human typed and then left (focus moved, > 60 s ago) is
+not detectable without reading the screen; a nudge then appends to it.
 
 There is an unavoidable window between these checks and the keystrokes; the
 workspace mutation lock is held across both so a hook write cannot interleave,
@@ -72,53 +77,6 @@ class AgentNudge:
     HUMAN_QUIET_SECONDS = 60
     TMUX_TIMEOUT = 3.0
 
-    # Codex TUI (verified against codex-cli 0.160 strings): an empty composer
-    # shows one of these placeholders after the `›` prompt glyph. Typed text
-    # replaces the placeholder, so its presence also proves there is no draft.
-    CODEX_PLACEHOLDERS = ("Ask Codex to do anything", "Ask a follow-up question")
-    CODEX_COMPOSER_RE = re.compile(
-        r"^\s*[│|]?\s*[›❯>▌]?\s*(?:"
-        + "|".join(re.escape(text) for text in CODEX_PLACEHOLDERS)
-        + r")\s*[│|]?\s*$"
-    )
-    # Anything that means a turn is running or the TUI is waiting on a decision.
-    CODEX_BUSY_MARKERS = (
-        "esc to interrupt",
-        "to interrupt)",
-        "working (",
-        "would you like to",
-        "press enter to confirm",
-        "esc to dismiss",
-        "press a number to choose",
-        "type to continue",
-        "to queue",
-        "esc to cancel",
-    )
-    # Claude Code 2.1 dialogs (permission, edit, plan approval, questions).
-    CLAUDE_DIALOG_MARKERS = (
-        "do you want to",
-        "would you like to proceed",
-        "ready to code?",
-        "no, keep planning",
-        "tell claude what to do differently",
-        "tell claude what to change",
-        "yes, and don't ask again",
-        "yes, and auto-accept",
-        "enter to select",
-        "to navigate",
-        "esc to cancel",
-        "esc to close",
-    )
-    # Claude's composer sits between two horizontal rules (or inside a box) with
-    # a `>`/`❯` prompt; an empty one shows nothing after the glyph, or the
-    # first-run `Try "…"` hint. Claude Code 2.1 writes the session name into the
-    # top rule (`──── DC WEB DEV ─`), so a rule may carry one inset label.
-    CLAUDE_RULE_RE = re.compile(r"^\s*[╭╰]?[─━]{8,}(?: [^─━]+ [─━]+)?[╮╯]?\s*$")
-    CLAUDE_PROMPT_RE = re.compile(r"^\s*│?\s*[>❯]\s?(?P<text>.*?)\s*│?\s*$")
-    CLAUDE_PLACEHOLDER_RE = re.compile(r'^Try ".*"$')
-    COMPOSER_ROWS = 8
-    BUSY_ROWS = 15
-    DIALOG_ROWS = 20
     SHELL_COMMANDS = frozenset({"sh", "bash", "fish", "zsh", "dash", "ksh", "tcsh"})
     # `Frame._interactive_command` prefix: every agent pane runs as
     # `sh -c "unset NO_COLOR; <driver>; ...; exec $SHELL"`.
@@ -232,61 +190,6 @@ class AgentNudge:
                 return True
         return False
 
-    def pane_lines(self, pane_id: str) -> list[str] | None:
-        result = self._tmux(["capture-pane", "-p", "-t", pane_id])
-        if result.returncode != 0:
-            return None
-        return result.stdout.splitlines()
-
-    @staticmethod
-    def _rows(lines: list[str] | None) -> list[str]:
-        return [line.rstrip() for line in (lines or []) if line.strip()]
-
-    @classmethod
-    def codex_prompt_signature(cls, lines: list[str] | None) -> bool:
-        """Do the pane's bottom rows show an idle, empty Codex composer?
-
-        Conservative by construction: no lines, no placeholder near the bottom,
-        or any working/dialog marker in the bottom rows → False.
-        """
-        rows = cls._rows(lines)
-        if not rows:
-            return False
-        busy = "\n".join(rows[-cls.BUSY_ROWS:]).casefold()
-        if any(marker in busy for marker in cls.CODEX_BUSY_MARKERS):
-            return False
-        return any(cls.CODEX_COMPOSER_RE.match(row) for row in rows[-cls.COMPOSER_ROWS:])
-
-    @classmethod
-    def claude_dialog_open(cls, lines: list[str] | None) -> bool:
-        bottom = "\n".join(cls._rows(lines)[-cls.DIALOG_ROWS:]).casefold()
-        return any(marker in bottom for marker in cls.CLAUDE_DIALOG_MARKERS)
-
-    @classmethod
-    def claude_composer(cls, lines: list[str] | None) -> str:
-        """`empty`, `draft`, or `unrecognized` for Claude's bottom-most composer.
-
-        The composer is the rows between the LAST two horizontal rules near the
-        bottom (transcript echoes of past prompts also start with `>`, so the
-        rules are what locate the live input). It is empty only as one prompt
-        row with nothing — or only the `Try "…"` hint — after the glyph.
-        """
-        rows = cls._rows(lines)[-(cls.COMPOSER_ROWS + 4):]
-        rules = [index for index, row in enumerate(rows) if cls.CLAUDE_RULE_RE.match(row)]
-        if len(rules) < 2:
-            return "unrecognized"
-        top, bottom = rules[-2], rules[-1]
-        inside = rows[top + 1:bottom]
-        if not inside:
-            return "unrecognized"
-        prompt = cls.CLAUDE_PROMPT_RE.match(inside[0])
-        if prompt is None:
-            return "unrecognized"
-        text = prompt.group("text")
-        if len(inside) == 1 and (not text or cls.CLAUDE_PLACEHOLDER_RE.match(text)):
-            return "empty"
-        return "draft"
-
     def _status(self, session_id: str) -> dict[str, Any] | None:
         try:
             return self.frame.store.read("status", session_id)
@@ -295,9 +198,7 @@ class AgentNudge:
 
     # -- gates -----------------------------------------------------------
 
-    def pane_gate(
-        self, pane_id: str, *, check_human: bool
-    ) -> tuple[bool, str, str | None]:
+    def pane_gate(self, pane_id: str) -> tuple[bool, str, str | None]:
         """Driver-independent pane safety; never bypassed by `force`."""
         facts = self.pane_facts(pane_id)
         if facts is None:
@@ -313,41 +214,28 @@ class AgentNudge:
                 return False, "agent_not_running", facts["command"]
         if facts["in_mode"]:
             return False, "pane_in_mode", None
-        if check_human:
-            human = self.human_recent(pane_id)
-            if human is None:
-                return False, "human_activity_unknown", None
-            if human:
-                return False, "human_active", None
         return True, "pane_ok", None
 
     def driver_gate(
-        self, record: dict[str, Any], pane_id: str, *, force: bool
+        self, record: dict[str, Any], *, force: bool
     ) -> tuple[bool, str]:
-        """Per-driver rule shared by `nudge` and `driver_rename`."""
+        """Per-driver rule from hook state, shared by `nudge` and `driver_rename`."""
         driver = (record.get("driver") or {}).get("id")
+        status = self._status(record["id"])
         if driver == "claude":
-            if TurnSequence.attention_pending(self._status(record["id"])):
-                return False, "claude_notification_pending"
-            lines = self.pane_lines(pane_id)
-            if lines is None:
-                return False, "pane_unobservable"
-            if self.claude_dialog_open(lines):
+            if not TurnSequence.observed(status, driver):
+                return False, "state_unknown"
+            if TurnSequence.attention_pending(status):
                 return False, "claude_dialog_open"
-            composer = self.claude_composer(lines)
-            if composer == "draft":
-                return False, "claude_draft_present"
-            if composer != "empty":
-                return False, "claude_composer_not_recognized"
+            if TurnSequence.idle_proven(status):
+                return True, "claude_idle"
             return True, "claude_queues_input"
         if driver != "codex":
             return False, "unsupported_driver"
         if force:
             return True, "forced"
-        if not TurnSequence.idle_proven(self._status(record["id"])):
-            return False, "codex_not_idle_proven"
-        if not self.codex_prompt_signature(self.pane_lines(pane_id)):
-            return False, "codex_prompt_not_recognized"
+        if not TurnSequence.idle_proven(status):
+            return False, "codex_not_idle"
         return True, "codex_idle_proven"
 
     def _agent_pane(self, record: dict[str, Any]) -> str | None:
@@ -360,6 +248,7 @@ class AgentNudge:
             "driver": driver,
             "forced": bool(force),
             "sent": False,
+            "basis": "hooks",
         }
 
         def refuse(reason: str, detail: str | None = None) -> dict[str, Any]:
@@ -379,12 +268,18 @@ class AgentNudge:
             pane_id = self._agent_pane(record)
             if not pane_id:
                 return refuse("no_agent_pane")
-            allowed, reason, detail = self.pane_gate(pane_id, check_human=True)
+            allowed, reason, detail = self.pane_gate(pane_id)
             if not allowed:
                 return refuse(reason, detail)
-            allowed, reason = self.driver_gate(record, pane_id, force=force)
+            allowed, reason = self.driver_gate(record, force=force)
             if not allowed:
                 return refuse(reason)
+            human = self.human_recent(pane_id)
+            if human:
+                return refuse("human_recent")
+            if human is None and reason == "forced":
+                # unknown is not "no" when nothing else proved it safe
+                return refuse("human_activity_unknown")
             sent = self._tmux(["send-keys", "-l", "-t", pane_id, "--", text])
             if sent.returncode != 0:
                 return refuse("send_failed", (sent.stderr or "").strip() or None)

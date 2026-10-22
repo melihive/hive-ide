@@ -5012,14 +5012,13 @@ def test_driver_rename_supports_claude_agent_pane(tmp_path, monkeypatch):
     frame = Frame(store)
     calls = []
     monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
-    screen = '──────────────────────────\n>\n──────────────────────────\n'
+    # the rename gate decides from hook state: a Claude hook has reported
+    store.write("status", record["id"], {"state": "waiting", "turns": {"driver": "claude", "turn": 0}})
 
     def tmux(args, **_kwargs):
         calls.append(args)
         if args[0] == "display-message":
             return SimpleNamespace(returncode=0, stdout="0\tclaude\t0\t4100\n", stderr="")
-        if args[0] == "capture-pane":
-            return SimpleNamespace(returncode=0, stdout=screen, stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(frame, "tmux", tmux)
@@ -5027,9 +5026,7 @@ def test_driver_rename_supports_claude_agent_pane(tmp_path, monkeypatch):
     result = frame.driver_rename(record)
 
     assert result["driver"] == "claude"
-    assert [call[0] for call in calls] == [
-        "display-message", "capture-pane", "send-keys", "send-keys",
-    ]
+    assert [call[0] for call in calls] == ["display-message", "send-keys", "send-keys"]
     assert calls[-2:] == [
         ["send-keys", "-l", "-t", "%2", "/rename CLAUDE SESSION"],
         ["send-keys", "-t", "%2", "Enter"],
