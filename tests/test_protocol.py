@@ -19,7 +19,7 @@ from hive_ide.adapters import (
     DefaultWorkspaceAdapter,
 )
 from hive_ide.cli import main
-from hive_ide.config import _editor_argv
+from hive_ide.config import _editor_argv, configured_registry
 from hive_ide.drivers import bundled_drivers
 from hive_ide.errors import HiveIdeError, SchemaVersionError, UsageError
 from hive_ide.environments import EnvironmentManager, managed_interpreter
@@ -1517,6 +1517,7 @@ def test_adopt_discovers_codex_sessions_for_workspace(tmp_path, capsys, monkeypa
     assert record["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(workspace),
         "old-codex",
@@ -1546,13 +1547,47 @@ def test_bundled_driver_capabilities_are_explicit():
     )["launch_argv"] == ["claude", "--resume", "abc", "--name", "X"]
     assert drivers["codex"].resolve(
         name="X", working_dir="/tmp", conversation_reference="abc"
-    )["launch_argv"] == ["codex", "resume", "-C", "/tmp", "abc"]
+    )["launch_argv"] == ["codex", "resume", "--no-daemon", "-C", "/tmp", "abc"]
     assert drivers["antigravity"].resolve(
         name="X", working_dir="/tmp", conversation_reference="continue"
     )["resume"]["strategy"] == "workspace_continue"
     assert drivers["term"].resolve(
         name="X", working_dir="/tmp", conversation_reference=None
     )["capabilities"] == ["launch"]
+
+
+def test_codex_launches_run_without_the_shared_app_server():
+    """Every codex pane, new or resumed, runs its own server so hooks carry its env."""
+    codex = bundled_drivers()["codex"]
+    assert codex.resolve(
+        name="X", working_dir="/tmp", conversation_reference=None
+    )["launch_argv"] == ["codex", "--no-daemon"]
+    assert codex.resolve(
+        name="X", working_dir="/tmp", conversation_reference="abc"
+    )["launch_argv"] == ["codex", "resume", "--no-daemon", "-C", "/tmp", "abc"]
+
+
+def test_configured_codex_command_keeps_no_daemon_without_duplicating_it():
+    registry = configured_registry(
+        {
+            "drivers": {
+                "codex": {"command": ["codex", "--no-daemon", "-m", "o3"]},
+                "other": {"command": ["other-agent"]},
+            }
+        },
+        plugins=False,
+    )
+    assert registry.get("codex").resolve(
+        name="X", working_dir="/tmp", conversation_reference=None
+    )["launch_argv"] == ["codex", "--no-daemon", "-m", "o3"]
+    assert configured_registry(
+        {"drivers": {"codex": {"command": ["codex", "-m", "o3"]}}}, plugins=False
+    ).get("codex").resolve(
+        name="X", working_dir="/tmp", conversation_reference=None
+    )["launch_argv"] == ["codex", "-m", "o3", "--no-daemon"]
+    assert registry.get("other").resolve(
+        name="X", working_dir="/tmp", conversation_reference=None
+    )["launch_argv"] == ["other-agent"]
 
 
 def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
@@ -1685,6 +1720,7 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     assert updated["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(workspace),
         "conversation-1",
@@ -2095,6 +2131,7 @@ def test_repair_refreshes_resume_command_after_rehoming_working_dir(
     assert updated["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(workspace.resolve()),
         "conversation-1",
@@ -3561,6 +3598,7 @@ def test_current_plan_and_conversation_mutations_are_id_targeted(
     assert attached["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(workspace),
         "conversation-1",
@@ -3646,6 +3684,7 @@ def test_switch_driver_resumes_previous_driver_conversation(tmp_path, monkeypatc
     assert codex_again["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(workspace),
         "codex-fallback",
@@ -3697,7 +3736,7 @@ def test_switch_driver_does_not_resume_another_sessions_conversation(
     switched = json.loads(capsys.readouterr().out)
     assert switched["driver"]["id"] == "codex"
     assert switched["driver"]["resume"]["reference"] is None
-    assert switched["driver"]["launch_argv"] == ["codex"]
+    assert switched["driver"]["launch_argv"] == ["codex", "--no-daemon"]
     assert "codex" not in switched["agents"]["resume_ids"]
     assert store.find_session(owner["id"])["driver"]["resume"]["reference"] == "shared-codex"
 
@@ -3783,6 +3822,7 @@ def test_switch_driver_rehomes_worktree_cwd_to_workspace_root(
     assert switched["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(workspace.resolve()),
         "codex-fallback",
@@ -3895,7 +3935,7 @@ def test_switch_driver_handoff_prompt_is_passed_to_codex_resume(
     switched = json.loads(capsys.readouterr().out)
 
     argv = Frame._argv_with_handoff_prompt(switched["driver"]["launch_argv"], switched)
-    assert argv[:5] == ["codex", "resume", "-C", str(workspace), "codex-original"]
+    assert argv[:6] == ["codex", "resume", "--no-daemon", "-C", str(workspace), "codex-original"]
     assert argv[-1] == switched["handoff"]["target_driver_prompt"]
     command = Frame._agent_command(switched)
     assert "Handoff prompt sent to codex" in command
@@ -4744,7 +4784,7 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
     }
     assert calls == [
         (
-            ["codex", "resume", "-C", str(workspace), "conversation-1"],
+            ["codex", "resume", "--no-daemon", "-C", str(workspace), "conversation-1"],
             {"cwd": str(workspace)},
         )
     ]
@@ -6048,6 +6088,7 @@ def test_working_dir_set_updates_metadata_without_rebuilding_live_window(
     assert updated["driver"]["launch_argv"] == [
         "codex",
         "resume",
+        "--no-daemon",
         "-C",
         str(linked.resolve()),
         "conversation-1",
