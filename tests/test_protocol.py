@@ -4744,7 +4744,7 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
     }
     assert calls == [
         (
-            ["codex", "resume", "-C", str(workspace), "conversation-1"],
+            ["codex", "--no-daemon", "resume", "-C", str(workspace), "conversation-1"],
             {"cwd": str(workspace)},
         )
     ]

@@ -60,6 +60,12 @@ managed environment, use `pipx install hive-ide`.
 Sessions are directory-scoped. `hive-ide open` creates a default session for the
 current directory when none exists. Run commands from the directory whose sessions
 should be listed or changed. Do not guess a session ID when a command reports ambiguity.
+
+Codex launches use `--no-daemon` so commands and hooks inherit their own IDE
+pane's identity instead of the shared server's first session. This requires a
+Codex CLI that supports that flag. Existing running agents must be relaunched to
+use it; an already misattributed conversation record needs separate repair.
+Custom Codex wrapper commands must pass the flag themselves.
 Use the new-session modal's `new` / `adopt existing` toggle to visually adopt
 Claude Code or Codex conversations for the current directory. The CLI `adopt`
 command is mainly for automation or agent-driven maintenance.

@@ -758,10 +758,30 @@ class Frame:
         }
         return json.dumps(marker, separators=(",", ":"), sort_keys=True)
 
+    @staticmethod
+    def _agent_argv(record: dict[str, Any]) -> list[str]:
+        """Keep Codex execution and hooks in the process spawned for this session.
+
+        Its shared daemon inherits the first TUI's pane environment. A later
+        session then sends commands and completion hooks with that other pane's
+        identity. Apply the opt-out at launch, including stored pre-fix argv.
+        Custom wrappers retain responsibility for their own command-line flags.
+        """
+        driver = record.get("driver") or {}
+        argv = list(driver.get("launch_argv") or [])
+        if (
+            driver.get("id") == "codex"
+            and argv
+            and Path(argv[0]).name == "codex"
+            and "--no-daemon" not in argv
+        ):
+            argv.insert(1, "--no-daemon")
+        return argv
+
     @classmethod
     def _agent_command(cls, record: dict[str, Any]) -> str:
         driver = record.get("driver") or {}
-        argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
+        argv = cls._agent_argv(record) or [os.environ.get("SHELL", "/bin/sh")]
         argv = cls._argv_with_handoff_prompt(argv, record)
         command = shlex.join(argv)
         handoff = record.get("handoff")
@@ -1148,7 +1168,7 @@ class Frame:
 
     def current_chat(self, record: dict[str, Any]) -> dict[str, Any]:
         driver = record.get("driver") or {}
-        argv = list(driver.get("launch_argv") or [])
+        argv = self._agent_argv(record)
         if not argv:
             raise UsageError("The session has no agent command to resume.")
         pane_id = (self.role_panes(record["id"]) or {}).get("agent")
