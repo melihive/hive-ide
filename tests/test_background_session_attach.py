@@ -181,3 +181,35 @@ def test_a_failed_build_leaves_no_half_built_window(store, monkeypatch):
         frame.build(record)
 
     assert ["kill-window", "-t", "@7"] in calls, "the window it created must be removed"
+
+
+def test_verify_does_not_report_a_backgrounded_session_as_a_holder(store, monkeypatch):
+    """`verify` folds holder findings into `ok`, so reporting a background host made
+    the whole frame unhealthy for using a supported feature — and the remedy it
+    prints is "stop that process", which here means killing live work."""
+    from hive_ide.cli import _conversation_holders
+
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    sessions = [{"id": "s1", "name": "AGENT CHAT", "driver": {"resume": {"reference": REF}}}]
+    rows = [(100, 1, "sh -c agent"), (3837949, 1, BG_HOST)]
+
+    assert _conversation_holders(frame, sessions, rows) == []
+
+
+def test_verify_still_reports_an_abandoned_driver_as_a_holder(store, monkeypatch):
+    """The exemption above must not swallow the fault the finding exists for."""
+    from hive_ide.cli import _conversation_holders
+
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    sessions = [{"id": "s1", "name": "AGENT CHAT", "driver": {"resume": {"reference": REF}}}]
+    rows = [(100, 1, "sh -c agent"), (4242, 1, ABANDONED)]
+
+    found = _conversation_holders(frame, sessions, rows)
+    assert [f["pid"] for f in found] == [4242]
+    assert found[0]["orphaned"] is True

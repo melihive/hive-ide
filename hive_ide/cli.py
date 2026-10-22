@@ -1144,6 +1144,13 @@ def _conversation_holders(
         for holder in ConversationHolders.holders(
             reference, exclude_tree=pane_pid, rows=rows
         ):
+            if holder["background"]:
+                # A backgrounded session holds its own conversation by design, and
+                # opening it attaches rather than launching a second driver. Calling
+                # that a finding would mark a frame unhealthy for using a supported
+                # feature — and the remedy this finding prints is "stop that
+                # process", which here means killing live work.
+                continue
             out.append(
                 {
                     "session": session.get("name") or session["id"],
