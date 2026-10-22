@@ -743,6 +743,30 @@ class Frame:
             'exec "${SHELL:-/bin/sh}"'
         )
 
+    @classmethod
+    def _attach_argv(cls, driver: dict[str, Any]) -> list[str] | None:
+        """`attach` argv when this driver's conversation is live in the background.
+
+        A backgrounded session already owns its conversation, so the recorded
+        `--resume` argv would put a SECOND driver on it and the pane would never
+        paint. The driver's own `attach` reconnects to the running session, which is
+        what opening the session means while it is backgrounded.
+
+        None when there is nothing to attach: no reference, a driver with no attach
+        of its own, or no background host observed. The last case folds an
+        unreadable process table into "resume as usual" deliberately — not seeing a
+        host is not evidence there is none, and a normal resume is the recoverable
+        direction, where a wrong attach would reconnect nothing.
+        """
+        if driver.get("id") != "claude":
+            return None
+        reference = (driver.get("resume") or {}).get("reference")
+        if not isinstance(reference, str) or not reference:
+            return None
+        if not ConversationHolders.background_hosts(reference):
+            return None
+        return ["claude", "attach", ConversationHolders.attach_id(reference)]
+
     def _record_python(self, record: dict[str, Any]) -> str:
         source = record.get("source") or {}
         interpreter = source.get("interpreter")
@@ -762,7 +786,13 @@ class Frame:
     def _agent_command(cls, record: dict[str, Any]) -> str:
         driver = record.get("driver") or {}
         argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
-        argv = cls._argv_with_handoff_prompt(argv, record)
+        attach = cls._attach_argv(driver)
+        if attach:
+            # An attach reconnects to a turn already in flight, so a handoff prompt
+            # does not belong on it — that is a thing you say to a fresh driver.
+            argv = attach
+        else:
+            argv = cls._argv_with_handoff_prompt(argv, record)
         command = shlex.join(argv)
         handoff = record.get("handoff")
         if isinstance(handoff, dict) and handoff:
@@ -1271,7 +1301,7 @@ class Frame:
         lets `open` record it per session in `failed`, so it is reported instead of
         silently skipped.
 
-        Three things are deliberately NOT a refusal, because each would block a
+        Four things are deliberately NOT a refusal, because each would block a
         launch the user asked for:
 
         - the session's own agent pane, whose driver this launch is replacing;
@@ -1279,7 +1309,12 @@ class Frame:
           every relaunch there would make the IDE unopenable;
         - a pane whose pid tmux will not report, since without it the session's own
           driver cannot be told from an outside one, and treating "unknown" as
-          "outside" blocks a healthy session from relaunching.
+          "outside" blocks a healthy session from relaunching;
+        - a BACKGROUND session host, which holds the conversation because the user
+          backgrounded it on purpose. That is not a collision to refuse but a
+          session to attach, and `_agent_command` launches `attach` for it. Refusing
+          it instead made a perfectly live session unopenable and, because the raise
+          lands mid-`build`, left a half-built window behind on every retry.
         """
         reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
         if not reference:
@@ -1289,6 +1324,9 @@ class Frame:
         if agent_pane and exclude is None:
             return      # cannot establish ownership; do not refuse on a guess
         held = ConversationHolders.holders(reference, exclude_tree=exclude)
+        # A background host is attachable, so it is not a conflict. Only the holders
+        # that would genuinely collide with a fresh driver can refuse a launch.
+        held = [h for h in held if not h["background"]]
         if not held:
             return
         who = ", ".join(
@@ -1734,6 +1772,21 @@ class Frame:
         target = created.stdout.strip()
         if not target:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
+        try:
+            return self._finish_build(record, target, working_dir)
+        except BaseException:
+            # The window exists but is not a frame window yet: it holds only the
+            # sidebar pane, carries no role or session tags, and so can never be
+            # selected — nothing maps the session to it. Leaving it behind made every
+            # retry add another, and a session whose launch always fails (a held
+            # conversation, say) accumulated nine of them, each re-probing tmux once
+            # a second. The half-built window goes, and the error still propagates.
+            self.tmux(["kill-window", "-t", target])
+            raise
+
+    def _finish_build(
+        self, record: dict[str, Any], target: str, working_dir: str
+    ) -> str:
         self.prepare_agent_launch(record)
         agent_command = (
             self._sleeping_agent_command()

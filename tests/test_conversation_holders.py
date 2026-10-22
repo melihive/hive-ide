@@ -153,7 +153,7 @@ def test_prepare_agent_launch_refuses_when_another_process_holds_the_conversatio
         "holders",
         classmethod(
             lambda cls, ref, **kw: [
-                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True}
+                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True, "background": False}
             ]
         ),
     )
@@ -214,7 +214,7 @@ def test_a_held_conversation_fails_that_session_in_open(tmp_path, monkeypatch):
         "holders",
         classmethod(
             lambda cls, ref, **kw: [
-                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True}
+                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True, "background": False}
             ]
         ),
     )
@@ -347,7 +347,7 @@ def test_prepare_agent_launch_does_not_refuse_when_the_pane_pid_is_unknown(
         "holders",
         classmethod(
             lambda cls, ref, **kw: probed.append(kw)
-            or [{"pid": 900, "ppid": 1, "command": "claude", "orphaned": True}]
+            or [{"pid": 900, "ppid": 1, "command": "claude", "orphaned": True, "background": False}]
         ),
     )
 
