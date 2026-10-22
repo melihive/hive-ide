@@ -64,6 +64,29 @@ def _window_ids(frame: Frame) -> list[str]:
     ).stdout.split()
 
 
+def _agent_pane_started(frame: Frame, session_id: str) -> bool:
+    """Has the session's agent pane exec'd its own command yet?
+
+    tmux returns from `new-window` / `split-window` before the pane's child has
+    exec'd: for that moment `#{pane_pid}` is still a forked copy of the tmux
+    SERVER, whose environment is whatever the test process had when the server
+    started. When the suite itself runs inside an ide pane that is another
+    session's `HIVE_IDE_SESSION_ID`, so a repair that reads the pane in that
+    window sees a "stale agent environment" and rebuilds a healthy window. The
+    pane has started once its root process carries THIS session's id — the -e
+    value tmux spawned it with.
+    """
+    pane_id = (frame.role_panes(session_id) or {}).get("agent")
+    env = frame.pane_hive_ide_env(pane_id) if pane_id else None
+    return bool(env) and env.get("HIVE_IDE_SESSION_ID") == session_id
+
+
+def _wait_agent_pane_started(frame: Frame, session_id: str) -> None:
+    assert _wait_for(
+        lambda: _agent_pane_started(frame, session_id), timeout=10.0
+    ), "the agent pane never exec'd its command with this session's identity"
+
+
 @pytest.fixture
 def live(tmp_path, monkeypatch):
     """One session built in a real tmux window on a throwaway socket.
@@ -91,6 +114,7 @@ def live(tmp_path, monkeypatch):
         assert frame.ensure(record)
         roles = frame.role_panes(record["id"])
         assert roles is not None and set(roles) == {"sidebar", "agent", "plan"}
+        _wait_agent_pane_started(frame, record["id"])
 
         def identity(*, pane: str | None, marker: str | None, tmux: str | None) -> None:
             for key, value in (
@@ -915,7 +939,9 @@ def test_deferred_driver_switch_completes_from_outside_on_the_marker(
         "driver-switch"
     ]
 
-    # A second outside run has nothing owed and nothing to do.
+    # A second outside run has nothing owed and nothing to do — once the
+    # replacement's agent pane has actually started (see _agent_pane_started).
+    _wait_agent_pane_started(live.frame, live.record["id"])
     again = live.repair(inert)
     assert again["rebuilt"] is False
     assert live.frame.windows()[live.record["id"]] == replacement

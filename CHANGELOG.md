@@ -4,6 +4,32 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `test_switching_windows_shows_the_right_order_and_never_blanks_the_pane` no
+  longer fails on a loaded machine. It told a woken sidebar from an unwoken one
+  with a 250ms stale-order budget (a working wake measured 259-633ms under load).
+  It now freezes the left window's keep-alive, so only the wake hook can repaint
+  it: the correct order arriving at all (5s ceiling) proves the wake, with no
+  blank frame and an unchanged pane pid. Its setup waits on real conditions
+  (laid-out column painted, sidebar process exited) instead of fixed sleeps.
+- A Codex turn that ends in an error (an API 400, a usage limit) no longer reads
+  as `working` forever. Codex runs no hook for a failed turn — no `Stop`, and its
+  hook events have no failure event — so the status left by `UserPromptSubmit`
+  never changed and anything holding work for an idle agent held it indefinitely.
+  The prompt hook now records Codex's `turn_id`, and status readers (`nudge`, the
+  sidebar) close that turn when Codex's own rollout records its end
+  (`task_complete`, which Codex also writes after an error, or `turn_aborted`).
+  A rollout that cannot be read is unknown and changes nothing.
+- `test_deferred_driver_switch_completes_from_outside_on_the_marker` no longer
+  flakes. tmux returns from building a pane before the pane's child has exec'd,
+  and for that moment `#{pane_pid}` is a forked copy of the tmux server carrying
+  the test process's environment — another session's `HIVE_IDE_SESSION_ID` when
+  the suite runs inside an ide pane — so a repair that read it then saw a "stale
+  agent environment" and rebuilt a healthy window. The test (and the shared live
+  fixture) now waits, with a deadline, for the agent pane to carry its own
+  session id before repairing.
+
 ## [1.0.104] - 2026-10-22
 
 ### Added
