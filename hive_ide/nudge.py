@@ -114,9 +114,10 @@ class AgentNudge:
     # first-run `Try "…"` hint. Claude Code 2.1 writes the session name into the
     # top rule (`──── DC WEB DEV ─`), so a rule may carry one inset label. A rule
     # is width-independent: a bare rule needs 8 rule chars, a labelled one only
-    # rule chars around one label (a 19-column pane leaves `────── AGENT CHAT ─`).
+    # rule chars around one label (a 19-column pane leaves `────── AGENT CHAT ─`,
+    # and a longer name only `─ relay-probe-zen ─`).
     CLAUDE_RULE_RE = re.compile(
-        r"^\s*[╭╰]?(?:[─━]{8,}|[─━]{2,} [^─━]+ [─━]+)[╮╯]?\s*$"
+        r"^\s*[╭╰]?(?:[─━]{8,}|[─━]+ [^─━]+ [─━]+)[╮╯]?\s*$"
     )
     CLAUDE_PROMPT_RE = re.compile(r"^\s*│?\s*[>❯]\s?(?P<text>.*?)\s*│?\s*$")
     # The hint is drawn DIM (SGR 2) and typed text is not, so with escape codes
