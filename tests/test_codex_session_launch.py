@@ -103,11 +103,11 @@ def test_cli_resume_rebuild_cannot_remove_private_process_flag(tmp_path, monkeyp
     assert main(["--state-home", str(store.home), "--workspace-key", str(tmp_path),
                  "--config", str(config), "chat", "--session-id", record["id"]]) == 0
     assert json.loads(observed.read_text()) == [
-        "--no-daemon", "resume", "-C", str(tmp_path), "fixture-thread"
+        "resume", "--no-daemon", "-C", str(tmp_path), "fixture-thread"
     ]
-    # It really went through regeneration: persisted argv has neither saved flag.
+    # It went through regeneration: saved-only flag is gone, isolation remains.
     assert store.find_session(record["id"])["driver"]["launch_argv"] == [
-        "codex", "resume", "-C", str(tmp_path), "fixture-thread"
+        "codex", "resume", "--no-daemon", "-C", str(tmp_path), "fixture-thread"
     ]
 
 

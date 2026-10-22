@@ -44,6 +44,17 @@ All notable changes to `hive-ide` will be documented in this file.
   does for a forced Codex nudge). Results carry `basis: "hooks"`. Known limit: a
   human draft left in the composer more than 60 s ago is not detected.
 
+### Fixed
+
+- Codex panes now launch with `--no-daemon` (`codex --no-daemon`, `codex resume
+  --no-daemon -C <dir> <id>`) for new sessions, resumes, driver switches and
+  respawns, so they run without the shared app-server daemon. Hooks used to run
+  inside that daemon with the env of whichever pane started it, so every Codex pane
+  reported that pane's `HIVE_IDE_SESSION_ID`/`TMUX_PANE`; now hooks carry the pane's
+  own identity. `codex queue` still reaches the pane. A configured `codex` command
+  keeps the flag and is not given it twice. Existing panes pick it up on their next
+  restart or resume.
+
 ## [1.0.99] - 2026-10-22
 
 ### Fixed

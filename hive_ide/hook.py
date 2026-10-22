@@ -318,8 +318,9 @@ class IdeHook:
           target, in whatever workspace it lives. An inherited identity cannot
           steal an established conversation or divert its activity.
         - If nobody owns it, the conversation is new, and only its recorded origin
-          can place it. When the agent records one and it falls outside the
-          candidate session's workspace, refuse: a skipped event is recoverable,
+          can place it. When the agent records one and it falls outside both the
+          candidate session's workspace and its working_dir, refuse: a skipped
+          event is recoverable,
           a conversation claimed by the wrong session is not.
         - When the origin is unknown, leave the event alone. Unknown is not a
           verdict, and the drivers that record nothing never had this problem.
@@ -347,12 +348,20 @@ class IdeHook:
         record = store.find_session(session_id)
         if record is None:
             return store, session_id, False
-        workspace = Path(store.workspace_key).resolve()
-        try:
-            Path(origin).resolve().relative_to(workspace)
-        except ValueError:
-            return store, session_id, True
-        return store, session_id, False
+        # A session's working_dir need not lie under its workspace (a workspace
+        # can host a session rooted elsewhere), and codex records that working_dir
+        # as the origin. So the conversation is this session's if it started
+        # under either root.
+        origin_path = Path(origin).resolve()
+        for root in (store.workspace_key, record.get("working_dir")):
+            if not isinstance(root, str) or not root:
+                continue
+            try:
+                origin_path.relative_to(Path(root).resolve())
+            except ValueError:
+                continue
+            return store, session_id, False
+        return store, session_id, True
 
     @staticmethod
     def _write_subagent_status(

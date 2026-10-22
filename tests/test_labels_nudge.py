@@ -559,6 +559,31 @@ def test_nudge_codex_idle_proven_in_a_one_column_pane_is_sent(tmp_path, monkeypa
     ]
 
 
+def test_nudge_pauses_between_the_text_and_enter(tmp_path, monkeypatch):
+    """Text then Enter in one burst reads as a paste to the Codex TUI, which keeps
+    the Enter as a newline instead of submitting. The pause sits strictly between
+    the literal text and the Enter keypress."""
+    store, record = _session(tmp_path)
+    _codex_turn(store, record, monkeypatch, tmp_path)
+    fake = FakeTmux()
+    events: list[object] = []
+    real_call = fake.__call__
+
+    def recording_tmux(args, **kwargs):
+        if args and args[0] == "send-keys":
+            events.append(args[-1])
+        return real_call(args, **kwargs)
+
+    frame = _frame(store, monkeypatch, fake)
+    monkeypatch.setattr(frame, "tmux", recording_tmux)
+    result = AgentNudge(
+        frame, clock=lambda: NOW, sleep=lambda seconds: events.append(("sleep", seconds))
+    ).nudge(record, "wake up")
+    assert result["sent"] is True
+    assert AgentNudge.ENTER_DELAY_SECONDS >= 0.5
+    assert events == ["wake up", ("sleep", AgentNudge.ENTER_DELAY_SECONDS), "Enter"]
+
+
 def test_nudge_codex_forced_is_sent_while_working(tmp_path, monkeypatch):
     store, record = _session(tmp_path)
     _hook(store, record, monkeypatch, tmp_path, "working",

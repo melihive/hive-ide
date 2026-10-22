@@ -1582,6 +1582,8 @@ class Frame:
         # Bounded like the gate's probes: a wedged tmux must never hold the
         # workspace lock the CLI takes around this command.
         for keys in (["-l", "-t", pane_id, f"/rename {display_name}"], ["-t", pane_id, "Enter"]):
+            if keys[-1] == "Enter":
+                gate.sleep(gate.ENTER_DELAY_SECONDS)  # see AgentNudge.ENTER_DELAY_SECONDS
             result = self.tmux(["send-keys", *keys], timeout=gate.TMUX_TIMEOUT)
             if result.returncode != 0:
                 detail = (result.stderr or "").strip()
