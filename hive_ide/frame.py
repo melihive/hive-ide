@@ -1690,14 +1690,34 @@ class Frame:
         self._retitle_panes(target, record)
 
     @serialized
-    def _retitle_panes(self, target: str, record: dict[str, Any]) -> None:
+    def _retitle_panes(self, target: str, record: dict[str, Any]) -> bool:
+        """Write the titles; True only when every write for every pane succeeded.
+
+        The results used to be discarded, so a caller was told the panes had been
+        retitled even when every write failed — `cmd_label` reported
+        `"retitled": true` against a wedged server that had changed nothing.
+        """
         titles = self._pane_titles(record)
         roles = self._order_role_panes(target)
+        ok = True
         for role, title in titles.items():
             pane = roles.get(role)
-            if pane:
-                self.tmux(["select-pane", "-T", title, "-t", pane])
-                self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_title", title])
+            if not pane:
+                continue
+            for args in (
+                ["select-pane", "-T", title, "-t", pane],
+                ["set-option", "-p", "-t", pane, "@hive_ide_title", title],
+            ):
+                if self.tmux(args, timeout=self.RETITLE_TIMEOUT).returncode != 0:
+                    ok = False
+        return ok
+
+    #: Bounds the tmux calls made while retitling. `cmd_label` reaches this path
+    #: holding the workspace mutation lock, and tmux has no timeout of its own, so
+    #: an unresponsive server would hang labelling and block every other command
+    #: and hook waiting on that lock. A timed-out call returns a failed result
+    #: rather than raising, which the success check already handles.
+    RETITLE_TIMEOUT = 3.0
 
     @serialized
     def retitle_panes(self, record: dict[str, Any]) -> bool:
@@ -1712,20 +1732,45 @@ class Frame:
             if not pane:
                 continue
             current = self.tmux(
-                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"]
+                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"],
+                timeout=self.RETITLE_TIMEOUT,
             ).stdout.strip()
             if current != title:
                 changed = True
                 break
-        if changed:
-            self._retitle_panes(target, record)
-        return changed
+        if not changed:
+            return False
+        return self._retitle_panes(target, record)
+
+    @staticmethod
+    def _relay_suffix(record: dict[str, Any]) -> str:
+        """The session's relay agent name, ready to append, or '' when it has none.
+
+        Nine of fifteen live sessions carry no relay label, so the absence is the
+        normal case and must render as nothing at all rather than as empty brackets.
+
+        Sanitised rather than trusted: the value is written by relay registration,
+        not typed here, and the border is drawn through `pane-border-format`, where
+        `#` opens a format or style sequence — so a `#` arriving in the title would
+        distort the border instead of printing. Bounded too, because the chat pane's
+        border is narrow and a long name would crowd out the session name it is
+        meant to annotate.
+        """
+        labels = record.get("labels")
+        if not isinstance(labels, dict):
+            return ""
+        value = labels.get("relay")
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.replace("#", "").split())[:24]
 
     def _pane_titles(self, record: dict[str, Any]) -> dict[str, str]:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
+        name = str(record.get("name") or "chat")
+        relay = self._relay_suffix(record)
         return {
             "sidebar": workspace,
-            "agent": str(record.get("name") or "chat"),
+            "agent": f"{name} ({relay})" if relay else name,
             "plan": (LeaseStore(self.store).live(record["id"]) or {}).get("title")
             or self._plan_title(record),
         }

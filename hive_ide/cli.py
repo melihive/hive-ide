@@ -554,9 +554,22 @@ def cmd_label(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageError("Pass exactly one of --value or --clear.")
     store, _ = _context(args)
     record = store.set_label(args.session_id, args.key, None if args.clear else args.value)
+    # The chat pane's border carries the relay name, and relay registration sets
+    # that label long after the window was built — so without retitling here the
+    # name only appears on the next rebuild, which reads as the feature not working.
+    # Best-effort: a label is recorded whether or not a frame is up to repaint.
+    retitled = False
+    try:
+        # `label` has no --tmux-socket of its own, so resolve the default rather
+        # than reading an attribute this subcommand never defines.
+        socket = _socket(store, getattr(args, "tmux_socket", None))
+        retitled = Frame(store, socket=socket).retitle_panes(record)
+    except (HiveIdeError, UsageError, OSError):
+        retitled = False
     return {
         "session_id": record["id"],
         "labels": StateStore.labels(record),
+        "retitled": retitled,
     }
 
 
