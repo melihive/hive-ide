@@ -4,6 +4,16 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.98] - 2026-10-22
+
+### Fixed
+
+- `hive-ide nudge` refused every live Claude and Codex pane as `agent_not_running`.
+  Agent panes run under an `sh -c` wrapper, so tmux reports the pane command as
+  `sh`. The pane gate now treats a shell as "no agent" only when the pane process is
+  not that wrapper or the wrapper has no non-shell child; an unreadable process table
+  refuses as `pane_unobservable`. Works on Linux and macOS (`ps`, time-bounded).
+
 ## [1.0.97] - 2026-10-21
 
 ### Added
