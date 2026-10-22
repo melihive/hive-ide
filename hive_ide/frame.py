@@ -1690,14 +1690,34 @@ class Frame:
         self._retitle_panes(target, record)
 
     @serialized
-    def _retitle_panes(self, target: str, record: dict[str, Any]) -> None:
+    def _retitle_panes(self, target: str, record: dict[str, Any]) -> bool:
+        """Write the titles; True only when every write for every pane succeeded.
+
+        The results used to be discarded, so a caller was told the panes had been
+        retitled even when every write failed — `cmd_label` reported
+        `"retitled": true` against a wedged server that had changed nothing.
+        """
         titles = self._pane_titles(record)
         roles = self._order_role_panes(target)
+        ok = True
         for role, title in titles.items():
             pane = roles.get(role)
-            if pane:
-                self.tmux(["select-pane", "-T", title, "-t", pane])
-                self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_title", title])
+            if not pane:
+                continue
+            for args in (
+                ["select-pane", "-T", title, "-t", pane],
+                ["set-option", "-p", "-t", pane, "@hive_ide_title", title],
+            ):
+                if self.tmux(args, timeout=self.RETITLE_TIMEOUT).returncode != 0:
+                    ok = False
+        return ok
+
+    #: Bounds the tmux calls made while retitling. `cmd_label` reaches this path
+    #: holding the workspace mutation lock, and tmux has no timeout of its own, so
+    #: an unresponsive server would hang labelling and block every other command
+    #: and hook waiting on that lock. A timed-out call returns a failed result
+    #: rather than raising, which the success check already handles.
+    RETITLE_TIMEOUT = 3.0
 
     @serialized
     def retitle_panes(self, record: dict[str, Any]) -> bool:
@@ -1712,14 +1732,15 @@ class Frame:
             if not pane:
                 continue
             current = self.tmux(
-                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"]
+                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"],
+                timeout=self.RETITLE_TIMEOUT,
             ).stdout.strip()
             if current != title:
                 changed = True
                 break
-        if changed:
-            self._retitle_panes(target, record)
-        return changed
+        if not changed:
+            return False
+        return self._retitle_panes(target, record)
 
     @staticmethod
     def _relay_suffix(record: dict[str, Any]) -> str:

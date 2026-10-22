@@ -163,3 +163,86 @@ def test_a_label_is_recorded_even_when_no_frame_can_be_retitled(store, monkeypat
 
     assert result["labels"]["relay"] == "Lenka"
     assert result["retitled"] is False
+
+
+# ── the two cross-model review findings ───────────────────────────────────────
+
+
+class _Reply:
+    def __init__(self, stdout: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = ""
+
+
+def _framed(store, monkeypatch, reply):
+    """A Frame whose window and panes exist and whose tmux answers with `reply`."""
+    frame = Frame(store, socket="sock")
+    calls: list = []
+
+    def fake_tmux(self, args, **kwargs):
+        calls.append((list(args), kwargs))
+        return reply(args) if callable(reply) else reply
+
+    monkeypatch.setattr(Frame, "tmux", fake_tmux)
+    monkeypatch.setattr(Frame, "windows", lambda self: {"s1": "@7"})
+    monkeypatch.setattr(
+        Frame,
+        "_order_role_panes",
+        lambda self, target: {"sidebar": "%1", "agent": "%2", "plan": "%3"},
+    )
+    return frame, calls
+
+
+def test_a_failed_title_write_is_not_reported_as_retitled(store, monkeypatch):
+    """Review finding 2. The write results were discarded, so a wedged server that
+    changed nothing still produced `retitled: true`. This drives the REAL retitle
+    path — the earlier test monkeypatched it away and so could not see this."""
+    frame, _calls = _framed(store, monkeypatch, _Reply("", returncode=1))
+
+    assert frame.retitle_panes(_record(labels={"relay": "Lenka"})) is False
+
+
+def test_a_successful_retitle_is_reported(store, monkeypatch):
+    """The inverse, so the check above cannot become "always False"."""
+    def reply(args):
+        # The probe reports a stale title, so a retitle is due; writes succeed.
+        if args[0] == "display-message":
+            return _Reply("OLD TITLE")
+        return _Reply("")
+
+    frame, _calls = _framed(store, monkeypatch, reply)
+
+    assert frame.retitle_panes(_record(labels={"relay": "Lenka"})) is True
+
+
+def test_nothing_to_do_is_not_reported_as_a_retitle(store, monkeypatch):
+    """When every pane already shows its title there is nothing to write, and the
+    callers that log "retitled panes" must not claim an action."""
+    titles = Frame(store, socket="sock")._pane_titles(_record(labels={"relay": "Lenka"}))
+
+    def reply(args):
+        if args[0] == "display-message":
+            pane = args[args.index("-t") + 1]
+            role = {"%1": "sidebar", "%2": "agent", "%3": "plan"}[pane]
+            return _Reply(titles[role])
+        return _Reply("")
+
+    frame, calls = _framed(store, monkeypatch, reply)
+
+    assert frame.retitle_panes(_record(labels={"relay": "Lenka"})) is False
+    assert not any(a[0] == "select-pane" for a, _kw in calls), "no writes were needed"
+
+
+def test_every_retitle_call_to_tmux_is_bounded(store, monkeypatch):
+    """Review finding 1. `cmd_label` reaches this path holding the workspace
+    mutation lock and tmux has no timeout of its own, so an unresponsive server
+    would hang labelling and block every other command waiting on that lock — and
+    an exception handler cannot recover from a call that never returns."""
+    frame, calls = _framed(store, monkeypatch, _Reply("OLD"))
+
+    frame.retitle_panes(_record(labels={"relay": "Lenka"}))
+
+    assert calls, "it must talk to tmux"
+    unbounded = [args for args, kwargs in calls if not kwargs.get("timeout")]
+    assert unbounded == [], unbounded
