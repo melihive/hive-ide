@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from hive_ide.frame import Frame
+from hive_ide.cli import main
+from hive_ide.drivers import bundled_drivers
 from hive_ide.store import StateStore
 
 
@@ -33,7 +36,9 @@ def test_saved_codex_launch_passes_private_process_flag(tmp_path, tail, prompt):
     if prompt:
         record["handoff"] = {"target_driver_prompt": prompt}
     command = Frame._agent_command(record)
-    env = dict(os.environ, SHELL="/bin/true")
+    shell_exit = shutil.which("true")
+    assert shell_exit, "The shell fixture requires the platform's true executable"
+    env = dict(os.environ, SHELL=shell_exit)
     result = subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     assert not result.stderr
@@ -70,3 +75,37 @@ def test_other_drivers_and_custom_wrappers_keep_their_argv():
         command = Frame._agent_command({"driver": {"id": driver, "launch_argv": argv}})
         assert "--no-daemon" not in command
         assert shlex.join(argv) in command
+
+
+def test_cli_resume_rebuild_cannot_remove_private_process_flag(tmp_path, monkeypatch):
+    # cmd_current_chat rebuilds saved argv through driver.resolve. Test that real
+    # dispatch and the executable boundary, not a hand-constructed resume command.
+    observed = tmp_path / "observed.json"
+    executable = tmp_path / "codex"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\nfrom pathlib import Path\n"
+        f"Path({str(observed)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(Frame, "role_panes", lambda *_: {})
+    monkeypatch.setattr(Frame, "clear_sleep", lambda *_: None)
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    store = StateStore(tmp_path / "state", str(tmp_path))
+    driver = bundled_drivers()["codex"].resolve(
+        name="RESUME", working_dir=str(tmp_path), conversation_reference="fixture-thread"
+    )
+    driver["launch_argv"] = ["codex", "--no-daemon", "--saved-only-flag"]
+    record = store.create_session(name="RESUME", working_dir=str(tmp_path),
+                                  source={}, driver=driver)
+    assert main(["--state-home", str(store.home), "--workspace-key", str(tmp_path),
+                 "--config", str(config), "chat", "--session-id", record["id"]]) == 0
+    assert json.loads(observed.read_text()) == [
+        "--no-daemon", "resume", "-C", str(tmp_path), "fixture-thread"
+    ]
+    # It really went through regeneration: persisted argv has neither saved flag.
+    assert store.find_session(record["id"])["driver"]["launch_argv"] == [
+        "codex", "resume", "-C", str(tmp_path), "fixture-thread"
+    ]

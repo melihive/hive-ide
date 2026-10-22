@@ -4,6 +4,23 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Bundled local Codex launches now use `--no-daemon`, including resumed chats and
+  commands regenerated from saved sessions. A shared Codex server could pass the
+  first IDE pane's identity to another pane's tools and hooks, attach its chat to
+  the wrong session, and leave the intended session without completion evidence
+  for rename or nudge. Isolation is enforced when executing the command, so a
+  driver refresh cannot remove it. Other drivers and custom wrappers are unchanged.
+
+### Note
+
+- Requires a Codex CLI supporting `--no-daemon` (live-tested with 0.163.0).
+  Existing Codex processes need to exit and reopen to use isolation. Previously
+  incorrect conversation bindings need a separate explicit repair; this update
+  does not guess their intended owner or relax the idle guard. Custom Codex
+  wrappers must provide equivalent isolation themselves.
+
 ## [1.0.100] - 2026-10-22
 
 ### Changed
