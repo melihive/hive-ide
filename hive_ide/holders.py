@@ -223,7 +223,46 @@ class ConversationHolders:
 
     @classmethod
     def _is_background_host(cls, command: str) -> bool:
-        return any(marker in command for marker in cls.BACKGROUND_MARKERS)
+        """Is this the background host ITSELF, by argv position rather than text?
+
+        A plain substring search reads `claude --resume <ref> "Explain bg-pty-host
+        detection"` as a background host — and that is the worse direction here,
+        because it makes the guard wave a real second driver through AND makes the
+        launch pick `attach` when there is nothing to attach to. This module already
+        learned the lesson once, when `~/.claude/` in an unrelated path made an
+        ordinary shell look like a driver.
+
+        So the marker has to sit where an invocation puts it: as the subcommand
+        straight after argv[0], or as a flag. Both forms appear in the real argv,
+        and the flag form is what an interpreter-launched host carries.
+        """
+        tokens = command.split()
+        if len(tokens) < 2:
+            return False
+        for marker in cls.BACKGROUND_MARKERS:
+            if tokens[1] == marker or f"--{marker}" in tokens:
+                return True
+        return False
+
+    @classmethod
+    def background_tree(
+        cls, reference: str, rows: list[tuple[int, int, str]] | None = None
+    ) -> set[int]:
+        """Pids holding `reference` that belong to a background session.
+
+        The host and everything beneath it. The host spawns the real driver as its
+        child, and that child is often a recognisable driver in its own right — an
+        npm-installed claude runs as `node …/claude-code/cli.js --session-id <ref>`
+        — while carrying no marker of its own. Exempting only the host therefore
+        left the child refusing the launch: the same lockout, one process down.
+        """
+        rows = cls._ps() if rows is None else rows
+        out: set[int] = set()
+        for host in cls.background_hosts(reference, rows=rows):
+            pid = int(host["pid"])            # type: ignore[arg-type]
+            out.add(pid)
+            out |= cls.descendants(pid, rows)
+        return out
 
     @classmethod
     def background_hosts(

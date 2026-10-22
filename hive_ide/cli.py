@@ -1141,10 +1141,11 @@ def _conversation_holders(
             # outside one, and reporting its own agent as a foreign holder would make
             # this finding noise on every healthy session.
             continue
+        backgrounded = ConversationHolders.background_tree(reference, rows=rows)
         for holder in ConversationHolders.holders(
             reference, exclude_tree=pane_pid, rows=rows
         ):
-            if holder["background"]:
+            if holder["pid"] in backgrounded:
                 # A backgrounded session holds its own conversation by design, and
                 # opening it attaches rather than launching a second driver. Calling
                 # that a finding would mark a frame unhealthy for using a supported

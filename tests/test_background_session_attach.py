@@ -213,3 +213,121 @@ def test_verify_still_reports_an_abandoned_driver_as_a_holder(store, monkeypatch
     found = _conversation_holders(frame, sessions, rows)
     assert [f["pid"] for f in found] == [4242]
     assert found[0]["orphaned"] is True
+
+
+# ── the four cross-model review findings ──────────────────────────────────────
+
+#: The host's child: the REAL driver, recognisable on its own (interpreter plus a
+#: known entrypoint), and carrying no background marker of its own.
+BG_CHILD = f"node /opt/claude-code/cli.js --session-id {REF}"
+
+
+def test_a_driver_beneath_the_background_host_does_not_refuse_the_launch(store, monkeypatch):
+    """Review finding 1. Exempting only the host left its child refusing — the same
+    lockout, one process down, and the shape an npm-installed claude always has."""
+    record = store.create_session(
+        name="AGENT CHAT",
+        working_dir=store.workspace_key,
+        source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
+        driver=_claude_record(REF)["driver"],
+    )
+    rows = [(100, 1, "sh -c agent"), (3837949, 1, BG_HOST), (3838014, 3837949, BG_CHILD)]
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: rows))
+
+    assert 3838014 in ConversationHolders.background_tree(REF, rows=rows)
+    frame.refuse_held_conversation(record)      # must not raise
+
+
+def test_verify_does_not_report_a_driver_beneath_the_background_host(store, monkeypatch):
+    """Same finding, other consumer: `verify` told the user to stop the child."""
+    from hive_ide.cli import _conversation_holders
+
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    sessions = [{"id": "s1", "name": "AGENT CHAT", "driver": {"resume": {"reference": REF}}}]
+    rows = [(100, 1, "sh -c agent"), (3837949, 1, BG_HOST), (3838014, 3837949, BG_CHILD)]
+
+    assert _conversation_holders(frame, sessions, rows) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'claude --resume {REF} Explain bg-pty-host detection',
+        f'claude --resume {REF} --name "bg-pty-host notes"',
+        f"/opt/bg-pty-host/bin/claude --resume {REF}",
+    ],
+)
+def test_the_marker_in_a_prompt_or_path_is_not_a_background_host(command):
+    """Review finding 3. A substring search waved a real second driver through AND
+    made the launch pick `attach` with nothing to attach to — both directions wrong
+    at once. This module already learned this once with `~/.claude/`."""
+    held = ConversationHolders.holders(REF, rows=[(10, 1, command)])
+    assert held, "it is still a holder"
+    assert held[0]["background"] is False
+    assert ConversationHolders.background_hosts(REF, rows=[(10, 1, command)]) == []
+
+
+def test_the_real_host_invocation_is_still_recognised():
+    """The precision above must not stop recognising the thing itself."""
+    assert ConversationHolders.holders(REF, rows=[(1, 1, BG_HOST)])[0]["background"] is True
+
+
+def test_attaching_uses_the_drivers_configured_executable(monkeypatch):
+    """Review finding 4. A declarative driver may replace the bundled command, and
+    attaching via PATH could reach a different install entirely."""
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts", classmethod(lambda cls, ref, **kw: [{"pid": 1}])
+    )
+    record = _claude_record(REF)
+    record["driver"]["launch_argv"] = ["/opt/custom/claude", "--resume", REF]
+    assert "/opt/custom/claude attach beaa08ff" in Frame._agent_command(record)
+
+
+def _build_fakes(monkeypatch, frame_cls):
+    monkeypatch.setattr(frame_cls, "_plan_command", lambda self, rec: "true")
+    monkeypatch.setattr(frame_cls, "_tag", lambda self, target, rec: None)
+    monkeypatch.setattr(frame_cls, "_apply_columns", lambda self, target: None)
+    monkeypatch.setattr(frame_cls, "_environment", lambda self, rec, role: [])
+    monkeypatch.setattr(frame_cls, "prepare_agent_launch", lambda self, rec: None)
+    monkeypatch.setattr(frame_cls, "_is_sleeping", lambda self, rec: False)
+    monkeypatch.setattr(
+        frame_cls, "tmux",
+        lambda self, argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+
+
+def test_attaching_keeps_an_undelivered_handoff_pending(store, monkeypatch):
+    """Review finding 2. An attach carries no handoff prompt, so clearing the record
+    dropped a context transfer that was never delivered."""
+    frame = Frame(store, socket="sock")
+    _build_fakes(monkeypatch, Frame)
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts", classmethod(lambda cls, ref, **kw: [{"pid": 1}])
+    )
+    cleared: list = []
+    monkeypatch.setattr(Frame, "_clear_consumed_handoff", lambda self, rec: cleared.append(rec))
+
+    frame._finish_build(_claude_record(REF), "@7", "/tmp")
+
+    assert cleared == [], "nothing was delivered, so the handoff must stay pending"
+
+
+def test_an_ordinary_launch_still_consumes_its_handoff(store, monkeypatch):
+    """The inverse, so the change above cannot become a handoff that never clears."""
+    frame = Frame(store, socket="sock")
+    _build_fakes(monkeypatch, Frame)
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts", classmethod(lambda cls, ref, **kw: [])
+    )
+    cleared: list = []
+    monkeypatch.setattr(Frame, "_clear_consumed_handoff", lambda self, rec: cleared.append(rec))
+
+    frame._finish_build(_claude_record(REF), "@7", "/tmp")
+
+    assert len(cleared) == 1

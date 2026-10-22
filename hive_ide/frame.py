@@ -765,7 +765,12 @@ class Frame:
             return None
         if not ConversationHolders.background_hosts(reference):
             return None
-        return ["claude", "attach", ConversationHolders.attach_id(reference)]
+        # The configured executable, not a bare `claude`: a declarative driver can
+        # replace the bundled command with an absolute path or a wrapper, and
+        # attaching through whatever is on PATH could reach a different install.
+        argv = driver.get("launch_argv") or []
+        executable = argv[0] if argv else "claude"
+        return [executable, "attach", ConversationHolders.attach_id(reference)]
 
     def _record_python(self, record: dict[str, Any]) -> str:
         source = record.get("source") or {}
@@ -1323,10 +1328,14 @@ class Frame:
         exclude = self.pane_pid(agent_pane) if agent_pane else None
         if agent_pane and exclude is None:
             return      # cannot establish ownership; do not refuse on a guess
-        held = ConversationHolders.holders(reference, exclude_tree=exclude)
-        # A background host is attachable, so it is not a conflict. Only the holders
-        # that would genuinely collide with a fresh driver can refuse a launch.
-        held = [h for h in held if not h["background"]]
+        rows = ConversationHolders.snapshot()
+        held = ConversationHolders.holders(reference, exclude_tree=exclude, rows=rows)
+        # A background session is attachable, so it is not a conflict. The exemption
+        # covers the host AND its children, because the host's child is usually the
+        # real driver and carries no marker of its own. Only holders that would
+        # genuinely collide with a fresh driver can refuse a launch.
+        backgrounded = ConversationHolders.background_tree(reference, rows=rows)
+        held = [h for h in held if h["pid"] not in backgrounded]
         if not held:
             return
         who = ", ".join(
@@ -1818,7 +1827,11 @@ class Frame:
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
-        self._clear_consumed_handoff(record)
+        if not self._attach_argv(record.get("driver") or {}):
+            # An attach carries no handoff prompt, so clearing the record here would
+            # drop a context transfer that was never delivered. Left pending, it
+            # reaches the next real launch instead.
+            self._clear_consumed_handoff(record)
         return target
 
     def ensure(self, record: dict[str, Any]) -> bool:
