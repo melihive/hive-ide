@@ -13,7 +13,10 @@ Two gates, shared by `nudge` and `Frame.driver_rename`:
 **Pane gate** (every driver, never bypassed by `force`): the agent pane is
 observable, alive, not a shell left behind after the agent exited (a typed line
 + Enter there would run as a command), and not in a tmux mode (copy-mode would
-interpret the keys). `nudge` additionally refuses when a human keystroke in that
+interpret the keys). tmux names the pane's process-group leader, and hive-ide
+runs every driver as a child of an `sh -c` wrapper, so a shell there is only
+"no agent" when it is not that wrapper or the wrapper has no non-shell child; a
+process table that cannot be read is refused. `nudge` additionally refuses when a human keystroke in that
 pane in the last 60 s is detectable; `driver_rename` skips that check because
 the human who just asked for the rename would always trip it.
 
@@ -51,6 +54,7 @@ tmux server cannot hold that lock.
 from __future__ import annotations
 
 import re
+import subprocess
 import time
 from typing import Any, Callable
 
@@ -115,6 +119,9 @@ class AgentNudge:
     BUSY_ROWS = 15
     DIALOG_ROWS = 20
     SHELL_COMMANDS = frozenset({"sh", "bash", "fish", "zsh", "dash", "ksh", "tcsh"})
+    # `Frame._interactive_command` prefix: every agent pane runs as
+    # `sh -c "unset NO_COLOR; <driver>; ...; exec $SHELL"`.
+    WRAPPER_PREFIX = "unset NO_COLOR;"
 
     def __init__(self, frame: Any, *, clock: Callable[[], float] = time.time):
         self.frame = frame
@@ -143,25 +150,65 @@ class AgentNudge:
         return self.frame.tmux(args, timeout=self.TMUX_TIMEOUT)
 
     def pane_facts(self, pane_id: str) -> dict[str, Any] | None:
-        """In-mode / current command / dead for the pane, or None if unobservable."""
+        """In-mode / current command / dead / pid for the pane, or None if unobservable."""
         result = self._tmux(
             [
                 "display-message",
                 "-p",
                 "-t",
                 pane_id,
-                "#{pane_in_mode}\t#{pane_current_command}\t#{pane_dead}",
+                "#{pane_in_mode}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}",
             ]
         )
         if result.returncode != 0:
             return None
         fields = result.stdout.rstrip("\n").split("\t")
-        if len(fields) != 3:
+        if len(fields) != 4:
             return None
-        in_mode, command, dead = (field.strip() for field in fields)
-        if not in_mode.isdigit() or dead not in {"0", "1"} or not command:
+        in_mode, command, dead, pid = (field.strip() for field in fields)
+        if not in_mode.isdigit() or dead not in {"0", "1"} or not command or not pid.isdigit():
             return None
-        return {"in_mode": in_mode != "0", "command": command, "dead": dead == "1"}
+        return {"in_mode": in_mode != "0", "command": command, "dead": dead == "1", "pid": pid}
+
+    def _ps(self, args: list[str]) -> str | None:
+        """`ps` stdout, or None when the process table cannot be read."""
+        try:
+            result = subprocess.run(
+                ["ps", *args], capture_output=True, text=True, timeout=self.TMUX_TIMEOUT
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    def wrapped_agent_running(self, pane_pid: str) -> bool | None:
+        """Is a driver running under the hive-ide `sh -c` wrapper in this pane?
+
+        True only when the pane process is the wrapper AND it has a live
+        non-shell child. A login shell (the wrapper `exec`s one once the driver
+        exits, and a sleeping session shows one) is False. None when the process
+        table cannot be read — never treated as "running".
+        """
+        args = self._ps(["-p", pane_pid, "-o", "args="])
+        if args is None:
+            return None
+        parts = args.strip().split(None, 2)
+        if (
+            len(parts) != 3
+            or parts[0].rsplit("/", 1)[-1] != "sh"
+            or parts[1] != "-c"
+            or not parts[2].startswith(self.WRAPPER_PREFIX)
+        ):
+            return False
+        table = self._ps(["-A", "-o", "ppid=,pid=,comm="])
+        if table is None:
+            return None
+        for line in table.splitlines():
+            fields = line.split(None, 2)
+            if len(fields) != 3 or fields[0] != pane_pid:
+                continue
+            if fields[2].strip().rsplit("/", 1)[-1].lstrip("-") not in self.SHELL_COMMANDS:
+                return True
+        return False
 
     def human_recent(self, pane_id: str) -> bool | None:
         """Did a client focused on `pane_id` send input in the last 60 s?
@@ -255,8 +302,14 @@ class AgentNudge:
         if facts is None:
             return False, "pane_unobservable", None
         command = facts["command"].rsplit("/", 1)[-1]
-        if facts["dead"] or command in self.SHELL_COMMANDS:
+        if facts["dead"]:
             return False, "agent_not_running", facts["command"]
+        if command in self.SHELL_COMMANDS:
+            running = self.wrapped_agent_running(facts["pid"])
+            if running is None:
+                return False, "pane_unobservable", None
+            if not running:
+                return False, "agent_not_running", facts["command"]
         if facts["in_mode"]:
             return False, "pane_in_mode", None
         if check_human:

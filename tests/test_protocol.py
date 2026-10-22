@@ -4972,7 +4972,7 @@ def test_driver_rename_sends_slash_command_to_forced_codex_agent_pane(tmp_path, 
     def tmux(args, **_kwargs):
         calls.append(args)
         if args[0] == "display-message":
-            return SimpleNamespace(returncode=0, stdout="0\tcodex\t0\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="0\tcodex\t0\t4100\n", stderr="")
         if args[0] == "capture-pane":
             return SimpleNamespace(returncode=0, stdout=screen, stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -4989,7 +4989,7 @@ def test_driver_rename_sends_slash_command_to_forced_codex_agent_pane(tmp_path, 
     }
     assert calls == [
         ["display-message", "-p", "-t", "%2",
-         "#{pane_in_mode}\t#{pane_current_command}\t#{pane_dead}"],
+         "#{pane_in_mode}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}"],
         ["send-keys", "-l", "-t", "%2", "/rename HIVE DRIVE"],
         ["send-keys", "-t", "%2", "Enter"],
     ]
@@ -5017,7 +5017,7 @@ def test_driver_rename_supports_claude_agent_pane(tmp_path, monkeypatch):
     def tmux(args, **_kwargs):
         calls.append(args)
         if args[0] == "display-message":
-            return SimpleNamespace(returncode=0, stdout="0\tclaude\t0\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="0\tclaude\t0\t4100\n", stderr="")
         if args[0] == "capture-pane":
             return SimpleNamespace(returncode=0, stdout=screen, stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
