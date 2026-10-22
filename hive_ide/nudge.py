@@ -111,8 +111,9 @@ class AgentNudge:
     )
     # Claude's composer sits between two horizontal rules (or inside a box) with
     # a `>`/`❯` prompt; an empty one shows nothing after the glyph, or the
-    # first-run `Try "…"` hint.
-    CLAUDE_RULE_RE = re.compile(r"^\s*[╭╰]?[─━]{8,}[╮╯]?\s*$")
+    # first-run `Try "…"` hint. Claude Code 2.1 writes the session name into the
+    # top rule (`──── DC WEB DEV ─`), so a rule may carry one inset label.
+    CLAUDE_RULE_RE = re.compile(r"^\s*[╭╰]?[─━]{8,}(?: [^─━]+ [─━]+)?[╮╯]?\s*$")
     CLAUDE_PROMPT_RE = re.compile(r"^\s*│?\s*[>❯]\s?(?P<text>.*?)\s*│?\s*$")
     CLAUDE_PLACEHOLDER_RE = re.compile(r'^Try ".*"$')
     COMPOSER_ROWS = 8
