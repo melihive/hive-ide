@@ -45,6 +45,9 @@ def _environ_from_procargs(raw: bytes) -> bytes:
     offset = raw.find(b"\0", header)
     if offset < 0:
         return b""
+    # tmux launches our wrapper with a nonempty argv[0]. PROCARGS2 cannot
+    # distinguish padding from an empty argv[0]; do not use this to identify
+    # arbitrary processes deliberately launched with that unsupported shape.
     while offset < len(raw) and raw[offset] == 0:
         offset += 1
     # Do not skip empty argv entries: they still count towards argc.

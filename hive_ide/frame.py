@@ -509,6 +509,9 @@ class Frame:
 
     @staticmethod
     def _process_tree(pid: int) -> list[int]:
+        if sys.platform == "darwin":
+            # One snapshot per traversal, not one ps invocation per descendant.
+            return sorted(ConversationHolders.descendants(pid, ConversationHolders.snapshot()))
         seen: set[int] = set()
         ordered: list[int] = []
         stack = [pid]

@@ -19,7 +19,7 @@ LEAK_PATTERNS = (
 def _pytest_tmp_processes(root: Path) -> list[tuple[int, str]]:
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
+            ["ps", "-axww", "-o", "pid=,command="],
             capture_output=True,
             text=True,
             check=False,
@@ -110,6 +110,20 @@ def _isolated_agent_stores(tmp_path_factory):
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolated_user_config(tmp_path_factory):
+    """Real tmux fixtures must not execute the developer's startup plugins."""
+    home = tmp_path_factory.mktemp("user-home")
+    (home / ".tmux.conf").write_text("")
+    previous = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    yield
+    if previous is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = previous
 
 
 CALLER_IDENTITY_KEYS = ("TMUX_PANE", "TMUX", "HIVE_IDE_TMUX_SOCKET")

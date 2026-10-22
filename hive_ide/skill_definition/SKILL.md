@@ -65,6 +65,9 @@ Codex launches use `--no-daemon` so commands and hooks inherit their own IDE
 pane's identity instead of the shared server's first session. This requires a
 Codex CLI that supports that flag. Existing running agents must be relaunched to
 use it; an already misattributed conversation record needs separate repair.
+Run `hive-ide verify` on each host before rollout; it checks the CLI visible
+to that invocation and reports failed compatibility probes. Run it with the same
+PATH used to launch the IDE. A passed probe does not relaunch existing processes.
 Custom Codex wrapper commands must pass the flag themselves.
 
 Use the new-session modal's `new` / `adopt existing` toggle to visually adopt

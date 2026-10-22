@@ -7,7 +7,7 @@ import conftest
 
 def test_cleanup_processes_are_scoped_to_one_run(monkeypatch):
     def run(argv, **kwargs):
-        assert argv == ["ps", "-axo", "pid=,command="]
+        assert argv == ["ps", "-axww", "-o", "pid=,command="]
         return subprocess.CompletedProcess(argv, 0, (
             " 101 python -m hive_ide.sidebar /fixtures/pytest-12/test/state\n"
             " 102 python -m hive_ide.sidebar /fixtures/pytest-123/test/state\n"
