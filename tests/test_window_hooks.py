@@ -2,6 +2,9 @@
 import shlex
 import subprocess
 import sys
+import os
+import time
+from pathlib import Path
 
 from hive_ide.frame import Frame
 from hive_ide.relayout import IdeRelayout
@@ -44,3 +47,58 @@ def test_layout_hook_holds_the_same_workspace_lock_as_cli(tmp_path, monkeypatch)
     ]) == 0
     assert held == [True]
     assert store.mutation_lock_held() is False
+
+
+def test_resize_hooks_debounce_before_cli_lock_and_only_newest_applies(tmp_path):
+    store = StateStore(tmp_path / "state", tmp_path)
+    applied = tmp_path / "applied"
+    script = """
+import sys
+from pathlib import Path
+from hive_ide.relayout import IdeRelayout
+state, workspace, ready, applied, label, height = sys.argv[1:]
+original = IdeRelayout._coalesced_by_newer_snap
+def debounce(path, **kwargs):
+    result = original(path, **kwargs)
+    Path(ready).write_text(str(result))
+    return result
+def apply(path):
+    with open(applied, 'a') as stream:
+        stream.write(label + '\\n')
+    return True
+IdeRelayout._coalesced_by_newer_snap = staticmethod(debounce)
+IdeRelayout._breaker_tripped = staticmethod(apply)
+raise SystemExit(IdeRelayout.main([
+    'relayout', '--state-home', state, '--workspace-key', workspace,
+    '--tmux-socket', 'fixture', '--mode', 'snap',
+    '--client-width', '180', '--client-height', height,
+]))
+"""
+    children = []
+    def start(label, height):
+        ready = tmp_path / label
+        child = subprocess.Popen([
+            sys.executable, "-c", script, str(store.home), store.workspace_key,
+            str(ready), str(applied), label, str(height),
+        ], env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])))
+        children.append(child)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            assert child.poll() is None
+            time.sleep(0.01)
+        assert ready.exists(), "debounce was blocked behind the CLI's lock"
+        assert ready.read_text() == "False"
+        assert not applied.exists(), "hook mutated panes before the CLI released its lock"
+        return child
+    try:
+        with store.mutation_lock():
+            start("old", 40)
+            start("new", 42)
+        for child in children:
+            assert child.wait(timeout=5) == 0
+        assert applied.read_text().splitlines() == ["new"]
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
