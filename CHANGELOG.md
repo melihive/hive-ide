@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.99] - 2026-10-22
+
+### Fixed
+
+- `hive-ide nudge` and driver rename refused live Claude panes as
+  `claude_composer_not_recognized`: current Claude Code prints the session name
+  inside the composer's top rule, which the rule pattern rejected. A rule may now
+  carry one inset label; drafts, dialogs and unrecognised screens still refuse.
+
 ## [1.0.98] - 2026-10-22
 
 ### Fixed
