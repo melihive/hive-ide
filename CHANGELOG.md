@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.100] - 2026-10-22
+
 ### Changed
 
 - `nudge` and `driver-rename` decide from hook state and never read the screen.
