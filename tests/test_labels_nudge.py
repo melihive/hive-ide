@@ -130,6 +130,9 @@ class FakeTmux:
         clients: str = "",
         clients_rc: int = 0,
         target: str = "%2",
+        pane_pid: str = "4100",
+        processes: list[tuple[str, str, str]] | None = None,
+        ps_ok: bool = True,
     ):
         self.screen = screen or []
         self.command = command
@@ -138,6 +141,11 @@ class FakeTmux:
         self.clients = clients
         self.clients_rc = clients_rc
         self.target = target
+        self.pane_pid = pane_pid
+        # `ps` rows as (ppid, pid, args); the default is the pane process alone,
+        # with no children. `ps_ok=False` = the process table cannot be read.
+        self.processes = processes if processes is not None else [("1", pane_pid, command)]
+        self.ps_ok = ps_ok
         self.calls: list[list[str]] = []
         self.timeouts: list[object] = []
 
@@ -155,7 +163,7 @@ class FakeTmux:
         if verb == "display-message":
             return SimpleNamespace(
                 returncode=0,
-                stdout=f"{self.in_mode}\t{self.command}\t{self.dead}\n",
+                stdout=f"{self.in_mode}\t{self.command}\t{self.dead}\t{self.pane_pid}\n",
                 stderr="",
             )
         if verb == "list-clients":
@@ -163,6 +171,17 @@ class FakeTmux:
         if verb == "capture-pane":
             return SimpleNamespace(returncode=0, stdout="\n".join(self.screen) + "\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def ps(self, args):
+        if not self.ps_ok:
+            return None
+        if args == ["-p", self.pane_pid, "-o", "args="]:
+            rows = [row for row in self.processes if row[1] == self.pane_pid]
+            return f"{rows[0][2]}\n" if rows else None
+        assert args == ["-A", "-o", "ppid=,pid=,comm="], args
+        return "".join(
+            f"{ppid:>5} {pid:>5} {cmd.split()[0]}\n" for ppid, pid, cmd in self.processes
+        )
 
     @property
     def sent(self) -> list[list[str]]:
@@ -173,6 +192,7 @@ def _frame(store, monkeypatch, fake: FakeTmux) -> Frame:
     frame = Frame(store)
     monkeypatch.setattr(frame, "role_panes", lambda _session_id: {"agent": "%2"})
     monkeypatch.setattr(frame, "tmux", fake)
+    monkeypatch.setattr(AgentNudge, "_ps", lambda _self, args: fake.ps(args))
     return frame
 
 
@@ -544,6 +564,69 @@ def test_nudge_refuses_a_shell_left_in_the_agent_pane(tmp_path, monkeypatch):
     )
     assert result["reason"] == "agent_not_running"
     assert fake.sent == []
+
+
+WRAPPER_ARGS = (
+    "sh -c unset NO_COLOR; claude --resume c-1 --name 'S'; status=$?; "
+    'if [ "$status" -ne 0 ]; then printf x; fi; exec "${SHELL:-/bin/sh}"'
+)
+
+
+def test_nudge_sends_to_claude_running_under_the_pane_wrapper(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(
+        command="sh", screen=IDLE_CLAUDE_SCREEN,
+        processes=[("1", "4100", WRAPPER_ARGS), ("4100", "4109", "claude --resume c-1")],
+    )
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["sent"] is True
+    assert result["reason"] == "claude_queues_input"
+
+
+def test_nudge_refuses_the_pane_wrapper_with_no_driver_child(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(
+        command="sh", screen=IDLE_CLAUDE_SCREEN,
+        processes=[("1", "4100", WRAPPER_ARGS), ("4100", "4109", "bash -c true")],
+    )
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "agent_not_running"
+    assert fake.sent == []
+
+
+def test_nudge_refuses_a_login_shell_even_with_a_child(tmp_path, monkeypatch):
+    # the wrapper exec'd fish after the driver exited; a command the human ran
+    # from that prompt is not the agent
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(
+        command="fish", screen=IDLE_CLAUDE_SCREEN,
+        processes=[("1", "4100", "-fish"), ("4100", "4109", "claude")],
+    )
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "agent_not_running"
+    assert fake.sent == []
+
+
+def test_nudge_refuses_when_the_process_table_is_unreadable(tmp_path, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    fake = FakeTmux(command="sh", screen=IDLE_CLAUDE_SCREEN, ps_ok=False)
+    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(record, "wake up")
+    assert result["reason"] == "pane_unobservable"
+    assert fake.sent == []
+
+
+def test_ps_failure_and_timeout_read_as_unobservable(monkeypatch):
+    def timed_out(*_args, **kwargs):
+        assert kwargs["timeout"] == AgentNudge.TMUX_TIMEOUT
+        raise subprocess.TimeoutExpired("ps", kwargs["timeout"])
+
+    monkeypatch.setattr("hive_ide.nudge.subprocess.run", timed_out)
+    assert AgentNudge(None).wrapped_agent_running("4100") is None
+    monkeypatch.setattr(
+        "hive_ide.nudge.subprocess.run",
+        lambda *_a, **_k: SimpleNamespace(returncode=1, stdout="", stderr="ps: boom"),
+    )
+    assert AgentNudge(None).wrapped_agent_running("4100") is None
 
 
 def test_nudge_refuses_a_pane_in_copy_mode(tmp_path, monkeypatch):
