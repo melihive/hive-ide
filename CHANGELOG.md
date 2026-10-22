@@ -6,6 +6,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
+- `test_switching_windows_shows_the_right_order_and_never_blanks_the_pane` no
+  longer fails on a loaded machine. It told a woken sidebar from an unwoken one
+  with a 250ms stale-order budget (a working wake measured 259-633ms under load).
+  It now freezes the left window's keep-alive, so only the wake hook can repaint
+  it: the correct order arriving at all (5s ceiling) proves the wake, with no
+  blank frame and an unchanged pane pid. Its setup waits on real conditions
+  (laid-out column painted, sidebar process exited) instead of fixed sleeps.
 - A Codex turn that ends in an error (an API 400, a usage limit) no longer reads
   as `working` forever. Codex runs no hook for a failed turn — no `Stop`, and its
   hook events have no failure event — so the status left by `UserPromptSubmit`
