@@ -21,6 +21,9 @@ All notable changes to `hive-ide` will be documented in this file.
 - Enforce Codex `--no-daemon` at execution as well as driver resolution, so
   legacy saved launch commands receive isolation even without a driver refresh.
   Other drivers and custom wrappers are unchanged.
+- Window switches paint the sidebar before adopting the layout. Layout hooks
+  share the CLI's workspace lock, preventing concurrent pane swaps from undoing
+  each other and reducing contention during the initial repaint.
 
 ### Note
 

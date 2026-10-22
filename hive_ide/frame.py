@@ -2339,17 +2339,7 @@ class Frame:
                 "adopt",
             ],
         )
-        self.tmux(
-            [
-                "set-hook",
-                "-a",
-                "-t",
-                self.target,
-                "session-window-changed",
-                f"run-shell -b {shlex.quote(adopt)}",
-            ]
-        )
-        # Third command on the same hook: the window tmux has just switched to only
+        # The window tmux has just switched to only
         # starts painting its sidebar when its keep-alive shell next probes, up to a
         # second later, so until then it shows the frame it painted when you last left
         # it — with a stale order. `wake` paints the correct frame onto that pane's tty
@@ -2357,7 +2347,9 @@ class Frame:
         # pane: respawning clears it, which replaced a 1.5s stale frame with a 401ms
         # blank one — worse to look at, and invisible to a test that only measured how
         # long the stale ORDER stayed readable.
-        # `-b` so it runs alongside `seen`/`adopt` rather than after them.
+        # Paint before layout adoption: competing interpreter starts and tmux
+        # queries delayed this visible update on macOS. Keep the whole hook
+        # asynchronous, but do layout work after the first frame is on screen.
         wake = self._module(
             "wake",
             [
@@ -2378,7 +2370,7 @@ class Frame:
                 "-t",
                 self.target,
                 "session-window-changed",
-                f"run-shell -b {shlex.quote(wake)}",
+                f"run-shell -b {shlex.quote(wake + '; ' + adopt)}",
             ]
         )
         self.tmux(

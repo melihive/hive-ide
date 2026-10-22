@@ -545,7 +545,10 @@ class IdeRelayout:
                 relayout_argv.extend([parsed.client_width, parsed.client_height])
             if parsed.window_id:
                 relayout_argv.append(parsed.window_id)
-            return IdeRelayout.main(relayout_argv)
+            # Hooks run outside the CLI. Share its workspace lock so a window
+            # switch cannot swap panes concurrently with an explicit relayout.
+            with store.mutation_lock():
+                return IdeRelayout.main(relayout_argv)
         if len(argv) < 4:
             return 0
         sock = argv[1]
