@@ -304,12 +304,23 @@ def test_wake_closes_the_descriptor_it_opened(store, monkeypatch, pty_path):
     monkeypatch.setattr(Frame, "pane_still_is", lambda self, pane_id, **kw: True)
     monkeypatch.setattr(IdeSidebar, "paint_fd", classmethod(lambda cls, *a: True))
 
-    before = len(os.listdir("/proc/self/fd"))
-    for _ in range(12):
-        IdeWake.wake(store.home, store.workspace_key, record["id"], "sock")
-    after = len(os.listdir("/proc/self/fd"))
+    opened = []
+    real_open = os.open
 
-    assert after <= before, f"descriptors leaked across 12 switches: {before} -> {after}"
+    def observe_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == pty_path:
+            opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", observe_open)
+    for _ in range(12):
+        assert IdeWake.wake(store.home, store.workspace_key, record["id"], "sock") is True
+        assert opened, "wake must actually open the pane's tty"
+        with pytest.raises(OSError) as error:
+            os.fstat(opened[-1])
+        assert error.value.errno == 9  # EBADF, not another observation failure
+    assert len(opened) == 12
 
 
 class _Reply:

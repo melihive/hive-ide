@@ -474,7 +474,22 @@ class Frame:
 
     @staticmethod
     def _child_pids(pid: int) -> list[int]:
-        """Direct children of `pid` (from procfs), unordered; `[]` when unreadable."""
+        """Direct children of `pid`, unordered; `[]` when unreadable."""
+        if sys.platform == "darwin":
+            try:
+                result = subprocess.run(
+                    ["ps", "-axo", "pid=,ppid="], capture_output=True,
+                    text=True, check=False, timeout=2,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return []
+            if result.returncode:
+                return []
+            return [
+                int(parts[0]) for line in result.stdout.splitlines()
+                if len(parts := line.split()) == 2
+                and all(part.isdigit() for part in parts) and int(parts[1]) == pid
+            ]
         children = Path(f"/proc/{pid}/task/{pid}/children")
         try:
             return [
@@ -508,10 +523,15 @@ class Frame:
 
     @staticmethod
     def _process_env(pid: int) -> dict[str, str]:
-        try:
-            raw = Path(f"/proc/{pid}/environ").read_bytes()
-        except OSError:
-            return {}
+        if sys.platform == "darwin":
+            from .darwin_env import process_environ
+
+            raw = process_environ(pid)
+        else:
+            try:
+                raw = Path(f"/proc/{pid}/environ").read_bytes()
+            except OSError:
+                return {}
         env: dict[str, str] = {}
         for item in raw.split(b"\0"):
             if b"=" not in item:

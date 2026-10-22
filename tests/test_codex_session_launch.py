@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from hive_ide.frame import Frame
-from hive_ide.cli import main
+from hive_ide.cli import main, _codex_isolation_findings
 from hive_ide.drivers import bundled_drivers
 from hive_ide.store import StateStore
 
@@ -109,3 +109,37 @@ def test_cli_resume_rebuild_cannot_remove_private_process_flag(tmp_path, monkeyp
     assert store.find_session(record["id"])["driver"]["launch_argv"] == [
         "codex", "resume", "-C", str(tmp_path), "fixture-thread"
     ]
+
+
+@pytest.mark.parametrize("compatible", [True, False])
+def test_verify_checks_codex_flag_without_starting_a_chat(tmp_path, compatible):
+    executable = tmp_path / "codex"
+    executable.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "assert sys.argv[1:] == ['--no-daemon', '--help']\n"
+        f"sys.exit({0 if compatible else 2})\n"
+    )
+    executable.chmod(0o755)
+    findings = _codex_isolation_findings([
+        {"driver": {"id": "codex", "launch_argv": [str(executable)]}},
+    ])
+    if compatible:
+        assert findings == []
+    else:
+        assert len(findings) == 1
+        assert "probe exited 2" in findings[0]
+        assert "Install a Codex CLI" in findings[0]
+
+
+def test_verify_does_not_probe_wrappers_and_reports_missing_or_hung_codex(tmp_path, monkeypatch):
+    assert _codex_isolation_findings([
+        {"driver": {"id": "codex", "launch_argv": ["custom-wrapper"]}},
+        {"driver": {"id": "claude", "launch_argv": ["claude"]}},
+    ]) == []
+    sessions = [{"driver": {"id": "codex", "launch_argv": [str(tmp_path / "codex")]}}]
+    assert "FileNotFoundError" in _codex_isolation_findings(sessions)[0]
+    def hung(*args, **kwargs):
+        assert kwargs["timeout"] == 5
+        raise subprocess.TimeoutExpired("codex", 5)
+    monkeypatch.setattr("hive_ide.cli.subprocess.run", hung)
+    assert "TimeoutExpired" in _codex_isolation_findings(sessions)[0]

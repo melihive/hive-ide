@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import getpass
 import os
 import signal
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
 
-PYTEST_TMP_ROOT = Path(tempfile.gettempdir()) / f"pytest-of-{getpass.getuser()}"
 LEAK_PATTERNS = (
     "hive_ide.sidebar",
     "tmux -L hive-ide-",
@@ -19,21 +16,27 @@ LEAK_PATTERNS = (
 )
 
 
-def _pytest_tmp_processes() -> list[tuple[int, str]]:
+def _pytest_tmp_processes(root: Path) -> list[tuple[int, str]]:
     try:
         result = subprocess.run(
-            ["pgrep", "-af", str(PYTEST_TMP_ROOT)],
+            ["ps", "-axo", "pid=,command="],
             capture_output=True,
             text=True,
             check=False,
+            timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode:
         return []
     rows: list[tuple[int, str]] = []
     for line in result.stdout.splitlines():
+        # Include the separator: pytest-12 must never match pytest-123.
+        if str(root) + os.sep not in line:
+            continue
         if not any(pattern in line for pattern in LEAK_PATTERNS):
             continue
-        pid, _, command = line.partition(" ")
+        pid, _, command = line.strip().partition(" ")
         if pid.isdigit() and int(pid) != os.getpid():
             rows.append((int(pid), command))
     return rows
@@ -72,7 +75,11 @@ def _kill_processes(pids: list[int]) -> None:
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     """Release gates must not leave real tmux/sidebar loops behind."""
-    processes = _pytest_tmp_processes()
+    factory = getattr(session.config, "_tmp_path_factory", None)
+    if factory is None:
+        return
+    root = factory.getbasetemp()
+    processes = _pytest_tmp_processes(root)
     for socket in _tmux_sockets(processes):
         subprocess.run(
             ["tmux", "-L", socket, "kill-server"],
@@ -81,7 +88,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
             check=False,
         )
     time.sleep(0.2)
-    _kill_processes([pid for pid, _command in _pytest_tmp_processes()])
+    _kill_processes([pid for pid, _command in _pytest_tmp_processes(root)])
 
 
 @pytest.fixture(autouse=True)

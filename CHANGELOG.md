@@ -6,6 +6,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
+- macOS pane ownership checks now read native process environments and direct
+  children, so healthy panes are observable by repair and lease restoration.
+  Arguments that look like environment assignments cannot supply pane identity.
+- Release tests use portable socket paths and file-descriptor checks. Cleanup is
+  scoped to its own test run, preventing concurrent suites from killing each
+  other's tmux processes.
+- `verify` checks whether each saved standard Codex executable accepts
+  `--no-daemon`, and reports an actionable compatibility finding when it cannot
+  confirm support. Unsupported clients never fall back to shared execution.
 - Bundled local Codex launches now use `--no-daemon`, including resumed chats and
   commands regenerated from saved sessions. A shared Codex server could pass the
   first IDE pane's identity to another pane's tools and hooks, attach its chat to

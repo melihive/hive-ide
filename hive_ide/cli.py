@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from importlib.resources import files
@@ -1204,11 +1205,41 @@ def _agentless_sessions(
     return out
 
 
+def _codex_isolation_findings(sessions: list[dict[str, Any]]) -> list[str]:
+    """Check the exact saved executable, without starting a chat or daemon."""
+    executables = {
+        argv[0] for session in sessions
+        if (driver := session.get("driver") or {}).get("id") == "codex"
+        and (argv := driver.get("launch_argv") or [])
+        and Path(argv[0]).name == "codex"
+    }
+    findings = []
+    for executable in sorted(executables):
+        try:
+            probe = subprocess.run(
+                [executable, "--no-daemon", "--help"], capture_output=True,
+                text=True, check=False, timeout=5,
+            )
+            if probe.returncode == 0:
+                continue
+            reason = f"probe exited {probe.returncode}"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            reason = type(exc).__name__
+        findings.append(
+            f"{executable}: could not confirm --no-daemon support ({reason}). "
+            "Install a Codex CLI that accepts this flag (validated with 0.163.0), "
+            "then rerun verify before reopening Codex sessions. "
+            "Hive IDE never falls back to the shared daemon."
+        )
+    return findings
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
     registry = configured_registry(config)
     sessions = store.list("sessions")
+    codex_isolation_findings = _codex_isolation_findings(sessions)
     source_errors = []
     for session in sessions:
         try:
@@ -1294,6 +1325,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not holder_findings
             and not agent_findings
             and not incomplete
+            and not codex_isolation_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1317,6 +1349,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "conversation_holders": held,
         "agent_findings": agent_findings,
         "agentless_sessions": agentless,
+        "codex_isolation_findings": codex_isolation_findings,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
             for driver_id in registry.ids()
