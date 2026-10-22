@@ -1499,10 +1499,11 @@ class Frame:
     ) -> dict[str, Any]:
         """Type `/rename <name>` into the live agent pane.
 
-        Same gates as `nudge` (`nudge.AgentNudge`): the pane must be a live,
-        observable agent outside copy mode; Claude must show no dialog and an
-        empty composer; Codex must be provably idle unless `force`. The recent-
-        human-keystroke check is skipped: the requester IS the human.
+        Same gates as `nudge` (`nudge.AgentNudge`), decided from hook state and
+        never the screen: the pane must be a live, observable agent outside copy
+        mode; Claude must have reported a hook and not have a dialog
+        Notification latest; Codex must be provably idle unless `force`. The
+        recent-human-keystroke check is skipped: the requester IS the human.
         """
         driver = record.get("driver") or {}
         driver_id = driver.get("id")
@@ -1519,13 +1520,13 @@ class Frame:
         from .nudge import AgentNudge
 
         gate = AgentNudge(self)
-        allowed, reason, detail = gate.pane_gate(pane_id, check_human=False)
+        allowed, reason, detail = gate.pane_gate(pane_id)
         if not allowed:
             raise UsageError(
                 f"The agent pane is not safe to type into ({reason}"
                 f"{': ' + detail if detail else ''}); /rename was not sent."
             )
-        allowed, reason = gate.driver_gate(record, pane_id, force=force)
+        allowed, reason = gate.driver_gate(record, force=force)
         if not allowed:
             if driver_id == "codex":
                 raise UsageError(
@@ -1535,8 +1536,8 @@ class Frame:
                 )
             raise UsageError(
                 f"Claude is not ready for typed input ({reason}); /rename was not "
-                "sent so it cannot answer a dialog or merge into a draft. Retry "
-                "once the dialog is closed and the input box is empty."
+                "sent so it cannot answer a dialog. Retry once the dialog is "
+                "closed (or, for state_unknown, once Claude has started)."
             )
         # Bounded like the gate's probes: a wedged tmux must never hold the
         # workspace lock the CLI takes around this command.
