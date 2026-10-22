@@ -4,6 +4,49 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.102] - 2026-10-22
+
+### Fixed
+
+- A session moved into the background can be opened again. A backgrounded driver
+  runs under its own detached host, which holds the conversation exactly as an
+  abandoned driver does — so the holder guard added in 1.0.96 refused to open it,
+  and the recorded error told the user to stop the process, which would have killed
+  the running session. A background session is now attached rather than refused:
+  the launch becomes the driver's own `attach` against the live session instead of
+  a second `--resume` that would never paint.
+- Being reparented to init is no longer read as abandonment on its own. A
+  background host is detached deliberately, so `ppid 1` is its normal state; the
+  orphan shape now requires that the holder is not a background host. The original
+  fault — a driver left holding a conversation with nothing owning it — still
+  reports as an orphan and still refuses a launch.
+- The exemption covers the whole background process tree, not just the host. The
+  host spawns the real driver as its child, and that child is often recognisable on
+  its own (an npm-installed driver runs as `node …/cli.js --session-id <ref>`)
+  while carrying no marker of its own, so exempting only the host left the child
+  refusing the launch — the same lockout one process down.
+- A failed window build no longer leaves a half-built window behind. The refusal
+  raises after the sidebar pane exists but before the panes are tagged, and an
+  untagged window can never be selected, because nothing maps a session to it. Each
+  retry therefore added another, each re-probing tmux once a second; fourteen
+  accumulated for one session before this was found. The window is now torn down
+  and the error still propagates.
+- `verify` no longer reports a backgrounded session as a conversation holder.
+  Holder findings fold into the `ok` verdict, so a frame was marked unhealthy for
+  using a supported feature, and the remedy printed alongside it was to stop a live
+  process.
+- An attach no longer consumes a handoff it never delivered. The attach carries no
+  handoff prompt, so the record is left pending for the next real launch instead of
+  being cleared as though it had been sent.
+- Attaching uses the driver's configured executable rather than a bare command
+  name, so a driver pinned to an absolute path or a wrapper is not bypassed via
+  `PATH`.
+- The background-host marker is matched by argv position rather than as a substring
+  of the whole command line. A conversation reference beside the words
+  `bg-pty-host` in a prompt previously read as a background session, which both
+  waved a genuine second driver through and selected `attach` when there was
+  nothing to attach to.
+
 ## [1.0.101] - 2026-10-22
 
 ### Fixed
