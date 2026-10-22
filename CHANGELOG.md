@@ -4,6 +4,35 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- macOS pane ownership checks now read native process environments and direct
+  children, so healthy panes are observable by repair and lease restoration.
+  Arguments that look like environment assignments cannot supply pane identity.
+  Repair reads one process snapshot and preserves the pane when its process tree
+  is unobservable.
+- Release tests use portable socket paths and file-descriptor checks. Cleanup is
+  scoped to its own test run, preventing concurrent suites from killing each
+  other's tmux processes. Real tmux tests use an isolated home configuration;
+  vocabulary checks ignore build folders relative to the tree being scanned.
+- `verify` checks whether each saved standard Codex executable accepts
+  `--no-daemon`, and reports an actionable compatibility finding when it cannot
+  confirm support. Unsupported clients never fall back to shared execution.
+- Enforce Codex `--no-daemon` at execution as well as driver resolution, so
+  legacy saved launch commands receive isolation even without a driver refresh.
+  Other drivers and custom wrappers are unchanged.
+- Window switches paint the sidebar before adopting the layout. Layout hooks
+  share the CLI's workspace lock, preventing concurrent pane swaps from undoing
+  each other and reducing contention during the initial repaint.
+
+### Note
+
+- Requires a Codex CLI supporting `--no-daemon` (live-tested with 0.163.0).
+  Existing Codex processes need to exit and reopen to use isolation. Previously
+  incorrect conversation bindings need a separate explicit repair; this update
+  does not guess their intended owner or relax the idle guard. Custom Codex
+  wrappers must provide equivalent isolation themselves.
+
 ## [1.0.101] - 2026-10-22
 
 ### Fixed

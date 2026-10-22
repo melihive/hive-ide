@@ -243,6 +243,25 @@ def _verify_args(tmp_path):
     )
 
 
+def test_codex_isolation_failure_makes_verify_not_ok(tmp_path, monkeypatch):
+    from hive_ide import cli
+
+    (tmp_path / "workspace").mkdir()
+    monkeypatch.setattr(cli, "_refresh_workspace_sources", lambda store: None)
+    monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
+    monkeypatch.setattr(Frame, "exists", lambda self: False)
+    monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
+    monkeypatch.setattr(cli.shutil, "which", lambda executable: "/fixture/" + executable)
+    findings = []
+    monkeypatch.setattr(cli, "_codex_isolation_findings", lambda sessions: findings)
+    assert cli.cmd_verify(_verify_args(tmp_path))["ok"] is True
+    findings.append("codex: could not confirm --no-daemon support")
+    result = cli.cmd_verify(_verify_args(tmp_path))
+    assert result["ok"] is False
+    assert result["codex_isolation_findings"] == findings
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

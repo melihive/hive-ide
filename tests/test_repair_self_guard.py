@@ -579,7 +579,13 @@ def test_deleted_plan_pane_cwd_respawns_only_the_plan_pane(live, tmp_path):
     assert respawned.returncode == 0, respawned.stderr
     assert _wait_for(lambda: _pane_cwd(live.frame, roles["plan"]) == str(doomed))
     doomed.rmdir()
-    assert _wait_for(lambda: _pane_cwd(live.frame, roles["plan"]).endswith(" (deleted)"))
+    # Linux appends " (deleted)"; macOS reports the now-missing path without it.
+    # Both prove this specific pane still points at the removed directory.
+    def points_at_deleted_cwd():
+        shown = _pane_cwd(live.frame, roles["plan"])
+        return shown.removesuffix(" (deleted)") == str(doomed) and not doomed.exists()
+
+    assert _wait_for(points_at_deleted_cwd), _pane_cwd(live.frame, roles["plan"])
 
     result = live.repair()
 

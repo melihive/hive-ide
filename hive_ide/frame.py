@@ -474,7 +474,22 @@ class Frame:
 
     @staticmethod
     def _child_pids(pid: int) -> list[int]:
-        """Direct children of `pid` (from procfs), unordered; `[]` when unreadable."""
+        """Direct children of `pid`, unordered; `[]` when unreadable."""
+        if sys.platform == "darwin":
+            try:
+                result = subprocess.run(
+                    ["ps", "-axo", "pid=,ppid="], capture_output=True,
+                    text=True, check=False, timeout=2,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return []
+            if result.returncode:
+                return []
+            return [
+                int(parts[0]) for line in result.stdout.splitlines()
+                if len(parts := line.split()) == 2
+                and all(part.isdigit() for part in parts) and int(parts[1]) == pid
+            ]
         children = Path(f"/proc/{pid}/task/{pid}/children")
         try:
             return [
@@ -494,6 +509,9 @@ class Frame:
 
     @staticmethod
     def _process_tree(pid: int) -> list[int]:
+        if sys.platform == "darwin":
+            # One snapshot per traversal, not one ps invocation per descendant.
+            return sorted(ConversationHolders.descendants(pid, ConversationHolders.snapshot()))
         seen: set[int] = set()
         ordered: list[int] = []
         stack = [pid]
@@ -508,10 +526,15 @@ class Frame:
 
     @staticmethod
     def _process_env(pid: int) -> dict[str, str]:
-        try:
-            raw = Path(f"/proc/{pid}/environ").read_bytes()
-        except OSError:
-            return {}
+        if sys.platform == "darwin":
+            from .darwin_env import process_environ
+
+            raw = process_environ(pid)
+        else:
+            try:
+                raw = Path(f"/proc/{pid}/environ").read_bytes()
+            except OSError:
+                return {}
         env: dict[str, str] = {}
         for item in raw.split(b"\0"):
             if b"=" not in item:
@@ -758,10 +781,30 @@ class Frame:
         }
         return json.dumps(marker, separators=(",", ":"), sort_keys=True)
 
+    @staticmethod
+    def _agent_argv(record: dict[str, Any]) -> list[str]:
+        """Keep Codex execution and hooks in the process spawned for this session.
+
+        Its shared daemon inherits the first TUI's pane environment. A later
+        session then sends commands and completion hooks with that other pane's
+        identity. Apply the opt-out at launch, including stored pre-fix argv.
+        Custom wrappers retain responsibility for their own command-line flags.
+        """
+        driver = record.get("driver") or {}
+        argv = list(driver.get("launch_argv") or [])
+        if (
+            driver.get("id") == "codex"
+            and argv
+            and Path(argv[0]).name == "codex"
+            and "--no-daemon" not in argv
+        ):
+            argv.insert(1, "--no-daemon")
+        return argv
+
     @classmethod
     def _agent_command(cls, record: dict[str, Any]) -> str:
         driver = record.get("driver") or {}
-        argv = driver.get("launch_argv") or [os.environ.get("SHELL", "/bin/sh")]
+        argv = cls._agent_argv(record) or [os.environ.get("SHELL", "/bin/sh")]
         argv = cls._argv_with_handoff_prompt(argv, record)
         command = shlex.join(argv)
         handoff = record.get("handoff")
@@ -1148,7 +1191,7 @@ class Frame:
 
     def current_chat(self, record: dict[str, Any]) -> dict[str, Any]:
         driver = record.get("driver") or {}
-        argv = list(driver.get("launch_argv") or [])
+        argv = self._agent_argv(record)
         if not argv:
             raise UsageError("The session has no agent command to resume.")
         pane_id = (self.role_panes(record["id"]) or {}).get("agent")
@@ -2296,17 +2339,7 @@ class Frame:
                 "adopt",
             ],
         )
-        self.tmux(
-            [
-                "set-hook",
-                "-a",
-                "-t",
-                self.target,
-                "session-window-changed",
-                f"run-shell -b {shlex.quote(adopt)}",
-            ]
-        )
-        # Third command on the same hook: the window tmux has just switched to only
+        # The window tmux has just switched to only
         # starts painting its sidebar when its keep-alive shell next probes, up to a
         # second later, so until then it shows the frame it painted when you last left
         # it — with a stale order. `wake` paints the correct frame onto that pane's tty
@@ -2314,7 +2347,9 @@ class Frame:
         # pane: respawning clears it, which replaced a 1.5s stale frame with a 401ms
         # blank one — worse to look at, and invisible to a test that only measured how
         # long the stale ORDER stayed readable.
-        # `-b` so it runs alongside `seen`/`adopt` rather than after them.
+        # Paint before layout adoption: competing interpreter starts and tmux
+        # queries delayed this visible update on macOS. Keep the whole hook
+        # asynchronous, but do layout work after the first frame is on screen.
         wake = self._module(
             "wake",
             [
@@ -2335,7 +2370,7 @@ class Frame:
                 "-t",
                 self.target,
                 "session-window-changed",
-                f"run-shell -b {shlex.quote(wake)}",
+                f"run-shell -b {shlex.quote(wake + '; ' + adopt)}",
             ]
         )
         self.tmux(

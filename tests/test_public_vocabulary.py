@@ -71,7 +71,7 @@ def vocabulary_violations(root: Path) -> list[str]:
             part in SKIP_PARTS
             or part.startswith(".venv")
             or part.endswith(".egg-info")
-            for part in path.parts
+            for part in path.relative_to(root).parts
         ):
             continue
         text = path.read_text(encoding="utf-8")
@@ -105,7 +105,7 @@ def host_violations(root: Path) -> list[str]:
     violations: list[str] = []
     for path in sorted(root.rglob("*.py")):
         if any(
-            part in SKIP_PARTS or part.startswith(".venv") for part in path.parts
+            part in SKIP_PARTS or part.startswith(".venv") for part in path.relative_to(root).parts
         ):
             continue
         text = path.read_text(encoding="utf-8")
