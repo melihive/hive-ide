@@ -176,6 +176,55 @@ class Frame:
         rows.sort(key=lambda r: r["created_epoch"] or 0, reverse=True)
         return rows
 
+    def half_built_windows(self) -> list[dict[str, Any]] | None:
+        """Windows on this frame that a build began and never finished.
+
+        A frame window has three panes, each tagged with its role. ONE pane with no
+        role tag is a build that created the window and then aborted before tagging
+        it — and because nothing maps a session to an untagged window, such a window
+        can never be selected from the sidebar. So it is invisible except as
+        clutter, while its sidebar keep-alive re-probes tmux once a second forever.
+        Fourteen accumulated for a single session on 2026-10-22, when a launch
+        refusal raised mid-build; `build` now tears its own window down, so these
+        are either residue from before that fix or a new abort worth knowing about.
+
+        Scoped to this frame's OWN session rather than the whole socket: an
+        unmanaged session sharing the socket legitimately has untagged one-pane
+        windows, and reporting those would make this finding noise.
+
+        Returns [] for "scanned, none found" and **None** for "could not scan" —
+        three states, not two. Collapsing the scan failure into an empty list let
+        `verify` report a confidently healthy frame on a check that never ran, which
+        is the whole reason `incomplete` exists.
+        """
+        if not self.exists():
+            return []
+        result = self.tmux(
+            [
+                "list-panes",
+                "-s",
+                "-t",
+                self.target,
+                "-F",
+                "#{window_id}\t#{window_name}\t#{@hive_ide_pane}",
+            ]
+        )
+        if result.returncode != 0:
+            return None             # could not look; not the same as nothing there
+        panes: dict[str, list[tuple[str, str]]] = {}
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3:
+                continue
+            window, name, role = (f.strip() for f in fields)
+            panes.setdefault(window, []).append((name, role))
+        out = [
+            {"window": window, "name": rows[0][0]}
+            for window, rows in panes.items()
+            if len(rows) == 1 and not rows[0][1]
+        ]
+        return sorted(out, key=lambda row: row["window"])
+
     def unmanaged_sessions(self) -> list[dict[str, Any]]:
         """Sessions on this socket that are not this frame.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -82,6 +83,102 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
         )
     time.sleep(0.2)
     _kill_processes([pid for pid, _command in _pytest_tmp_processes()])
+
+
+def _kill_servers_under(root: Path) -> None:
+    """Stop every tmux server whose socket lives under `root`.
+
+    Addressed by socket PATH (`-S`), not by name (`-L`), so it does not depend on
+    `TMUX_TMPDIR` still pointing here when this runs.
+    """
+    for directory in (root, root / f"tmux-{os.getuid()}"):
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            # Never follow a link out of the sandbox, and only ever address a real
+            # socket. Without this, a symlink planted where this directory is
+            # expected would have cleanup issuing `kill-server` against whatever it
+            # points at — the machine's real tmux directory included.
+            try:
+                if entry.is_symlink() or not entry.is_socket():
+                    continue
+            except OSError:
+                continue
+            try:
+                subprocess.run(
+                    ["tmux", "-S", str(entry), "kill-server"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+
+def _isolation_root() -> Path | None:
+    """A private directory for this run's tmux sockets, or None if none can be made.
+
+    Two constraints shape this, and both have bitten:
+
+    `mkdtemp`, never a predictable name with `exist_ok=True`. The directory is
+    created atomically at mode 0700, so another local user cannot pre-create it with
+    `tmux-<uid>` symlinked at this machine's real tmux directory and have the
+    cleanup below issue `kill-server` against every socket there.
+
+    `/tmp` by preference, not `TMPDIR`. A unix socket path is capped near 108 bytes
+    and tmux appends `tmux-<uid>/<name>` to whatever this returns; `TMPDIR` is
+    already long on macOS (`/var/folders/…`), which pushes a real socket path past
+    the limit and makes every real-tmux test fail to start rather than isolate.
+    """
+    for base in ("/tmp", tempfile.gettempdir()):
+        try:
+            return Path(tempfile.mkdtemp(prefix="hive-ide-t-", dir=base))
+        except OSError:
+            continue
+    return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_tmux_tmpdir():
+    """Keep every tmux server a test starts out of this machine's tmux directory.
+
+    tmux leaves the socket FILE behind when its server dies, and a test's own
+    `kill-server` does not remove it — so a suite that spawns real servers drops one
+    file per test into `/tmp/tmux-<uid>` and nothing in the suite ever collects it.
+    462 had accumulated by 2026-10-22, and that is not merely untidy: it made the
+    socket listing unusable for reading a real frame, which is how a stale session
+    stayed hidden. The in-package reaper does collect them, but only on `open` and
+    only once an hour has passed, so the suite creates them faster than it clears
+    them (150 in one afternoon's runs).
+
+    Fixing it here rather than in each teardown is deliberate. Ten test files mint a
+    socket and six call `kill-server` in their own cleanup; patching each is six
+    chances to miss one, and the seventh test written next month misses it for free.
+    Pointing the whole run at its own directory means nothing a test starts can reach
+    the real directory even if its teardown never runs at all — an assertion failure,
+    a crash, or a `-x` abort included.
+
+    Tests that assert on the DEFAULT location override this with monkeypatch, which
+    restores it per test, so they are unaffected.
+    """
+    saved = os.environ.get("TMUX_TMPDIR")
+    root = _isolation_root()
+    if root is None:
+        yield None          # cannot isolate; run as before rather than fail the suite
+        return
+    os.environ["TMUX_TMPDIR"] = str(root)
+    try:
+        yield root
+    finally:
+        _kill_servers_under(root)
+        if saved is None:
+            os.environ.pop("TMUX_TMPDIR", None)
+        else:
+            os.environ["TMUX_TMPDIR"] = saved
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

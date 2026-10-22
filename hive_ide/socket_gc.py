@@ -122,6 +122,35 @@ class SocketReaper:
         """
         return self._identity(entry) == judged
 
+    def inventory(self) -> int | None:
+        """How many of this package's socket files have no server behind them.
+
+        Deliberately NOT the sweep's candidate list. `sweep` answers "what may I
+        delete right now", which excludes everything under `MIN_AGE_SECONDS` and
+        stops at `MAX_REMOVALS` — so reporting it as inventory said ZERO on an
+        afternoon that had just produced 150 fresh ones, which is precisely the
+        question inventory is asked.
+
+        None when the directory cannot be read: "could not look" must never render
+        as "none". Symlinks and non-sockets are skipped, as in the sweep.
+        """
+        try:
+            entries = sorted(self.directory.iterdir())
+        except OSError:
+            return None
+        count = 0
+        for entry in entries:
+            if not entry.name.startswith(self.PREFIX):
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_socket():
+                    continue
+            except OSError:
+                continue
+            if self.is_listening(entry) is False:
+                count += 1
+        return count
+
     def sweep(self, *, keep: set[str] | None = None, apply: bool = False) -> dict:
         """Report, and optionally remove, the dead sockets in this directory."""
         kept = set(keep or ())

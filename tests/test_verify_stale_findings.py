@@ -165,6 +165,10 @@ def test_verify_does_not_read_the_process_table_with_no_frame_running(tmp_path, 
     monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
     monkeypatch.setattr(Frame, "exists", lambda self: False)
     monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    # `exists` is faked True with no real server behind it, so the pane scan would
+    # correctly report "could not scan" and make verify incomplete. Stubbed like
+    # every other collaborator here: this test is about a different condition.
+    monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
     monkeypatch.setattr(
         ConversationHolders, "snapshot", classmethod(lambda cls: called.append(1) or [])
     )
@@ -192,6 +196,10 @@ def test_an_unreadable_process_table_makes_verify_incomplete_not_ok(tmp_path, mo
     monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    # `exists` is faked True with no real server behind it, so the pane scan would
+    # correctly report "could not scan" and make verify incomplete. Stubbed like
+    # every other collaborator here: this test is about a different condition.
+    monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
     monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
     monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: []))
     monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
@@ -215,6 +223,10 @@ def test_an_unmanaged_session_is_reported_but_does_not_fail_verify(tmp_path, mon
     monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    # `exists` is faked True with no real server behind it, so the pane scan would
+    # correctly report "could not scan" and make verify incomplete. Stubbed like
+    # every other collaborator here: this test is about a different condition.
+    monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
     monkeypatch.setattr(
         Frame,
         "unmanaged_sessions",
@@ -295,6 +307,7 @@ def test_verify_is_ok_when_none_of_the_three_conditions_is_present(tmp_path, mon
         Frame, "attached_clients", lambda self: [{"client": "/dev/pts/0", "size": "200x50", "last_active_epoch": 1}]
     )
     monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
+    monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
     monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions, rows: [])
     monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
 
@@ -395,6 +408,10 @@ def test_verify_is_not_ok_when_a_session_has_no_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    # `exists` is faked True with no real server behind it, so the pane scan would
+    # correctly report "could not scan" and make verify incomplete. Stubbed like
+    # every other collaborator here: this test is about a different condition.
+    monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
     monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
     monkeypatch.setattr(cli, "_conversation_holders", lambda frame, sessions, rows: [])
     monkeypatch.setattr(ConversationHolders, "snapshot", classmethod(lambda cls: [(1, 0, "init")]))

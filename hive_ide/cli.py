@@ -1289,6 +1289,32 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "the pane permanently blank; stop that process before reopening the session."
         for h in held
     ]
+    # None means the scan could not run, which must reach `incomplete` rather than
+    # read as an empty finding list (see `half_built_windows`).
+    scanned_windows = frame.half_built_windows() if frame.exists() else []
+    half_built = scanned_windows or []
+    if scanned_windows is None:
+        incomplete = incomplete + [
+            "could not list the frame's panes, so the half-built-window check did "
+            "not run"
+        ]
+    half_built_findings = [
+        f"window {w['window']} ({w['name']!r}) holds one untagged pane: a build that "
+        "began and never finished. Nothing maps a session to an untagged window, so "
+        "it cannot be opened from the sidebar, and its sidebar loop keeps probing "
+        f"tmux once a second. Close it with `tmux -L {frame.socket} kill-window -t "
+        f"{w['window']}`."
+        for w in half_built
+    ]
+    # Inventory, not a verdict: a dead socket FILE is clutter, never a fault. It is
+    # reported because the only thing that collects it runs on `open` and skips
+    # anything under an hour old, so a question as ordinary as "is the suite
+    # cleaning up after itself?" had no answer short of listing the directory by
+    # hand — and by then 462 had accumulated and were hiding a stale session.
+    try:
+        dead_sockets = SocketReaper(Path(frame.socket_path()).parent).inventory()
+    except Exception:
+        dead_sockets = None          # could not look; not the same as none
     hook_findings = HookInstaller(
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
@@ -1301,6 +1327,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not client_findings
             and not holder_findings
             and not agent_findings
+            and not half_built_findings
             and not incomplete
         ),
         "protocol_version": PROTOCOL_VERSION,
@@ -1325,6 +1352,10 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "conversation_holders": held,
         "agent_findings": agent_findings,
         "agentless_sessions": agentless,
+        "half_built_findings": half_built_findings,
+        "half_built_windows": half_built,
+        # Inventory only — see the comment where this is computed.
+        "dead_sockets": dead_sockets,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
             for driver_id in registry.ids()

@@ -267,3 +267,59 @@ def test_open_sweeps_only_this_frames_socket_directory(tmp_path, monkeypatch):
 
     assert not mine.exists(), "the frame's own directory should be swept"
     assert theirs.exists(), "no other directory may be touched"
+
+
+# ── inventory is a count, not a deletion plan ─────────────────────────────────
+
+
+def test_inventory_counts_a_dead_socket_the_sweep_is_too_young_to_remove(tmp_path):
+    """Review finding 4, and the case that made it worth fixing: `verify` reported
+    the sweep's CANDIDATE count as inventory, so on an afternoon that had just
+    produced 150 fresh dead sockets it answered zero — the exact question being
+    asked. Deletion eligibility and existence are different questions."""
+    _dead_socket(tmp_path, "hive-ide-fresh001", age=60.0)
+
+    assert SocketReaper(tmp_path).sweep()["dead"] == [], "too young to delete"
+    assert SocketReaper(tmp_path).inventory() == 1, "but it is certainly there"
+
+
+def test_inventory_is_not_capped_by_the_removal_limit(tmp_path, monkeypatch):
+    """`MAX_REMOVALS` bounds how much one sweep will delete. Counting through it
+    silently understates a directory that is worse than the cap — which is how the
+    real one reported 500 while holding more."""
+    monkeypatch.setattr(SocketReaper, "MAX_REMOVALS", 2)
+    for index in range(5):
+        _dead_socket(tmp_path, f"hive-ide-many{index:04d}")
+
+    assert len(SocketReaper(tmp_path).sweep()["dead"]) == 2
+    assert SocketReaper(tmp_path).inventory() == 5
+
+
+def test_inventory_does_not_count_a_live_socket(tmp_path):
+    server, _path = _live_socket(tmp_path, "hive-ide-alive001")
+    try:
+        _dead_socket(tmp_path, "hive-ide-dead0001")
+        assert SocketReaper(tmp_path).inventory() == 1
+    finally:
+        server.close()
+
+
+def test_inventory_ignores_names_this_package_does_not_hand_out(tmp_path):
+    _dead_socket(tmp_path, "someone-elses-socket")
+
+    assert SocketReaper(tmp_path).inventory() == 0
+
+
+def test_inventory_ignores_a_symlink_and_a_plain_file(tmp_path):
+    (tmp_path / "hive-ide-plainfile").write_text("x", encoding="utf-8")
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (tmp_path / "hive-ide-linked01").symlink_to(target)
+
+    assert SocketReaper(tmp_path).inventory() == 0
+
+
+def test_an_unreadable_directory_is_unknown_not_zero(tmp_path):
+    """Zero dead sockets and "I could not look" are different answers, and only one
+    of them means the directory is clean."""
+    assert SocketReaper(tmp_path / "does-not-exist").inventory() is None
