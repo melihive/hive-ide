@@ -4,6 +4,39 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.104] - 2026-10-22
+
+### Added
+
+- The chat pane's title names the session's relay agent — `HIDE (Lenka)` — so a
+  window says which agent it belongs to. The relay name is how these sessions are
+  referred to in conversation, and until now the mapping existed only in the relay
+  board's output. A session with no relay label shows its name alone rather than
+  empty brackets, which is the common case rather than an edge one. The sidebar and
+  the plan pane are unchanged; this is the chat pane only.
+- Setting a label repaints the pane titles in the same call. The label is written
+  by relay registration long after the window was built, so without this the name
+  appeared only on the next rebuild. Recording the label no longer depends on a
+  frame being up, so labelling a sleeping session still works.
+
+### Fixed
+
+- Retitling reports whether the titles were actually written. The results of the
+  tmux writes were discarded, so a caller was told the panes had been retitled even
+  when every write failed against a wedged server.
+- The tmux calls made while retitling are bounded. They run while the workspace
+  mutation lock is held and tmux has no timeout of its own, so an unresponsive
+  server could hang the call indefinitely and block every other command and hook
+  waiting on that lock — which no exception handler can recover from.
+
+### Note
+
+- The relay label is sanitised and length-bounded before it reaches the title.
+  `pane-border-format` renders the title through a format string, where `#` opens a
+  format or style sequence, so a `#` arriving from registration would distort the
+  border rather than print; and the chat pane's border is narrow enough that a long
+  name would crowd out the session name it annotates.
+
 ## [1.0.103] - 2026-10-22
 
 ### Fixed
