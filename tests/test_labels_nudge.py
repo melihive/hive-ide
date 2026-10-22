@@ -946,7 +946,7 @@ def test_claude_hint_is_decided_by_the_dim_attribute_when_escapes_exist(prompt_r
         ("────── AGENT CHAT ─", True),
         ("── X ─", True),
         ("─ X ─", True),
-        ("─ relay-probe-zen ─", True),
+        ("─ relay-probe-host ─", True),
         (" X ─", False),
         ("── X", False),
         ("── A ── B ─", False),
