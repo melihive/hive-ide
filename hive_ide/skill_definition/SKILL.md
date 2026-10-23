@@ -43,6 +43,7 @@ managed environment, use `pipx install hive-ide`.
 - `hive-ide attach-conversation --session-id=<ID> --reference=<REFERENCE>`
 - `hive-ide working-dir-set --session-id=<ID> --working-dir=<PATH>`
 - `hive-ide sleep [--session-id=<ID>]`
+- `hive-ide wake --session=<ID> --prompt=<TEXT>`
 - `hive-ide archive --session-id=<ID>`
 - `hive-ide resume --session-id=<ID>`
 - `hive-ide monitor` or `hive-ide top`
@@ -96,6 +97,20 @@ stores it and the first launch passes it as the driver's initial prompt argument
 it. The prompt is at most 4000 characters, has no control characters other than
 newline and tab, and must not start with `-`. It is refused with `--adopt` and for
 any other driver. Probe `capabilities` for `launch-prompt` before relying on it.
+
+`wake --session=<ID> --prompt=<TEXT>` wakes a SLEEPING session (one put to sleep
+with `sleep`, shown with the sleeping glyph) and resumes its conversation with
+`<TEXT>` as a one-shot launch prompt: `claude --resume <id> <TEXT>`,
+`codex resume <thread> <TEXT>`. It builds the session's window, or relaunches the
+agent pane of the window it already has; nothing is typed, the window is not
+selected, and the prompt is dropped once delivered. The prompt follows the
+`create --prompt` rules. It prints one JSON object: `{"ok": true, "woke": true,
+"session": "<id>"}` and exits 0; a refusal exits 2 with `{"ok": false, "woke":
+false, "reason": ...}` and changes nothing, where reason is `not_sleeping`,
+`unknown_session`, `bad_prompt` or `driver_unsupported`. Any other failure exits 1
+with a reason (`no_conversation` when there is nothing to resume,
+`handoff_pending`, `conversation_backgrounded`, `launch_failed` — which puts the
+session back to sleep — or `failed`). Probe `capabilities` for `wake-prompt`.
 
 `driver-rename` is the one typed input left: the human asks for it, and it types
 `/rename <name>` into their own agent pane. The gate never reads the screen; it

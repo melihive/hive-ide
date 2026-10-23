@@ -73,6 +73,7 @@ def test_capabilities(capsys):
             "launch-prompt",
             "turn-sequencing",
             "driver-rename-guard",
+            "wake-prompt",
         ],
     }
 

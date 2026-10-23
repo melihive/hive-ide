@@ -1463,6 +1463,34 @@ class Frame:
             raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
         return True
 
+    def wake_agent(self, record: dict[str, Any]) -> str:
+        """Launch a woken session's driver through the ordinary launch paths.
+
+        The caller has already cleared the sleep state and stored the one-shot
+        launch prompt, so `_agent_command` resumes the conversation with the
+        prompt as its last argv. No window: `build` makes one. A window (the
+        sleeping shell in its agent pane): `respawn_agent` relaunches that pane.
+        Nothing is typed into any pane. Returns "built" or "respawned".
+        """
+        target = self.windows().get(record["id"])
+        if not target:
+            self.build(record)
+            return "built"
+        roles = self._role_panes_in_window(target)
+        pane_id = (roles or {}).get("agent")
+        if not pane_id:
+            raise HiveIdeError(
+                "The session window's agent pane could not be found; run "
+                "`hive-ide repair` and retry."
+            )
+        if not self.respawn_agent(record, pane_id):
+            raise HiveIdeError(
+                "The agent pane may be the pane this command runs in; run wake "
+                "from another pane or a plain terminal."
+            )
+        self._clear_consumed_handoff(record)
+        return "respawned"
+
     def sleep_agent(self, record: dict[str, Any]) -> dict[str, Any]:
         driver = record.get("driver") or {}
         if driver.get("id") == "term":
@@ -1953,10 +1981,13 @@ class Frame:
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
-        if not self._attach_argv(record.get("driver") or {}):
-            # An attach carries no handoff prompt, so clearing the record here would
-            # drop a context transfer that was never delivered. Left pending, it
-            # reaches the next real launch instead.
+        if not self._is_sleeping(record) and not self._attach_argv(
+            record.get("driver") or {}
+        ):
+            # An attach carries no handoff prompt, and a sleeping window launches no
+            # driver at all, so clearing the record in either case would drop a
+            # prompt that was never delivered. Left pending, it reaches the next
+            # real launch instead.
             self._clear_consumed_handoff(record)
         return target
 

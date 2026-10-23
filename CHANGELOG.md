@@ -4,6 +4,22 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `hive-ide wake --session=<ID> --prompt=<TEXT>` wakes a sleeping session and
+  resumes its conversation with a one-shot launch prompt (`claude --resume <id>
+  <TEXT>`, `codex resume <thread> <TEXT>`), through the ordinary window build or
+  agent-pane relaunch. Nothing is typed. It prints one JSON object and refuses
+  with exit 2 (`not_sleeping`, `unknown_session`, `bad_prompt`,
+  `driver_unsupported`) before changing anything; a failed launch exits 1 and
+  puts the session back to sleep. `capabilities` reports `wake-prompt`.
+
+### Fixed
+
+- Building a sleeping session's window no longer drops a pending handoff or
+  launch prompt: the sleeping window launches no driver, so the prompt now waits
+  for the next real launch instead of being discarded undelivered.
+
 ## [1.0.106] - 2026-10-23
 
 ### Added
