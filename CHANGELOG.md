@@ -4,6 +4,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- A driver launch now sets its PATH inside the pane command (`/usr/bin/env
+  PATH=<path> sh -c …`, plain `env` where `/usr/bin/env` is missing) instead of
+  with `tmux -e PATH=`. tmux sets the PATH of a pane spawned by an unattached
+  client from that client after applying `-e`, so 1.0.108's fix was discarded
+  in exactly the daemon case it targeted and `wake` from launchd still exited
+  127. Sleeping and pane-lease launches are unchanged.
+
 ## [1.0.108] - 2026-10-23
 
 ### Fixed

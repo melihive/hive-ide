@@ -709,10 +709,17 @@ class Frame:
             env.extend(["-e", f"HIVE_IDE_PANE_ROLE={role}", "-e", "HIVE_IDE_PANE_LEASE="])
         return env
 
-    def _driver_environment(self, record: dict[str, Any]) -> list[str]:
-        """The agent pane's environment for a driver launch: `_environment` plus
-        a PATH that can find the driver (see `_launch_path`)."""
-        return [*self._environment(record, role="agent"), "-e", f"PATH={self._launch_path()}"]
+    def _driver_argv(self, command: str) -> list[str]:
+        """The pane argv for a driver launch: `command` run with a PATH that can
+        find the driver (see `_launch_path`).
+
+        The PATH is set by `env` inside the pane command, not by `-e PATH=`: tmux
+        (3.x) sets the PATH of a pane spawned by an unattached client from that
+        client AFTER applying `-e`, so a `-e PATH=` from a daemon is discarded and
+        the pane gets the daemon's PATH anyway.
+        """
+        env = "/usr/bin/env" if os.path.exists("/usr/bin/env") else "env"
+        return [env, f"PATH={self._launch_path()}", "sh", "-c", command]
 
     def _launch_path(self) -> str:
         """The PATH an agent pane is launched with, so it can find its driver.
@@ -1496,10 +1503,8 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
-                *self._driver_environment(record),
-                "sh",
-                "-c",
-                self._agent_command(record),
+                *self._environment(record, role="agent"),
+                *self._driver_argv(self._agent_command(record)),
             ]
         )
         if result.returncode != 0:
@@ -2048,14 +2053,12 @@ class Frame:
                     target,
                     "-c",
                     working_dir,
+                    *self._environment(record, role=role),
                     *(
-                        self._driver_environment(record)
+                        self._driver_argv(command)
                         if role == "agent" and not self._is_sleeping(record)
-                        else self._environment(record, role=role)
+                        else ["sh", "-c", command]
                     ),
-                    "sh",
-                    "-c",
-                    command,
                 ]
             )
             if result.returncode != 0:
