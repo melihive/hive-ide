@@ -19,7 +19,7 @@ from .holders import ConversationHolders
 from .config import configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
-from .errors import HiveIdeError, UsageError
+from .errors import CommandOutcome, HiveIdeError, UsageError
 from .environments import EnvironmentManager
 from .frame import Frame
 from .handoff import HandoffPackage
@@ -59,6 +59,7 @@ WORKSPACE_MUTATIONS = frozenset(
         "sleep",
         "status-event",
         "switch-driver",
+        "wake",
         "working-dir-set",
     }
 )
@@ -388,6 +389,12 @@ def cmd_sleep(args: argparse.Namespace) -> dict[str, Any]:
     }
     record["last_active"] = now
     store.write("sessions", record["id"], record)
+    _write_sleeping_status(store, record, now)
+    return {**record, "sleep": {**record["sleep"], **result}}
+
+
+def _write_sleeping_status(store: StateStore, record: dict[str, Any], now: str) -> None:
+    """The status row the sidebar renders as the sleeping mark."""
     store.write(
         "status",
         record["id"],
@@ -401,7 +408,80 @@ def cmd_sleep(args: argparse.Namespace) -> dict[str, Any]:
             "observed_at": now,
         },
     )
-    return {**record, "sleep": {**record["sleep"], **result}}
+
+
+def _wake_outcome(reason: str, exit_code: int, detail: str | None = None) -> CommandOutcome:
+    payload: dict[str, Any] = {"ok": False, "woke": False, "reason": reason}
+    if detail:
+        payload["detail"] = detail
+    return CommandOutcome(payload, exit_code)
+
+
+def cmd_wake(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        return _wake(args)
+    except CommandOutcome:
+        raise
+    except (HiveIdeError, OSError) as exc:
+        # Every failure is a parsed result, never a bare stderr line.
+        raise _wake_outcome("failed", 1, str(exc)) from exc
+
+
+def _wake(args: argparse.Namespace) -> dict[str, Any]:
+    """Wake a SLEEPING session: resume its conversation with a one-shot prompt.
+
+    Sleeping is the session's own `sleep.state == "sleeping"` (set by `sleep`,
+    cleared by `chat`), the state the sidebar marks with the sleeping glyph. The
+    prompt is stored as the session's launch prompt and passed as the driver's
+    last argv by the ordinary launch path — never typed — then consumed. Refusals
+    exit 2 and change nothing; a failed launch exits 1 and restores the sleep.
+    """
+    store, _ = _context(args)
+    try:
+        record = store.find_session(args.session_id)
+    except HiveIdeError:
+        record = None
+    if record is None:
+        raise _wake_outcome("unknown_session", 2)
+    if not Frame._is_sleeping(record):
+        raise _wake_outcome("not_sleeping", 2)
+    driver = record.get("driver") or {}
+    driver_id = driver.get("id")
+    if driver_id not in Frame.PROMPT_DRIVERS:
+        raise _wake_outcome("driver_unsupported", 2)
+    problem = Frame.launch_prompt_problem(args.prompt, driver_id)
+    if problem:
+        raise _wake_outcome("bad_prompt", 2, problem)
+    if not AgentResumeState.reference_from_driver(driver):
+        # Nothing to resume: a launch here would start a NEW conversation.
+        raise _wake_outcome("no_conversation", 1)
+    handoff = record.get("handoff")
+    if isinstance(handoff, dict) and handoff.get("target_driver_prompt"):
+        # A pending handoff prompt wins the launch argv, so ours would be dropped.
+        raise _wake_outcome("handoff_pending", 1)
+    if Frame._attach_argv(driver):
+        # A backgrounded conversation is attached, and an attach carries no prompt.
+        raise _wake_outcome("conversation_backgrounded", 1)
+
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    slept = record.get("sleep")
+    record["launch_prompt"] = args.prompt
+    store.write("sessions", record["id"], record)
+    # Out of the sleeping state BEFORE the launch: a sleeping record builds the
+    # sleeping shell and launches no driver, so the prompt would never arrive.
+    frame.clear_sleep(record)
+    record = store.find_session(record["id"]) or record
+    try:
+        frame.wake_agent(record)
+    except (HiveIdeError, OSError) as exc:
+        current = store.find_session(record["id"])
+        if current is not None:
+            current.pop("launch_prompt", None)
+            current["sleep"] = slept
+            store.write("sessions", current["id"], current)
+            _write_sleeping_status(store, current, utc_now())
+        raise _wake_outcome("launch_failed", 1, str(exc)) from exc
+    return {"ok": True, "woke": True, "session": record["id"]}
 
 
 def cmd_rename(args: argparse.Namespace) -> dict[str, Any]:
@@ -1452,6 +1532,7 @@ def build_parser() -> argparse.ArgumentParser:
         "scratchpad": "Open the current plan's human-owned Scratchpad popup.",
         "chat": "Focus or resume the current session's agent pane.",
         "sleep": "Stop the current session's agent while keeping it in the active list.",
+        "wake": "Resume a sleeping session's conversation with a one-shot prompt.",
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "driver-rename": "Send the IDE display name into a supported live driver pane.",
@@ -1568,6 +1649,12 @@ def build_parser() -> argparse.ArgumentParser:
     sleep.add_argument("--session-id")
     sleep.add_argument("--tmux-socket")
     sleep.set_defaults(handler=cmd_sleep)
+
+    wake = command("wake")
+    wake.add_argument("--session", "--session-id", dest="session_id", required=True)
+    wake.add_argument("--prompt", required=True)
+    wake.add_argument("--tmux-socket")
+    wake.set_defaults(handler=cmd_wake)
 
     driver_rename = command("driver-rename")
     driver_rename.add_argument("--session-id", required=True)
@@ -1782,6 +1869,7 @@ def build_parser() -> argparse.ArgumentParser:
             "launch-prompt",
             "turn-sequencing",
             "driver-rename-guard",
+            "wake-prompt",
         ],
     })
 
@@ -1819,6 +1907,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet and args.command not in QUIET_SUCCESS_COMMANDS:
             print(result if isinstance(result, str) else _json(result))
         return 0
+    except CommandOutcome as exc:
+        print(_json(exc.payload))
+        return exc.exit_code
     except LeaseError as exc:
         print(_json(exc.payload))
         return 2
