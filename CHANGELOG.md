@@ -4,6 +4,28 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `hive-ide create --driver=claude|codex --prompt=<TEXT>` gives a session its
+  first instruction at launch: the first launch passes it to the driver as its
+  initial prompt argument (`claude <TEXT>`, `codex <TEXT>`), then it is dropped so
+  a relaunch never repeats it. A handoff prompt still wins when both exist. It is
+  refused for other drivers, with `--adopt`, and for a value starting with `-`
+  (the driver would read it as an option), longer than 4000 characters, or
+  carrying control characters other than newline and tab. `capabilities`
+  reports `launch-prompt`.
+
+### Removed
+
+- `hive-ide nudge`, which typed a caller's line plus Enter into an agent pane.
+  Relay delivery is native now (Codex `codex queue`; Claude's asyncRewake waiter
+  and courier), and a disposable session that needs a first instruction gets it
+  through `create --prompt`, so nothing types into an agent pane any more.
+  `capabilities` no longer reports `nudge`. The pane and driver gates it shared
+  stay, used only by `driver-rename` (a rename the human asks for in their own
+  pane); the human-input check and the line-safety rules, which only `nudge`
+  used, are gone with it.
+
 ## [1.0.105] - 2026-10-22
 
 ### Fixed

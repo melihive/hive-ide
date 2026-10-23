@@ -879,19 +879,46 @@ class Frame:
             'exec "${SHELL:-/bin/sh}"'
         )
 
+    PROMPT_DRIVERS = ("claude", "codex")
+    LAUNCH_PROMPT_MAX = 4000
+
+    @classmethod
+    def launch_prompt_problem(cls, prompt: Any, driver_id: str | None) -> str | None:
+        """Why `prompt` cannot be a session's launch prompt, or None when it can.
+
+        It is passed as the driver's positional prompt argument, never typed, so
+        the only hazards are a driver that takes no prompt, a value the driver
+        would parse as an option (a leading `-`), and bytes argv cannot carry.
+        """
+        if driver_id not in cls.PROMPT_DRIVERS:
+            return "only the claude and codex drivers take a launch prompt"
+        if not isinstance(prompt, str) or not prompt.strip():
+            return "empty"
+        if len(prompt) > cls.LAUNCH_PROMPT_MAX:
+            return f"longer than {cls.LAUNCH_PROMPT_MAX} characters"
+        if prompt != prompt.strip():
+            return "leading or trailing whitespace"
+        if prompt.startswith("-"):
+            return "must not start with - (the driver would read it as an option)"
+        if any(ord(ch) < 0x20 and ch not in "\n\t" for ch in prompt) or "\x7f" in prompt:
+            return "control characters are not allowed"
+        return None
+
     @classmethod
     def _argv_with_handoff_prompt(
         cls, argv: list[str], record: dict[str, Any]
     ) -> list[str]:
-        handoff = record.get("handoff")
-        if not isinstance(handoff, dict):
-            return argv
-        prompt = handoff.get("target_driver_prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            return argv
+        """Append the one prompt this launch carries: a handoff's, else the
+        session's launch prompt (`create --prompt`). Never typed into the pane."""
         driver_id = (record.get("driver") or {}).get("id")
-        if driver_id not in {"claude", "codex"}:
+        if driver_id not in cls.PROMPT_DRIVERS:
             return argv
+        handoff = record.get("handoff")
+        prompt = handoff.get("target_driver_prompt") if isinstance(handoff, dict) else None
+        if not isinstance(prompt, str) or not prompt.strip():
+            prompt = record.get("launch_prompt")
+            if cls.launch_prompt_problem(prompt, driver_id):
+                return argv
         return [*argv, prompt]
 
     def _plan_command(
@@ -1595,7 +1622,7 @@ class Frame:
     ) -> dict[str, Any]:
         """Type `/rename <name>` into the live agent pane.
 
-        Same gates as `nudge` (`nudge.AgentNudge`), decided from hook state and
+        Gates from `nudge.AgentNudge`, decided from hook state and
         never the screen: the pane must be a live, observable agent outside copy
         mode; Claude must have reported a hook and not have a dialog
         Notification latest; Codex must be provably idle unless `force`. The
@@ -1655,13 +1682,18 @@ class Frame:
         }
 
     def _clear_consumed_handoff(self, record: dict[str, Any]) -> None:
-        if not isinstance(record.get("handoff"), dict):
+        """Drop the launch inputs a driver launch just delivered: the handoff and
+        the session's one-shot launch prompt, so a later relaunch never repeats it."""
+        keys = ("handoff", "launch_prompt")
+        if not any(key in record for key in keys):
             return
         fresh = self.store.read("sessions", record["id"]) or record
-        if isinstance(fresh.get("handoff"), dict):
-            fresh.pop("handoff", None)
+        if any(key in fresh for key in keys):
+            for key in keys:
+                fresh.pop(key, None)
             self.store.write("sessions", record["id"], fresh)
-        record.pop("handoff", None)
+        for key in keys:
+            record.pop(key, None)
 
     def _tag(
         self,
