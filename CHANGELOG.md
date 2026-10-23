@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.109] - 2026-10-23
+
 ### Fixed
 
 - A driver launch now sets its PATH inside the pane command (`/usr/bin/env
