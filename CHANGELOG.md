@@ -4,6 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Agent launches (window build, agent-pane relaunch, `wake`) carry a PATH that
+  can find the driver: the tmux server's global PATH, with the per-user bin dirs
+  (`~/.local/bin`, `$PIPX_BIN_DIR`, `$PNPM_HOME`, the npm prefix `bin`) appended,
+  or the client's PATH with them in front when the server reports none. A pane
+  spawned by an unattached client gets that client's PATH, so `wake` run from a
+  launchd daemon on macOS started `claude` without `~/.local/bin` and exited 127.
+- `wake` no longer reports a launch that failed as woke. It watches the agent
+  pane for up to 2 s; a driver that exits at once (the `driver command failed`
+  marker, or a dead pane) returns `launch_failed` with exit 1 and the session
+  goes back to sleep.
+
 ## [1.0.107] - 2026-10-23
 
 ### Added

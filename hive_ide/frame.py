@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -707,6 +708,48 @@ class Frame:
         if role:
             env.extend(["-e", f"HIVE_IDE_PANE_ROLE={role}", "-e", "HIVE_IDE_PANE_LEASE="])
         return env
+
+    def _driver_environment(self, record: dict[str, Any]) -> list[str]:
+        """The agent pane's environment for a driver launch: `_environment` plus
+        a PATH that can find the driver (see `_launch_path`)."""
+        return [*self._environment(record, role="agent"), "-e", f"PATH={self._launch_path()}"]
+
+    def _launch_path(self) -> str:
+        """The PATH an agent pane is launched with, so it can find its driver.
+
+        tmux gives a pane spawned by an unattached client (a launchd daemon running
+        `wake`) that CLIENT's PATH, not the server's, and a daemon's PATH lacks the
+        per-user bin dirs a driver such as `claude` lives in: the pane exits 127.
+        The server's global PATH is the one the user's own panes get. The per-user
+        dirs are appended to it in case the server itself was started by such a
+        client; with no server PATH, the client's PATH is used with them in front.
+        """
+        result = self.tmux(["show-environment", "-g", "PATH"], timeout=2)
+        name, sep, server = result.stdout.strip().partition("=")
+        server = server if result.returncode == 0 and sep and name == "PATH" else ""
+        entries = [e for e in (server or os.environ.get("PATH", "")).split(os.pathsep) if e]
+        extra = [d for d in dict.fromkeys(self._user_bin_dirs()) if d not in entries]
+        return os.pathsep.join([*entries, *extra] if server else [*extra, *entries])
+
+    @staticmethod
+    def _user_bin_dirs() -> list[str]:
+        """Where per-user installs put driver executables."""
+        home = Path.home()
+        dirs = [str(home / ".local" / "bin")]
+        dirs += [os.environ[v] for v in ("PIPX_BIN_DIR", "PNPM_HOME") if os.environ.get(v)]
+        prefix = os.environ.get("NPM_CONFIG_PREFIX") or ""
+        if not prefix:
+            try:
+                lines = (home / ".npmrc").read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            for line in lines:
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == "prefix":
+                    prefix = value.strip()
+        if prefix:
+            dirs.append(str(Path(os.path.expanduser(prefix)) / "bin"))
+        return dirs
 
     def _refresh_source_if_needed(
         self, record: dict[str, Any], interpreter: str
@@ -1453,7 +1496,7 @@ class Frame:
                 pane_id,
                 "-c",
                 self.safe_working_dir(record),
-                *self._environment(record, role="agent"),
+                *self._driver_environment(record),
                 "sh",
                 "-c",
                 self._agent_command(record),
@@ -1474,7 +1517,8 @@ class Frame:
         """
         target = self.windows().get(record["id"])
         if not target:
-            self.build(record)
+            target = self.build(record)
+            self._confirm_agent_launch((self._role_panes_in_window(target) or {}).get("agent"))
             return "built"
         roles = self._role_panes_in_window(target)
         pane_id = (roles or {}).get("agent")
@@ -1489,7 +1533,43 @@ class Frame:
                 "from another pane or a plain terminal."
             )
         self._clear_consumed_handoff(record)
+        self._confirm_agent_launch(pane_id)
         return "respawned"
+
+    LAUNCH_SETTLE_SECONDS = 2.0
+    LAUNCH_POLL_SECONDS = 0.2
+    LAUNCH_FAILED_MARKER = "hive-ide: driver command failed with exit"
+
+    def _confirm_agent_launch(self, pane_id: str | None) -> None:
+        """Raise when the driver just launched in `pane_id` exits at once.
+
+        `respawn-pane` succeeds as soon as tmux starts `sh`, so a driver that is
+        not on PATH (exit 127) still looked like a wake. The agent command prints
+        `LAUNCH_FAILED_MARKER` and execs a shell on a non-zero exit, so the pane
+        stays alive: the marker is the evidence, with `pane_dead` for a pane whose
+        shell itself died. Bounded by `LAUNCH_SETTLE_SECONDS`; a pane tmux will not
+        describe is not evidence of failure, so it never raises on a guess.
+        """
+        if not pane_id:
+            return
+        deadline = time.monotonic() + self.LAUNCH_SETTLE_SECONDS
+        while True:
+            state = self.tmux(
+                ["display-message", "-p", "-t", pane_id, "#{pane_dead}\t#{pane_dead_status}"],
+                timeout=1,
+            )
+            dead, _, status = state.stdout.strip().partition("\t")
+            if state.returncode == 0 and dead.strip() == "1":
+                raise HiveIdeError(f"The agent exited at launch (status {status.strip() or '?'}).")
+            shown = self.tmux(["capture-pane", "-p", "-J", "-t", pane_id], timeout=1)
+            if shown.returncode == 0:
+                for line in shown.stdout.splitlines():
+                    if self.LAUNCH_FAILED_MARKER in line:
+                        hint = " (127: the driver was not found on the launch PATH)" if line.strip().endswith(" 127") else ""
+                        raise HiveIdeError(f"The agent exited at launch: {line.strip()}{hint}.")
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(self.LAUNCH_POLL_SECONDS)
 
     def sleep_agent(self, record: dict[str, Any]) -> dict[str, Any]:
         driver = record.get("driver") or {}
@@ -1968,7 +2048,11 @@ class Frame:
                     target,
                     "-c",
                     working_dir,
-                    *self._environment(record, role=role),
+                    *(
+                        self._driver_environment(record)
+                        if role == "agent" and not self._is_sleeping(record)
+                        else self._environment(record, role=role)
+                    ),
                     "sh",
                     "-c",
                     command,

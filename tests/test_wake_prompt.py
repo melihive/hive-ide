@@ -31,6 +31,8 @@ class FakeTmux:
     pane command it is handed."""
 
     def __init__(self, *, window: bool = False, fail_split: bool = False):
+        self.server_path: str | None = "/server/bin:/usr/bin"
+        self.pane_output = ""
         self.exists = window
         self.windows: dict[str, str] = {}
         self.window = window
@@ -65,7 +67,22 @@ class FakeTmux:
             return subprocess.CompletedProcess(args, 1, "", "no space for new pane")
         if verb == "display-message":
             return reply(code=1)
+        if verb == "show-environment":
+            if self.server_path is None:
+                return subprocess.CompletedProcess(args, 1, "", "unknown variable: PATH")
+            return reply(f"PATH={self.server_path}\n")
+        if verb == "capture-pane":
+            return reply(self.pane_output)
         return reply()
+
+    def launch_path(self) -> str:
+        agent = [c for c in self.calls if c[0] in ("split-window", "respawn-pane")
+                 and "HIVE_IDE_PANE_ROLE=agent" in c]
+        assert len(agent) == 1, agent
+        call = agent[0]
+        paths = [call[i + 1] for i, a in enumerate(call) if a == "-e" and call[i + 1].startswith("PATH=")]
+        assert len(paths) == 1, call
+        return paths[0].removeprefix("PATH=")
 
 
 def _base(tmp_path) -> list[str]:
@@ -101,6 +118,8 @@ def tmux(monkeypatch):
     monkeypatch.setattr("hive_ide.frame.ConversationGuard.check", lambda *a, **k: None)
     monkeypatch.setattr(Frame, "_refresh_source_if_needed", lambda *a, **k: None)
     monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
+    # The launch check polls for up to 2 s; one look is enough against a fake.
+    monkeypatch.setattr(Frame, "LAUNCH_SETTLE_SECONDS", 0.0)
     return fake
 
 
@@ -249,3 +268,71 @@ def test_wake_is_a_workspace_mutation_and_a_capability(capsys):
     assert "wake" in WORKSPACE_MUTATIONS
     assert main(["capabilities"]) == 0
     assert "wake-prompt" in json.loads(capsys.readouterr().out)["features"]
+
+
+@pytest.mark.parametrize("window", [False, True], ids=["no-window", "sleeping-window"])
+def test_a_driver_launch_carries_the_tmux_server_path(tmp_path, capsys, tmux, window):
+    # A daemon's client PATH lacks ~/.local/bin, where `claude` lives; the pane
+    # must get the server's PATH instead, or it exits 127.
+    store, record = _session(tmp_path, "claude")
+    _sleep(tmp_path, record)
+    if window:
+        tmux.exists = True
+        tmux.windows[record["id"]] = "@4"
+    tmux.calls.clear()
+    assert _wake(tmp_path, capsys, record["id"])[0] == 0
+    assert tmux.launch_path().startswith("/server/bin:/usr/bin")
+
+
+def test_without_a_server_path_the_client_path_gets_the_user_bin_dirs(
+    tmp_path, capsys, tmux, monkeypatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".npmrc").write_text("prefix=~/.npm-global\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PIPX_BIN_DIR", "/pipx/bin")
+    monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+    monkeypatch.delenv("PNPM_HOME", raising=False)
+    tmux.server_path = None
+    store, record = _session(tmp_path, "claude")
+    _sleep(tmp_path, record)
+    tmux.calls.clear()
+    assert _wake(tmp_path, capsys, record["id"])[0] == 0
+    assert tmux.launch_path().split(":") == [
+        str(home / ".local" / "bin"), "/pipx/bin", str(home / ".npm-global" / "bin"),
+        "/usr/bin", "/bin",
+    ]
+
+
+@pytest.mark.parametrize("window", [False, True], ids=["no-window", "sleeping-window"])
+def test_a_driver_that_exits_at_launch_is_launch_failed_and_sleeps_again(
+    tmp_path, capsys, tmux, window
+):
+    store, record = _session(tmp_path, "claude")
+    _sleep(tmp_path, record)
+    if window:
+        tmux.exists = True
+        tmux.windows[record["id"]] = "@4"
+    tmux.pane_output = (
+        "sh: claude: command not found\n\nhive-ide: driver command failed with exit 127\n$ "
+    )
+    code, out = _wake(tmp_path, capsys, record["id"])
+    assert (code, out["reason"], out["woke"]) == (1, "launch_failed", False)
+    assert "exit 127" in out["detail"]
+    fresh = store.find_session(record["id"])
+    assert Frame._is_sleeping(fresh)
+    assert "launch_prompt" not in fresh
+    assert store.read("status", record["id"])["state"] == "sleeping"
+
+
+def test_the_launch_check_is_bounded(tmp_path, tmux, monkeypatch):
+    store, record = _session(tmp_path, "claude")
+    monkeypatch.setattr(Frame, "LAUNCH_SETTLE_SECONDS", 0.3)
+    monkeypatch.setattr(Frame, "LAUNCH_POLL_SECONDS", 0.05)
+    frame = Frame(store, socket="test-wake")
+    import time
+    started = time.monotonic()
+    frame._confirm_agent_launch("%2")          # a healthy pane: no marker, alive
+    assert 0.3 <= time.monotonic() - started < 1.5
