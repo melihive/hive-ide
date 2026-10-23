@@ -18,12 +18,11 @@ import pytest
 from hive_ide.drivers import ConversationProbe, bundled_drivers
 from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
-from hive_ide.nudge import AgentNudge
 from hive_ide.state_compat import StateIO
 from hive_ide.store import StateStore
 from hive_ide.turns import TurnSequence
 
-from test_labels_nudge import FakeTmux, NOW, _frame
+from test_labels_nudge import FakeTmux, _frame, _gate
 
 
 THREAD = "01a16431-b530-7ed3-aefb-4f1141e46a23"
@@ -181,16 +180,12 @@ def test_errored_codex_turn_reads_as_ended_and_idle(tmp_path, monkeypatch, codex
     assert TurnSequence.attention_pending(read) is False
 
 
-def test_nudge_reaches_codex_after_an_errored_turn(tmp_path, monkeypatch, codex_home):
+def test_gate_allows_codex_after_an_errored_turn(tmp_path, monkeypatch, codex_home):
     store, record = _session(tmp_path)
     _prompt(store, record, monkeypatch, tmp_path)
     _rollout(codex_home, _errored_turn())
     fake = FakeTmux()
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
-        record, "wake up"
-    )
-    assert result["sent"] is True
-    assert result["reason"] == "codex_idle_proven"
+    assert _gate(_frame(store, monkeypatch, fake), record) == (True, "codex_idle_proven")
 
 
 @pytest.mark.parametrize(
@@ -201,7 +196,7 @@ def test_nudge_reaches_codex_after_an_errored_turn(tmp_path, monkeypatch, codex_
         _errored_turn(EARLIER_TURN),                 # the PREVIOUS turn errored
     ],
 )
-def test_nudge_still_refuses_codex_while_its_turn_is_not_known_ended(
+def test_gate_still_refuses_codex_while_its_turn_is_not_known_ended(
     tmp_path, monkeypatch, codex_home, rollout
 ):
     store, record = _session(tmp_path)
@@ -209,10 +204,7 @@ def test_nudge_still_refuses_codex_while_its_turn_is_not_known_ended(
     if rollout is not None:
         _rollout(codex_home, rollout)
     fake = FakeTmux()
-    result = AgentNudge(_frame(store, monkeypatch, fake), clock=lambda: NOW).nudge(
-        record, "wake up"
-    )
-    assert result["reason"] == "codex_not_idle"
+    assert _gate(_frame(store, monkeypatch, fake), record) == (False, "codex_not_idle")
     assert fake.sent == []
     assert StateIO.read_session_status(store.home, record)["state"] == "working"
 

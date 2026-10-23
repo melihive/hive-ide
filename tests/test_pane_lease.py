@@ -70,7 +70,7 @@ def test_capabilities(capsys):
             "pane-lease",
             "plan-set-defer-pane",
             "labels",
-            "nudge",
+            "launch-prompt",
             "turn-sequencing",
             "driver-rename-guard",
         ],

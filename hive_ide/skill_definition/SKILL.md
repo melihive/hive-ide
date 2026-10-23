@@ -26,14 +26,13 @@ managed environment, use `pipx install hive-ide`.
 
 - `hive-ide list`
 - `hive-ide open [--driver=claude|codex|antigravity|term] [--working-dir=<PATH>]`
-- `hive-ide create [--name=<NAME>] [--driver=claude|codex|antigravity|term] [--working-dir=<PATH>]`
+- `hive-ide create [--name=<NAME>] [--driver=claude|codex|antigravity|term] [--working-dir=<PATH>] [--prompt=<TEXT>]`
 - `hive-ide adopt --driver=claude|codex [--working-dir=<PATH>] [--limit=<N>]`
 - `hive-ide create --driver=claude|codex --adopt [--reference=<ID>]`
 - `hive-ide show --session-id=<ID>`
 - `hive-ide current`
 - `hive-ide capabilities`
 - `hive-ide label --session-id=<ID> --key=<KEY> (--value=<VALUE> | --clear)`
-- `hive-ide nudge --session-id=<ID> --text=<LINE> [--force]`
 - `hive-ide driver-rename --session-id=<ID> [--name=<NAME>] [--force]`
 - `hive-ide pane-lease --session-id=<ID> --role=plan --title=<TITLE> -- <argv…>`
 - `hive-ide pane-status [--session-id=<ID>]`
@@ -90,20 +89,23 @@ Labels are a small key -> short-text map on a session (at most 8 keys; key
 `^[a-z][a-z0-9_-]{0,15}$`; value at most 32 printable characters). The session
 card shows one row per label. Old records read as having no labels.
 
-`nudge` types one caller-supplied constant line plus Enter into the agent pane
-and returns `{sent, reason}`; it never composes text. The line must be printable
-ASCII, at most 200 characters, and must not start with `/`, `!`, `#` or `-`.
-The gate never reads the screen (pane width and hidden windows do not matter); it
+hive-ide never types a message into an agent pane. A session that needs a first
+instruction gets it at launch: `create --driver=claude|codex --prompt=<TEXT>`
+stores it and the first launch passes it as the driver's initial prompt argument
+(`claude <TEXT>`, `codex <TEXT>`); it is then dropped, so a relaunch never repeats
+it. The prompt is at most 4000 characters, has no control characters other than
+newline and tab, and must not start with `-`. It is refused with `--adopt` and for
+any other driver. Probe `capabilities` for `launch-prompt` before relying on it.
+
+`driver-rename` is the one typed input left: the human asks for it, and it types
+`/rename <name>` into their own agent pane. The gate never reads the screen; it
 decides from hook state. Claude queues typed input, so a working or idle Claude is
 allowed; it is refused (`claude_dialog_open`) while a dialog-type notification is
-its latest hook event, and (`state_unknown`) before any hook has reported. Codex
-is interrupted by typing mid-turn, so it is nudged only when the hook turn
-sequence proves its last turn ended cleanly (`codex_not_idle` otherwise) unless
-`--force` (which skips only that Codex check). Any driver is refused
-(`human_recent`) while a human typed in that pane within 60 seconds, while the
-pane is in copy mode or dead, or when the agent has exited to a shell. The result
-carries `basis: "hooks"`. `driver-rename` follows the same per-driver rule. Probe `capabilities`
-for `labels`, `nudge` and `turn-sequencing` before relying on them.
+its latest hook event, and (`state_unknown`) before any hook has reported. Codex is
+interrupted by typing mid-turn, so it is renamed only when the hook turn sequence
+proves its last turn ended cleanly unless `--force`. It is refused while the pane is
+in copy mode or dead, or when the agent has exited to a shell. Probe `capabilities`
+for `labels` and `turn-sequencing` before relying on them.
 
 Pane leases lend the PLAN pane until the child command exits or is released. The
 package restores the currently linked plan; `repair` recovers a dead supervisor.

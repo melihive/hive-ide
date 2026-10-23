@@ -32,8 +32,9 @@ Limitation: a `Stop` that ANOTHER hook blocks (decision "block") is invisible at
 its own arrival; hooks run side by side and none sees the others' verdicts. The
 agent then keeps working with no new `UserPromptSubmit`, so the counter alone
 would call it idle. The next `Stop` in that chain carries `stop_hook_active`
-(treated as blocked). `nudge.py` accepts that residual window rather than read
-the screen, which proved unreliable across pane widths.
+(treated as blocked). The typing gates (`nudge.py`, used by `driver-rename`)
+accept that residual window rather than read the screen, which proved
+unreliable across pane widths.
 """
 
 from __future__ import annotations

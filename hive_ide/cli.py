@@ -25,7 +25,6 @@ from .frame import Frame
 from .handoff import HandoffPackage
 from .hooks import HookInstaller
 from .monitor import monitor_state
-from .nudge import AgentNudge
 from .pane_lease import LeaseError, LeaseStore, PaneLeases
 from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
@@ -47,7 +46,6 @@ WORKSPACE_MUTATIONS = frozenset(
         "driver-rename",
         "force-rebuild",
         "label",
-        "nudge",
         "open",
         "plan-set",
         "purge",
@@ -95,6 +93,10 @@ def _refresh_workspace_sources(store: StateStore) -> None:
 
 def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
+    if args.adopt and args.prompt is not None:
+        raise UsageError(
+            "--prompt starts a NEW conversation; it cannot be given to an adopted one."
+        )
     if args.adopt:
         adopted = _adopt_conversations(
             store,
@@ -122,6 +124,7 @@ def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
         working_dir=args.working_dir,
         plan=args.plan,
         source=args.source,
+        launch_prompt=args.prompt,
     )
 
 
@@ -146,9 +149,14 @@ def _create_session(
     working_dir: str | None,
     plan: str | None,
     source: str | None,
+    launch_prompt: str | None = None,
 ) -> dict[str, Any]:
     registry = configured_registry(config)
     selected_driver = driver_id or _default_driver_id(config)
+    if launch_prompt is not None:
+        problem = Frame.launch_prompt_problem(launch_prompt, selected_driver)
+        if problem:
+            raise UsageError(f"--prompt is not usable: {problem}.")
     driver = registry.get(selected_driver)
     availability = driver.detect()
     if not availability.available and selected_driver != "term":
@@ -170,6 +178,7 @@ def _create_session(
         ),
         driver=resolved,
         plan={"path": plan, "active_task": None},
+        launch_prompt=launch_prompt,
     )
 
 
@@ -571,14 +580,6 @@ def cmd_label(args: argparse.Namespace) -> dict[str, Any]:
         "labels": StateStore.labels(record),
         "retitled": retitled,
     }
-
-
-def cmd_nudge(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
-    record = _session(store, args.session_id, None)
-    return AgentNudge(Frame(store, socket=_socket(store, args.tmux_socket))).nudge(
-        record, args.text, force=args.force
-    )
 
 
 def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
@@ -1455,7 +1456,6 @@ def build_parser() -> argparse.ArgumentParser:
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "driver-rename": "Send the IDE display name into a supported live driver pane.",
         "label": "Set or clear one short label on a session.",
-        "nudge": "Type one constant line into a session's agent pane when safe.",
         "working-dir-set": "Move a session to an existing working directory.",
         "force-rebuild": "Force replace one tmux window from its session record.",
         "relayout": "Reapply or adopt the tmux frame geometry.",
@@ -1496,6 +1496,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--source")
     create.add_argument("--adopt", action="store_true")
     create.add_argument("--reference")
+    create.add_argument("--prompt")
     create.set_defaults(handler=cmd_create)
 
     adopt = command("adopt")
@@ -1585,15 +1586,6 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument("--clear", action="store_true")
     label.set_defaults(handler=cmd_label)
 
-    nudge = command("nudge")
-    nudge.add_argument("--session-id", "--session", dest="session_id", required=True)
-    nudge.add_argument("--text", required=True)
-    nudge.add_argument("--tmux-socket")
-    nudge.add_argument(
-        "--force", action="store_true",
-        help="Type into Codex even when it is not provably idle (may interrupt its turn).",
-    )
-    nudge.set_defaults(handler=cmd_nudge)
 
     plan = command("plan-set")
     plan.add_argument("--session-id", required=True)
@@ -1787,7 +1779,7 @@ def build_parser() -> argparse.ArgumentParser:
             "pane-lease",
             "plan-set-defer-pane",
             "labels",
-            "nudge",
+            "launch-prompt",
             "turn-sequencing",
             "driver-rename-guard",
         ],
