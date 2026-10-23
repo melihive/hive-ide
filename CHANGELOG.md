@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.106] - 2026-10-23
+
 ### Added
 
 - `hive-ide create --driver=claude|codex --prompt=<TEXT>` gives a session its
