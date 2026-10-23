@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.108] - 2026-10-23
+
 ### Fixed
 
 - Agent launches (window build, agent-pane relaunch, `wake`) carry a PATH that
