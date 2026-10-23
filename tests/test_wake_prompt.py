@@ -80,9 +80,11 @@ class FakeTmux:
                  and "HIVE_IDE_PANE_ROLE=agent" in c]
         assert len(agent) == 1, agent
         call = agent[0]
-        paths = [call[i + 1] for i, a in enumerate(call) if a == "-e" and call[i + 1].startswith("PATH=")]
-        assert len(paths) == 1, call
-        return paths[0].removeprefix("PATH=")
+        # The PATH rides the pane command (`env PATH=… sh -c …`), never `-e`,
+        # which tmux overrides for an unattached client.
+        assert not any(a.startswith("PATH=") for a in call[:-5]), call
+        assert call[-5].endswith("env") and call[-3:-1] == ["sh", "-c"], call
+        return call[-4].removeprefix("PATH=")
 
 
 def _base(tmp_path) -> list[str]:

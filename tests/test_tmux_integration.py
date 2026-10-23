@@ -770,3 +770,60 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
         )
     finally:
         frame.tmux(["kill-server"])
+
+
+def test_a_driver_launch_finds_a_per_user_driver_from_a_minimal_path_client(
+    tmp_path, monkeypatch
+):
+    """The launchd case, on a real server: the client (and so the server it
+    starts) has only `/usr/bin:/bin`, and the driver lives in `~/.local/bin`.
+    tmux gives the pane the CLIENT's PATH, so only a PATH set inside the pane
+    command reaches the driver — through `build` and through `respawn_agent`."""
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    marker = tmp_path / "launched.txt"
+    stub = bin_dir / "hive-ide-stub-driver"
+    stub.write_text(f'#!/bin/sh\necho "$1" >> {shlex.quote(str(marker))}\n', encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    for var in ("PIPX_BIN_DIR", "PNPM_HOME", "NPM_CONFIG_PREFIX", "TMUX", "TMUX_PANE"):
+        monkeypatch.delenv(var, raising=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="STUB",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["term"].resolve(
+            name="STUB", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    record["driver"]["launch_argv"] = ["hive-ide-stub-driver", "built"]
+    store.write("sessions", record["id"], record)
+    frame = Frame(store, socket=f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+
+    def launched() -> list[str]:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if marker.exists():
+                lines = marker.read_text(encoding="utf-8").split()
+                if lines and lines[-1] == record["driver"]["launch_argv"][-1]:
+                    return lines
+            time.sleep(0.1)
+        return marker.read_text(encoding="utf-8").split() if marker.exists() else []
+
+    try:
+        target = frame.build(record)
+        assert frame.tmux(["show-environment", "-g", "PATH"]).stdout.strip() == "PATH=/usr/bin:/bin"
+        assert launched() == ["built"]
+
+        record["driver"]["launch_argv"] = ["hive-ide-stub-driver", "respawned"]
+        pane = frame._role_panes_in_window(target)["agent"]
+        assert frame.respawn_agent(record, pane) is True
+        assert launched() == ["built", "respawned"]
+    finally:
+        frame.tmux(["kill-server"])
