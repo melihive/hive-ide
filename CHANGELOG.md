@@ -4,6 +4,22 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `Frame.pane_hive_ide_env` reports unknown (`None`) while the pane's pid is
+  still tmux's pre-exec fork (process name `tmux: server`; procfs `comm` on
+  Linux, `ps` elsewhere). That fork carries the server's environment, so repair
+  could read it as a confident, stale identity for the agent pane.
+- A hidden window's sidebar no longer loses its sessions when the window is
+  resized while nobody is painting it ("footer only, or one session" on switch
+  back, until wake repaints). Every window switch (`relayout --mode adopt`) and
+  client resize (`snap`) resizes hidden windows too. On tmux's normal screen a
+  full-height frame keeps its bottom: narrowing reflows and splits every
+  full-width row, and shortening drops rows from the top once it passes the
+  cursor on the last row. Frames now draw on the alternate screen, which tmux
+  never reflows, and park the cursor at home, so a shrink trims padding and the
+  footer instead of sessions. A sidebar also re-homes the cursor as it exits.
+
 ## [1.0.109] - 2026-10-23
 
 ### Fixed

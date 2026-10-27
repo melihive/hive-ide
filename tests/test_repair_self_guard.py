@@ -759,6 +759,58 @@ def test_pane_identity_falls_back_to_direct_children_only(tmp_path, monkeypatch)
     assert frame.pane_hive_ide_env("%9") is None
 
 
+def test_pane_identity_is_unknown_while_the_pid_is_the_tmux_server_fork(tmp_path, monkeypatch):
+    """Before the pane's child execs, `#{pane_pid}` is a fork of the tmux server
+    carrying the server's environment. That must read as unknown, never as the
+    pane's (stale) identity."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket=THIS)
+    monkeypatch.setattr(frame, "_pane_pid", lambda _pane_id: 100)
+    monkeypatch.setattr(Frame, "_child_pids", staticmethod(lambda _pid: []))
+    server_env = {"HIVE_IDE_SESSION_ID": "server-session", "PATH": "x"}
+    monkeypatch.setattr(Frame, "_process_env", staticmethod(lambda _pid: dict(server_env)))
+
+    monkeypatch.setattr(Frame, "_is_tmux_server", staticmethod(lambda _pid: True))
+    assert frame.pane_hive_ide_env("%9") is None
+
+    # Once the child has exec'd, the same environ is the pane's own answer.
+    monkeypatch.setattr(Frame, "_is_tmux_server", staticmethod(lambda _pid: False))
+    assert frame.pane_hive_ide_env("%9") == {"HIVE_IDE_SESSION_ID": "server-session"}
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="procfs comm is Linux-only")
+def test_tmux_server_fork_is_detected_from_the_real_process_name(tmp_path, monkeypatch):
+    """A real process named `tmux: server` (the name tmux gives its server and
+    every pre-exec fork) yields unknown; the same process under another name
+    yields its environment."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket=THIS)
+    ready = tmp_path / "ready"
+    script = (
+        "import pathlib, sys, time\n"
+        "if sys.argv[1]: pathlib.Path('/proc/self/comm').write_text(sys.argv[1])\n"
+        "pathlib.Path(sys.argv[2]).write_text('ok')\n"
+        "time.sleep(30)\n"
+    )
+    env = {**os.environ, "HIVE_IDE_SESSION_ID": "server-session"}
+    for name, server in (("tmux: server", True), ("", False)):
+        ready.unlink(missing_ok=True)
+        proc = subprocess.Popen([sys.executable, "-c", script, name, str(ready)], env=env)
+        try:
+            assert _wait_for(ready.exists)
+            monkeypatch.setattr(frame, "_pane_pid", lambda _pane_id, pid=proc.pid: pid)
+            observed = frame.pane_hive_ide_env("%9")
+            if server:
+                assert observed is None
+            else:
+                assert (observed or {}).get("HIVE_IDE_SESSION_ID") == "server-session"
+        finally:
+            proc.kill()
+            proc.wait()
+
+
 def test_respawn_helpers_refuse_the_callers_own_pane(live):
     roles = live.frame.role_panes(live.record["id"])
     pids_before = _pane_pids(live.frame, roles)

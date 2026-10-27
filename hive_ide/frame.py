@@ -498,11 +498,20 @@ class Frame:
         first with an IDE key answers, else `{}` if any was readable.
 
         `{}` means an environment was read and carries no IDE identity. `None`
-        means nothing could be observed: the pane's pid did not resolve, or
-        neither the root nor any direct child had a readable environment.
+        means nothing could be observed: the pane's pid did not resolve, the
+        pid is still the tmux server's pre-exec fork, or neither the root nor
+        any direct child had a readable environment.
+
+        The pre-exec fork matters: tmux forks the pane's process and only then
+        execs the `sh -c` wrapper, so for a moment `#{pane_pid}` is a copy of
+        the server whose environ is the SERVER's — a confident, wrong identity.
+        The check runs before the read because exec is one-way: a pid that is
+        no longer the server when checked cannot hand back the server's env.
         """
         pid = self._pane_pid(pane_id)
         if pid is None:
+            return None
+        if self._is_tmux_server(pid):
             return None
         root = self._process_env(pid)
         if root:
@@ -517,6 +526,33 @@ class Frame:
             if identity:
                 return identity
         return {} if readable else None
+
+    @staticmethod
+    def _is_tmux_server(pid: int) -> bool:
+        """Is `pid` a tmux server process (the server, or its pre-exec fork)?
+
+        tmux renames its server to `tmux: server`: on Linux that is the
+        `comm` (procfs), elsewhere the process title `ps` reports. Unreadable
+        means the process is gone or unobservable; that is not the server, and
+        the env read that follows reports unknown on its own.
+        """
+        if sys.platform.startswith("linux"):
+            try:
+                name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8")
+            except OSError:
+                return False
+            return name.strip().startswith("tmux: server")
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "comm=", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return "tmux: server" in result.stdout
 
     @staticmethod
     def _hive_ide_keys(env: dict[str, str]) -> dict[str, str]:

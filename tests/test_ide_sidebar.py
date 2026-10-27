@@ -1534,10 +1534,11 @@ def test_sidebar_paint_clears_visible_pane_before_redraw():
     painted = IdeSidebar._paint(["one", "two"])
 
     assert painted.startswith(
-        IdeSidebar.NO_WRAP
+        IdeSidebar.ALT_SCREEN
+        + IdeSidebar.NO_WRAP
         + IdeSidebar.HOME
         + IdeSidebar.CLEAR_SCREEN
         + IdeSidebar.HOME
     )
     assert "one\ntwo" in painted
-    assert painted.endswith(IdeSidebar.CLEAR_BELOW)
+    assert painted.endswith(IdeSidebar.CLEAR_BELOW + IdeSidebar.HOME)
