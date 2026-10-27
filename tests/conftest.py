@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import getpass
 import os
 import shutil
 import signal
@@ -12,7 +11,6 @@ from pathlib import Path
 import pytest
 
 
-PYTEST_TMP_ROOT = Path(tempfile.gettempdir()) / f"pytest-of-{getpass.getuser()}"
 LEAK_PATTERNS = (
     "hive_ide.sidebar",
     "tmux -L hive-ide-",
@@ -20,10 +18,31 @@ LEAK_PATTERNS = (
 )
 
 
-def _pytest_tmp_processes() -> list[tuple[int, str]]:
+def _session_sweep_root(session) -> Path:
+    """The ONE directory this pytest session's leak sweep may reach: its own basetemp.
+
+    Never the shared `pytest-of-<user>` parent. Every pytest session on the machine
+    keeps its basetemp under that parent, so a sweep rooted there kills a concurrent
+    suite's live sidebars and tmux servers when this one finishes — another
+    worktree's verify gate then fails a test that passes alone (reproduced
+    2026-10-27: a staggered second suite lost `test_pane_lease_tmux`'s server
+    mid-`new-session`).
+    """
+    return Path(session.config._tmp_path_factory.getbasetemp())
+
+
+def _pytest_tmp_processes(root: Path) -> list[tuple[int, str]]:
+    """Leak-pattern processes whose command line references a path INSIDE `root`.
+
+    A plain substring on `root/`, so a sibling whose name merely starts with ours
+    (`pytest-12` vs `pytest-123`) never matches and a basetemp holding regex
+    metacharacters still does. `ps -axww -o pid=,command=` rather than `pgrep -af`:
+    on macOS `pgrep -a` means "include ancestors" and prints no command line.
+    """
+    inside = f"{root}{os.sep}"
     try:
         result = subprocess.run(
-            ["pgrep", "-af", str(PYTEST_TMP_ROOT)],
+            ["ps", "-axww", "-o", "pid=,command="],
             capture_output=True,
             text=True,
             check=False,
@@ -34,7 +53,9 @@ def _pytest_tmp_processes() -> list[tuple[int, str]]:
     for line in result.stdout.splitlines():
         if not any(pattern in line for pattern in LEAK_PATTERNS):
             continue
-        pid, _, command = line.partition(" ")
+        pid, _, command = line.strip().partition(" ")
+        if inside not in command:
+            continue
         if pid.isdigit() and int(pid) != os.getpid():
             rows.append((int(pid), command))
     return rows
@@ -72,8 +93,9 @@ def _kill_processes(pids: list[int]) -> None:
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
-    """Release gates must not leave real tmux/sidebar loops behind."""
-    processes = _pytest_tmp_processes()
+    """Release gates must not leave real tmux/sidebar loops behind — of THIS session."""
+    root = _session_sweep_root(session)
+    processes = _pytest_tmp_processes(root)
     for socket in _tmux_sockets(processes):
         subprocess.run(
             ["tmux", "-L", socket, "kill-server"],
@@ -82,7 +104,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
             check=False,
         )
     time.sleep(0.2)
-    _kill_processes([pid for pid, _command in _pytest_tmp_processes()])
+    _kill_processes([pid for pid, _command in _pytest_tmp_processes(root)])
 
 
 def _kill_servers_under(root: Path) -> None:
