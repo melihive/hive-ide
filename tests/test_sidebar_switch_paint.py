@@ -16,8 +16,12 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import shutil
 import struct
+import subprocess
 import termios
+import time
+import uuid
 
 import pytest
 
@@ -281,3 +285,56 @@ def test_the_painter_and_the_real_sidebar_loop_draw_the_same_frame(store, monkey
         "switch would visibly redraw when the pane's own sidebar starts\n"
         f"painter: {from_painter!r}\nloop:    {from_loop!r}"
     )
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is unavailable")
+@pytest.mark.parametrize(
+    ("cols", "rows"),
+    [(39, 30), (25, 30), (40, 29), (40, 18), (25, 18)],
+    ids=["narrower-by-1", "much-narrower", "shorter-by-1", "much-shorter", "both"],
+)
+def test_a_painted_frame_keeps_every_session_through_a_resize(store, tmp_path, cols, rows):
+    """A hidden window's sidebar has exited, so the frame it left is all there is
+    until the next switch repaints it. Every switch (`relayout --mode adopt`) and
+    client resize (`snap`) resizes hidden windows too, and under load that lands
+    after the paint. On tmux's normal screen a full-height frame keeps its BOTTOM
+    through a shrink. A narrower pane reflows and splits every full-width row; a
+    shorter one drops rows from the top once the cursor's last row is reached.
+    Either way the session rows went and the footer stayed: "footer only, or one
+    session". The frame must come through with every session still on screen.
+    """
+    names = ["ALPHA", "BRAVO", "CHARLIE"]
+    _make(store, "ALPHA", "2022-01-01T00:00:00+00:00")
+    current = _make(store, "BRAVO", "2021-01-01T00:00:00+00:00")
+    _make(store, "CHARLIE", "2020-01-01T00:00:00+00:00")
+    tmux = ["tmux", "-L", f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}", "-f", "/dev/null"]
+
+    def run(*args: str) -> str:
+        return subprocess.run([*tmux, *args], capture_output=True, text=True, check=False).stdout
+
+    def shown() -> str:
+        return run("capture-pane", "-p", "-t", "s")
+
+    def wait_for(predicate, timeout: float = 5.0):
+        deadline = time.monotonic() + timeout
+        while not (value := predicate()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return value
+
+    try:
+        run("new-session", "-d", "-s", "s", "-x", "40", "-y", "30", "sleep", "60")
+        pane_tty = run("display-message", "-p", "-t", "s", "#{pane_tty}").strip()
+        assert pane_tty
+        # The real switch-time painter, onto the pane's real tty.
+        assert IdeSidebar.paint_tty(store.home, store.workspace_key, current["id"], pane_tty)
+        assert wait_for(lambda: "show archive" in shown()), shown()
+        assert _order(shown(), names) == names, shown()
+
+        run("resize-window", "-t", "s", "-x", str(cols), "-y", str(rows))
+        assert wait_for(
+            lambda: run("display-message", "-p", "-t", "s", "#{pane_width}x#{pane_height}").strip()
+            == f"{cols}x{rows}"
+        )
+        assert _order(shown(), names) == names, shown()
+    finally:
+        subprocess.run([*tmux, "kill-server"], capture_output=True, check=False)
