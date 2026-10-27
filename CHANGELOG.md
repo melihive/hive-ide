@@ -4,6 +4,13 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `Frame.pane_hive_ide_env` reports unknown (`None`) while the pane's pid is
+  still tmux's pre-exec fork (process name `tmux: server`; procfs `comm` on
+  Linux, `ps` elsewhere). That fork carries the server's environment, so repair
+  could read it as a confident, stale identity for the agent pane.
+
 ## [1.0.109] - 2026-10-23
 
 ### Fixed
