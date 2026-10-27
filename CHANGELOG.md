@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.110] - 2026-10-27
+
 ### Fixed
 
 - `Frame.pane_hive_ide_env` reports unknown (`None`) while the pane's pid is
