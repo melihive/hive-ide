@@ -1299,10 +1299,16 @@ class Frame:
         if pane_id and verdict is not True:
             if self._pane_has_micro(pane_id):
                 self._send_micro_command(pane_id, "set readonly true")
-                # Same reason as PLAN_PANE_VIEWER_FLAGS: a micro that was already
-                # running when the plan was relinked still owns the mouse, and
-                # this path deliberately does not respawn it.
-                self._send_micro_command(pane_id, "set mouse false")
+                # Deliberately NOT `set mouse false` here. `readonly` is a
+                # per-buffer option, so steering it is local and free; `mouse` is
+                # global, and micro's `set` WRITES a global option through to the
+                # user's settings.json — measured: it rewrites the file, adds
+                # "mouse": false and drops keys it does not recognise. That would
+                # disable the mouse in every later micro, including the editable
+                # popups. `setlocal mouse false` does not persist but also does
+                # not take effect, so the launch flag in PLAN_PANE_VIEWER_FLAGS is
+                # the only safe lever: a micro that was already running keeps its
+                # mouse until the pane respawns.
                 if focus:
                     self._send_micro_command(pane_id, f"goto {line}")
                     self.tmux(["select-pane", "-t", pane_id])

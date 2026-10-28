@@ -4463,9 +4463,11 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "C-e"] in calls
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
-    assert ["send-keys", "-t", "%3", "set mouse false", "Enter"] in calls
     assert ["send-keys", "-t", "%3", "goto 3", "Enter"] in calls
     assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
+    # micro's `set` persists a GLOBAL option to the user's settings.json, so
+    # steering a live viewer must never touch `mouse` — only the launch flag may.
+    assert not any("set mouse" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 
@@ -4508,8 +4510,8 @@ def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
 
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
-    assert ["send-keys", "-t", "%3", "set mouse false", "Enter"] in calls
     assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
+    assert not any("set mouse" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 

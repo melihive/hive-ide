@@ -81,7 +81,10 @@ with the editor's own mouse handling off, so tmux keeps the mouse. `micro` uses
 `-readonly true -mouse false`, and `vim`/`nvim`/`vi`/`gvim` use `-R -c 'set mouse='`.
 Unknown editors are launched unchanged. Leaving the mouse to tmux is what makes a click
 focus the pane, a drag select copyable text, and the wheel scroll; an editor that grabs
-the mouse turns every drag into its own selection instead. Plan/task/scratchpad popups
+the mouse turns every drag into its own selection instead. These are launch flags, so a
+plan pane that is already open keeps the editor it was started with until the pane is
+reopened — `micro`'s own `set mouse false` is not used because micro writes a global
+option through to the user's `settings.json`. Plan/task/scratchpad popups
 are intentional edit surfaces and stay editable. To edit from a long-lived `micro` plan
 pane, press `Ctrl-e`, run `reload`, then press `Ctrl-e` again and run
 `set readonly false`.
