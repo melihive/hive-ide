@@ -45,12 +45,18 @@ class Frame:
         "emacs",
         "emacsclient",
     }
-    PLAN_PANE_READONLY_FLAGS = {
-        "micro": ["-readonly", "true"],
-        "vim": ["-R"],
-        "nvim": ["-R"],
-        "vi": ["-R"],
-        "gvim": ["-R"],
+    # The plan pane is a viewer, so its editor is launched read-only AND with its
+    # own mouse handling off. An editor that grabs the mouse (micro asks for
+    # any-event tracking, mode 1003) owns every motion over the pane, so a drag
+    # becomes its selection instead of tmux's and the pane stops being copyable
+    # or scrollable the way every other pane is. Leaving the mouse to tmux keeps
+    # click-to-focus, drag-to-copy, and the wheel binding below.
+    PLAN_PANE_VIEWER_FLAGS = {
+        "micro": ["-readonly", "true", "-mouse", "false"],
+        "vim": ["-R", "-c", "set mouse="],
+        "nvim": ["-R", "-c", "set mouse="],
+        "vi": ["-R", "-c", "set mouse="],
+        "gvim": ["-R", "-c", "set mouse="],
     }
     INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
@@ -1074,7 +1080,7 @@ class Frame:
     def _plan_pane_editor_argv(cls, editor: list[str]) -> list[str]:
         if not editor:
             return editor
-        flags = cls.PLAN_PANE_READONLY_FLAGS.get(Path(editor[0]).name)
+        flags = cls.PLAN_PANE_VIEWER_FLAGS.get(Path(editor[0]).name)
         if not flags:
             return list(editor)
         return [editor[0], *flags, *editor[1:]]
@@ -1293,6 +1299,16 @@ class Frame:
         if pane_id and verdict is not True:
             if self._pane_has_micro(pane_id):
                 self._send_micro_command(pane_id, "set readonly true")
+                # Deliberately NOT `set mouse false` here. `readonly` is a
+                # per-buffer option, so steering it is local and free; `mouse` is
+                # global, and micro's `set` WRITES a global option through to the
+                # user's settings.json — measured: it rewrites the file, adds
+                # "mouse": false and drops keys it does not recognise. That would
+                # disable the mouse in every later micro, including the editable
+                # popups. `setlocal mouse false` does not persist but also does
+                # not take effect, so the launch flag in PLAN_PANE_VIEWER_FLAGS is
+                # the only safe lever: a micro that was already running keeps its
+                # mouse until the pane respawns.
                 if focus:
                     self._send_micro_command(pane_id, f"goto {line}")
                     self.tmux(["select-pane", "-t", pane_id])
@@ -2434,6 +2450,35 @@ class Frame:
                 "-M",
             ]
         )
+        # tmux 3.7's default WheelUpPane sends the wheel to any pane on the
+        # alternate screen, whether or not it asked for the mouse — so a viewer
+        # that leaves the mouse to tmux (the plan pane) gets no scrolling at all.
+        # Restore the pre-3.7 fallback for exactly that case: arrow keys. Panes
+        # that do grab the mouse, and the sidebar, keep `send-keys -M` unchanged.
+        wheel_bindings = (
+            (
+                "WheelUpPane",
+                "if-shell -F '#{alternate_on}' 'send-keys -N3 Up' 'copy-mode -e'",
+            ),
+            (
+                "WheelDownPane",
+                "if-shell -F '#{alternate_on}' 'send-keys -N3 Down'",
+            ),
+        )
+        for wheel_key, otherwise in wheel_bindings:
+            self.tmux(
+                [
+                    "bind-key",
+                    "-T",
+                    "root",
+                    wheel_key,
+                    "if-shell",
+                    "-F",
+                    "#{||:#{pane_in_mode},#{mouse_any_flag}}",
+                    "send-keys -M",
+                    otherwise,
+                ]
+            )
         new_modal = self._module(
             "newmodal",
             [
