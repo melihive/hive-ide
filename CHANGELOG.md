@@ -4,6 +4,30 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.111] - 2026-10-28
+
+### Fixed
+
+- The plan pane no longer lets its editor own the mouse. `micro` requests
+  any-event mouse tracking (SGR mode 1003), so tmux forwarded every motion over
+  the pane to it and a drag became micro's own selection rather than tmux's,
+  leaving the pane neither copyable nor scrollable the way the others are. The
+  plan pane's viewer is now launched with its mouse handling off as well as
+  read-only: `micro -readonly true -mouse false`, and `vim`/`nvim`/`vi`/`gvim`
+  `-R -c 'set mouse='`. Unknown editors are still launched unchanged, and the
+  editable plan/task/scratchpad popups are unaffected. Steering an
+  already-running micro deliberately does NOT touch `mouse`: micro's `set`
+  writes a global option through to the user's `settings.json`, so the launch
+  flag is the only safe lever and an open pane keeps its mouse until it is
+  reopened.
+- The wheel keeps working now that a viewer can decline the mouse. tmux 3.7's
+  default `WheelUpPane` forwards the event to any pane on the alternate screen
+  whether or not it asked for the mouse, so such a pane scrolled nowhere at all.
+  Root `WheelUpPane`/`WheelDownPane` bindings restore the pre-3.7 fallback —
+  arrow keys for an alternate-screen pane with no mouse grab — and leave
+  `send-keys -M` untouched for every pane that does grab it, including the
+  sidebar and agent panes.
+
 ## [1.0.110] - 2026-10-27
 
 ### Fixed
