@@ -76,11 +76,15 @@ Use `hive-ide monitor` (alias: `top`) to inspect local agent/sidebar memory by
 session on Linux and macOS. Pass `--workspace` to limit the report to the current
 workspace.
 
-The right-side plan pane is read-only by default for known editors: `micro` uses
-`-readonly true`, and `vim`/`nvim`/`vi`/`gvim` use `-R`. Unknown editors are launched
-unchanged. Plan/task/scratchpad popups are intentional edit surfaces and stay editable.
-To edit from a long-lived `micro` plan pane, press `Ctrl-e`, run `reload`, then press
-`Ctrl-e` again and run `set readonly false`.
+The right-side plan pane is a viewer: for known editors it is launched read-only and
+with the editor's own mouse handling off, so tmux keeps the mouse. `micro` uses
+`-readonly true -mouse false`, and `vim`/`nvim`/`vi`/`gvim` use `-R -c 'set mouse='`.
+Unknown editors are launched unchanged. Leaving the mouse to tmux is what makes a click
+focus the pane, a drag select copyable text, and the wheel scroll; an editor that grabs
+the mouse turns every drag into its own selection instead. Plan/task/scratchpad popups
+are intentional edit surfaces and stay editable. To edit from a long-lived `micro` plan
+pane, press `Ctrl-e`, run `reload`, then press `Ctrl-e` again and run
+`set readonly false`.
 
 Plan paths may be relative to the workspace/current working directory or absolute.
 Absolute paths are accepted as-is, so standalone/non-Hive users can attach personal

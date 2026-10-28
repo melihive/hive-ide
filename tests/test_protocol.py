@@ -4358,7 +4358,7 @@ def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch)
     assert calls == [(["editor", "--wait", str(plan)], {})]
 
 
-def test_plan_pane_opens_micro_readonly_by_default(tmp_path, monkeypatch):
+def test_plan_pane_opens_micro_readonly_and_mouse_off_by_default(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     plan = workspace / "plans" / "example.md"
     plan.parent.mkdir(parents=True)
@@ -4376,10 +4376,13 @@ def test_plan_pane_opens_micro_readonly_by_default(tmp_path, monkeypatch):
 
     command = frame._plan_command(record)
 
-    assert shlex.join(["micro", "-readonly", "true", str(plan)]) in command
+    assert (
+        shlex.join(["micro", "-readonly", "true", "-mouse", "false", str(plan)])
+        in command
+    )
 
 
-def test_plan_pane_uses_vim_readonly_flag(tmp_path, monkeypatch):
+def test_plan_pane_uses_vim_readonly_and_mouse_off_flags(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     plan = workspace / "plans" / "example.md"
     plan.parent.mkdir(parents=True)
@@ -4397,7 +4400,10 @@ def test_plan_pane_uses_vim_readonly_flag(tmp_path, monkeypatch):
 
     command = frame._plan_command(record, line=9)
 
-    assert shlex.join(["nvim", "-R", "--clean", "+9", str(plan)]) in command
+    assert (
+        shlex.join(["nvim", "-R", "-c", "set mouse=", "--clean", "+9", str(plan)])
+        in command
+    )
 
 
 def test_plan_pane_leaves_unknown_editor_argv_unchanged(tmp_path, monkeypatch):
@@ -4421,6 +4427,7 @@ def test_plan_pane_leaves_unknown_editor_argv_unchanged(tmp_path, monkeypatch):
     assert shlex.join(["code", "--wait", str(plan)]) in command
     assert "-readonly" not in command
     assert " -R " not in command
+    assert "-mouse" not in command
 
 
 def test_current_plan_marks_live_micro_readonly_without_respawning(
@@ -4456,6 +4463,7 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "C-e"] in calls
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
+    assert ["send-keys", "-t", "%3", "set mouse false", "Enter"] in calls
     assert ["send-keys", "-t", "%3", "goto 3", "Enter"] in calls
     assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
@@ -4500,6 +4508,7 @@ def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
 
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
+    assert ["send-keys", "-t", "%3", "set mouse false", "Enter"] in calls
     assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 

@@ -310,6 +310,20 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             if " MouseDown1Pane " in line
         ]
         assert any("select-pane -t = \\; send-keys -M" in line for line in mouse_lines)
+        wheel_lines = {
+            line.split()[3]: line
+            for line in root_keys.splitlines()
+            if " WheelUpPane " in line or " WheelDownPane " in line
+        }
+        # A pane that grabs the mouse still gets the event; one on the alternate
+        # screen that does not (the read-only plan viewer) gets arrow keys, which
+        # is the only reason its wheel scrolls at all.
+        for wheel_key, arrow in (("WheelUpPane", "Up"), ("WheelDownPane", "Down")):
+            line = wheel_lines[wheel_key]
+            assert "#{||:#{pane_in_mode},#{mouse_any_flag}}" in line
+            assert "send-keys -M" in line
+            assert f"send-keys -N3 {arrow}" in line
+            assert "#{alternate_on}" in line
         assert "#{@hive_ide_pane},sidebar" not in root_keys
         assert "#{client_width}" in keys
         assert "resize-pane -Z ; select-pane -t .0" in keys
