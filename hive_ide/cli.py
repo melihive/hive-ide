@@ -588,7 +588,7 @@ def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
             "; ".join(repair["errors"]) or "The current session needs repair."
         )
     record = store.find_session(record["id"]) or record
-    return frame.current_plan(record, focus=args.focus)
+    return frame.current_plan(record, focus=args.focus, force=force)
 
 
 def cmd_scratchpad(args: argparse.Namespace) -> dict[str, Any]:

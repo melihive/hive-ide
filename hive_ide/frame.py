@@ -1349,11 +1349,14 @@ class Frame:
         verdict = self.pane_is_caller(pane_id) if pane_id else None
         if pane_id and verdict is not True and self._pane_has_micro(pane_id):
             stale = self._plan_viewer_is_stale(pane_id)
-            # A respawn kills the pane, so only a settled "not the caller's
-            # pane" may rebuild one. A stale viewer that cannot safely be
-            # replaced is steered anyway, and says so: new launch flags can
-            # only land on a reopen.
-            if not ((stale or force) and verdict is False):
+            # A respawn kills the pane, so rebuilding needs BOTH an explicit
+            # request and a settled "not the caller's pane". Staleness alone is
+            # not enough: README documents editing from a long-lived plan pane
+            # (`set readonly false`), a runtime change that never reaches the
+            # launch argv — so a pane that reads stale may hold unsaved edits,
+            # and replacing it unasked would discard them. A stale viewer is
+            # steered and SAYS it is stale; the operator asks for the rebuild.
+            if not (force and verdict is False):
                 self._send_micro_command(pane_id, "set readonly true")
                 # Deliberately NOT `set mouse false` here. `readonly` is a
                 # per-buffer option, so steering it is local and free; `mouse` is

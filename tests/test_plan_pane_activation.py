@@ -203,11 +203,16 @@ class Pane(Frame):
         return any(argv[:1] == ["respawn-pane"] for argv in self.calls)
 
 
-def test_a_stale_viewer_is_rebuilt_rather_than_steered(monkeypatch):
+def test_a_stale_viewer_is_never_replaced_unasked(monkeypatch):
+    """Codex P1: README documents editing from a long-lived plan pane
+    (`set readonly false`), and that runtime change never reaches the launch
+    argv — so a pane that reads stale may hold unsaved edits. Staleness alone
+    must not respawn it; it is steered, and says how to pick the flags up."""
     pane = Pane(monkeypatch, verdict=False, stale=True)
     result = pane.run()
-    assert result["action"] == "respawned"
-    assert pane.respawned and pane.steers == []
+    assert result["action"] == "steered" and result["stale_viewer"] is True
+    assert "--force" in result["say"]
+    assert not pane.respawned and pane.steers == ["set readonly true"]
 
 
 def test_a_current_viewer_is_steered_not_rebuilt(monkeypatch):
@@ -217,10 +222,18 @@ def test_a_current_viewer_is_steered_not_rebuilt(monkeypatch):
     assert pane.steers == ["set readonly true"] and not pane.respawned
 
 
-def test_force_rebuilds_a_viewer_that_is_not_stale(monkeypatch):
-    pane = Pane(monkeypatch, verdict=False, stale=False)
+@pytest.mark.parametrize("stale", [True, False])
+def test_force_rebuilds_an_open_viewer(monkeypatch, stale):
+    pane = Pane(monkeypatch, verdict=False, stale=stale)
     assert pane.run(force=True)["action"] == "respawned"
     assert pane.respawned and pane.steers == []
+
+
+def test_force_still_refuses_to_rebuild_an_unsettled_pane(monkeypatch):
+    """Even asked, a pane that is not provably someone else's is not killed."""
+    pane = Pane(monkeypatch, verdict=None, stale=True)
+    assert pane.run(force=True)["action"] == "steered"
+    assert not pane.respawned
 
 
 def test_a_stale_viewer_on_an_unsettled_pane_is_steered_and_says_so(monkeypatch):
@@ -237,3 +250,39 @@ def test_opening_the_plan_pane_reaches_a_stale_servers_bindings(monkeypatch):
     pane = Pane(monkeypatch, verdict=False, stale=False)
     pane.run()
     assert pane.bound == 1
+
+
+def test_the_cli_forwards_force_to_the_viewer(monkeypatch):
+    """Codex P2: `--force` promised to rebuild an open viewer but was consumed
+    by the lease check and never reached `current_plan`. The frame-level tests
+    could not see it, because they call the frame directly."""
+    import argparse
+
+    from hive_ide import cli
+
+    seen = {}
+    monkeypatch.setattr(cli, "_context", lambda args: (_Store(), {}))
+    monkeypatch.setattr(cli, "_current_record", lambda args: (_Store(), {"id": "s1"}))
+    monkeypatch.setattr(cli, "configured_registry", lambda config: None)
+    monkeypatch.setattr(cli.LeaseStore, "live", lambda self, sid: None)
+    monkeypatch.setattr(cli.PaneLeases, "check", lambda self, sid, force=False: None)
+    monkeypatch.setattr(
+        cli.SessionRepair, "__init__", lambda self, *a, **kw: None
+    )
+    monkeypatch.setattr(cli.SessionRepair, "repair", lambda self, record: {"ok": True})
+    monkeypatch.setattr(_Store, "find_session", lambda self, sid: {"id": sid}, raising=False)
+    monkeypatch.setattr(
+        cli.Frame, "__init__",
+        lambda self, store, socket=None: setattr(self, "store", store),
+    )
+    monkeypatch.setattr(
+        cli.Frame, "current_plan",
+        lambda self, record, focus=False, force=False: seen.update(force=force) or {},
+    )
+    monkeypatch.setattr(cli, "_socket", lambda store, socket: "sock")
+
+    args = argparse.Namespace(
+        session_id=None, tmux_socket=None, focus=False, force=True
+    )
+    cli.cmd_current_plan(args)
+    assert seen == {"force": True}
