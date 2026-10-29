@@ -1339,10 +1339,14 @@ class Frame:
                 "opened": "plan-pane",
             }
         PaneLeases(self).check(record["id"], force=force)
-        self.ensure_key_bindings()
         path = self.plan_path(record)
         line = self.plan_focus_line(path) if focus else None
         pane_id = (self.role_panes(record["id"]) or {}).get("plan")
+        if pane_id:
+            # Only where there IS a frame to bind. A plan opened outside the
+            # frame falls through to a terminal editor and has no server of
+            # ours to heal, so reaching for tmux there is pure noise.
+            self.ensure_key_bindings()
         # Steering a live micro is harmless, so it only needs "not provably the
         # caller's pane"; the respawn below kills the pane, so it needs a settled
         # "not the caller's pane" and otherwise falls back to a terminal editor.
