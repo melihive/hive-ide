@@ -1120,6 +1120,74 @@ class Frame:
         return Path(raw.decode("utf-8", errors="replace")).name
 
     @staticmethod
+    def _process_argv(pid: int) -> list[str] | None:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        decoded = raw.decode("utf-8", errors="replace")
+        return [part for part in decoded.split("\0") if part]
+
+    def _plan_viewer_is_stale(self, pane_id: str) -> bool:
+        """True when the pane's open viewer lacks a flag this build would pass.
+
+        A pane that already holds a viewer is only ever STEERED, never rebuilt,
+        so a release that changes the launch flags cannot reach it: 1.0.111
+        shipped `micro -mouse false` and every open plan pane kept its mouse
+        until someone quit micro by hand. Reading the running argv is what lets
+        `current_plan` notice and respawn instead of steering forever.
+
+        Unreadable is not stale. A pid that will not resolve, or a cmdline that
+        will not read, returns False — an unknown must never cost a pane.
+        """
+        editor = self._editor_argv()
+        name = Path(editor[0]).name if editor else ""
+        flags = self.PLAN_PANE_VIEWER_FLAGS.get(name) if name else None
+        if not flags:
+            return False
+        pid = self._pane_pid(pane_id)
+        if pid is None:
+            return False
+        for candidate in self._process_tree(pid):
+            if self._process_command_name(candidate) != name:
+                continue
+            argv = self._process_argv(candidate)
+            if argv is None:
+                return False
+            return not self._argv_carries(argv, flags)
+        return False
+
+    @staticmethod
+    def _argv_carries(argv: list[str], flags: list[str]) -> bool:
+        """True when `flags` appears in `argv` as one contiguous run.
+
+        Membership alone is not enough, because the flags are option/value
+        pairs: `micro -readonly true -mouse true -backup false` contains every
+        token of `-readonly true -mouse false` while meaning the opposite — the
+        mouse is still grabbed, and reading it as current suppresses the very
+        warning that would get it reopened. `_plan_pane_editor_argv` always
+        emits the flags contiguously after the editor, so matching the run
+        reads the pairing correctly and still fits `vim -R -c 'set mouse='`,
+        where `-R` takes no value at all.
+        """
+        return any(
+            argv[i:i + len(flags)] == flags
+            for i in range(len(argv) - len(flags) + 1)
+        )
+
+    @staticmethod
+    def _plan_steer_say(path: Path, *, stale: bool) -> str:
+        steered = f"Steered the plan pane's open viewer to {path} (readonly)."
+        if not stale:
+            return steered
+        return (
+            f"{steered} Its launch flags are older than this build — close it"
+            " and run `plan` again, or `plan --force`, to pick up the current ones."
+        )
+
+    @staticmethod
     def plan_focus_line(path: Path) -> int:
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -1292,12 +1360,25 @@ class Frame:
         path = self.plan_path(record)
         line = self.plan_focus_line(path) if focus else None
         pane_id = (self.role_panes(record["id"]) or {}).get("plan")
+        if pane_id:
+            # Only where there IS a frame to bind. A plan opened outside the
+            # frame falls through to a terminal editor and has no server of
+            # ours to heal, so reaching for tmux there is pure noise.
+            self.ensure_key_bindings()
         # Steering a live micro is harmless, so it only needs "not provably the
         # caller's pane"; the respawn below kills the pane, so it needs a settled
         # "not the caller's pane" and otherwise falls back to a terminal editor.
         verdict = self.pane_is_caller(pane_id) if pane_id else None
-        if pane_id and verdict is not True:
-            if self._pane_has_micro(pane_id):
+        if pane_id and verdict is not True and self._pane_has_micro(pane_id):
+            stale = self._plan_viewer_is_stale(pane_id)
+            # A respawn kills the pane, so rebuilding needs BOTH an explicit
+            # request and a settled "not the caller's pane". Staleness alone is
+            # not enough: README documents editing from a long-lived plan pane
+            # (`set readonly false`), a runtime change that never reaches the
+            # launch argv — so a pane that reads stale may hold unsaved edits,
+            # and replacing it unasked would discard them. A stale viewer is
+            # steered and SAYS it is stale; the operator asks for the rebuild.
+            if not (force and verdict is False):
                 self._send_micro_command(pane_id, "set readonly true")
                 # Deliberately NOT `set mouse false` here. `readonly` is a
                 # per-buffer option, so steering it is local and free; `mouse` is
@@ -1317,6 +1398,9 @@ class Frame:
                     "plan": str(path),
                     "line": line,
                     "opened": "plan-pane",
+                    "action": "steered",
+                    "stale_viewer": stale,
+                    "say": self._plan_steer_say(path, stale=stale),
                 }
         if pane_id and verdict is False:
             result = self.tmux(
@@ -1345,6 +1429,8 @@ class Frame:
                 "plan": str(path),
                 "line": line,
                 "opened": "plan-pane",
+                "action": "respawned",
+                "say": f"Reopened the plan pane on {path}.",
             }
         editor = self._editor_argv()
         if line and line > 1 and Path(editor[0]).name in self.PLUS_LINE_EDITORS:
@@ -1357,6 +1443,7 @@ class Frame:
             "plan": str(path),
             "line": line,
             "opened": "terminal",
+            "action": "terminal",
         }
 
     def current_chat(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -2406,6 +2493,26 @@ class Frame:
         for window_id in self.windows().values():
             self.tmux(["set-window-option", "-t", window_id, "aggressive-resize", "off"])
 
+    def ensure_key_bindings(self) -> bool:
+        """Re-bind when the live tmux server's bindings predate this build.
+
+        `bind_keys()` runs only on resume, working-dir change, force rebuild,
+        source switch and frame build, so installing a new hive-ide leaves a
+        running server on its old bindings. After the 1.0.111 install the
+        server still had tmux's stock `WheelUpPane` and no `WheelDownPane` at
+        all — the plan pane had its mouse released and no wheel, which is the
+        exact regression that binding exists to prevent, and it had to be
+        applied by hand. The stamp lets an install self-heal on the next
+        command that touches the frame.
+        """
+        stamped = self.tmux(
+            ["show-option", "-gvq", "@hive_ide_bound_version"]
+        ).stdout.strip()
+        if stamped == __version__:
+            return False
+        self.bind_keys()
+        return True
+
     def bind_keys(self) -> None:
         self._normalize_frame_environment()
         self._normalize_status_rows()
@@ -2784,6 +2891,7 @@ class Frame:
         self.tmux(
             ["set-option", "-g", "@hive_ide_bound_keys", " ".join(bound)]
         )
+        self.tmux(["set-option", "-g", "@hive_ide_bound_version", __version__])
 
     def verify_user_config(self) -> list[str]:
         findings: list[str] = []

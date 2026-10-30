@@ -787,7 +787,7 @@ def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
     focus_values = []
 
-    def fake_current_plan(_self, session, focus=False):
+    def fake_current_plan(_self, session, focus=False, force=False):
         focus_values.append(focus)
         return {
             "session_id": session["id"],
@@ -840,7 +840,7 @@ def test_cli_current_plan_repairs_missing_working_dir_before_open(
     monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
 
-    def fake_current_plan(_self, session, focus=False):
+    def fake_current_plan(_self, session, focus=False, force=False):
         opened.append(session["working_dir"])
         return {"session_id": session["id"], "opened": "plan-pane"}
 

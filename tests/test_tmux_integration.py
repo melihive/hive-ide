@@ -338,6 +338,15 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         assert "hive_ide.popup --kind card" in keys
         assert "hive_ide.popup --kind keys" in keys
         assert "hive_ide.popup --kind error" in keys
+        # An install has to be able to reach a RUNNING server's bindings, which
+        # is what 1.0.111 could not do: bind_keys stamps the build it bound, and
+        # ensure_key_bindings stands down on a match and re-binds on a mismatch.
+        stamp = ["show-option", "-gv", "@hive_ide_bound_version"]
+        assert frame.tmux(stamp).stdout.strip() == __version__
+        assert frame.ensure_key_bindings() is False
+        frame.tmux(["set-option", "-g", "@hive_ide_bound_version", "0.0.1"])
+        assert frame.ensure_key_bindings() is True
+        assert frame.tmux(stamp).stdout.strip() == __version__
         inherited_prefix = frame.tmux(["show-option", "-gv", "prefix"]).stdout.strip()
         frame.settings["keys"] = {
             "prefix": "C-z",

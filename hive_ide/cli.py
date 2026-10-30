@@ -588,7 +588,7 @@ def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
             "; ".join(repair["errors"]) or "The current session needs repair."
         )
     record = store.find_session(record["id"]) or record
-    return frame.current_plan(record, focus=args.focus)
+    return frame.current_plan(record, focus=args.focus, force=force)
 
 
 def cmd_scratchpad(args: argparse.Namespace) -> dict[str, Any]:
@@ -1625,7 +1625,10 @@ def build_parser() -> argparse.ArgumentParser:
     current_plan.add_argument("--focus", action="store_true")
     current_plan.add_argument(
         "--force", action="store_true",
-        help="Revoke a live pane lease before replacing its content.",
+        help=(
+            "Revoke a live pane lease before replacing its content, and rebuild"
+            " an already-open viewer instead of steering it."
+        ),
     )
     current_plan.set_defaults(handler=cmd_current_plan)
 
@@ -1906,6 +1909,8 @@ def main(argv: list[str] | None = None) -> int:
             result = args.handler(args)
         if not args.quiet and args.command not in QUIET_SUCCESS_COMMANDS:
             print(result if isinstance(result, str) else _json(result))
+        elif not args.quiet and isinstance(result, dict) and result.get("say"):
+            print(result["say"])
         return 0
     except CommandOutcome as exc:
         print(_json(exc.payload))
