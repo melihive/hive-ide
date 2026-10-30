@@ -1156,8 +1156,26 @@ class Frame:
             argv = self._process_argv(candidate)
             if argv is None:
                 return False
-            return not all(flag in argv for flag in flags)
+            return not self._argv_carries(argv, flags)
         return False
+
+    @staticmethod
+    def _argv_carries(argv: list[str], flags: list[str]) -> bool:
+        """True when `flags` appears in `argv` as one contiguous run.
+
+        Membership alone is not enough, because the flags are option/value
+        pairs: `micro -readonly true -mouse true -backup false` contains every
+        token of `-readonly true -mouse false` while meaning the opposite — the
+        mouse is still grabbed, and reading it as current suppresses the very
+        warning that would get it reopened. `_plan_pane_editor_argv` always
+        emits the flags contiguously after the editor, so matching the run
+        reads the pairing correctly and still fits `vim -R -c 'set mouse='`,
+        where `-R` takes no value at all.
+        """
+        return any(
+            argv[i:i + len(flags)] == flags
+            for i in range(len(argv) - len(flags) + 1)
+        )
 
     @staticmethod
     def _plan_steer_say(path: Path, *, stale: bool) -> str:

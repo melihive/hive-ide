@@ -47,6 +47,29 @@ def test_a_viewer_launched_with_every_current_flag_is_not_stale(monkeypatch):
     assert viewer(monkeypatch, CURRENT)._plan_viewer_is_stale("%1") is False
 
 
+# Codex P2: an unordered membership test read these as current, because every
+# token of `-readonly true -mouse false` appears somewhere — while `-mouse true`
+# means the mouse is still grabbed and `plan` then suppressed its own warning.
+WRONG_VALUE = ["micro", "-readonly", "true", "-mouse", "true", "-backup", "false", "/p.md"]
+SPLIT_APART = ["micro", "-readonly", "true", "-x", "y", "-mouse", "false", "/p.md"]
+
+
+@pytest.mark.parametrize("argv", [WRONG_VALUE, SPLIT_APART])
+def test_the_right_tokens_in_the_wrong_pairing_are_stale(monkeypatch, argv):
+    assert viewer(monkeypatch, argv)._plan_viewer_is_stale("%1") is True
+
+
+def test_a_vim_viewer_whose_flags_are_current_is_not_stale(monkeypatch):
+    """`-R` takes no value, so pairing the flags two-by-two would break vim."""
+    argv = ["vim", "-R", "-c", "set mouse=", "/p.md"]
+    assert viewer(monkeypatch, argv, editor="vim")._plan_viewer_is_stale("%1") is False
+
+
+def test_a_vim_viewer_missing_the_mouse_flag_is_stale(monkeypatch):
+    argv = ["vim", "-R", "/p.md"]
+    assert viewer(monkeypatch, argv, editor="vim")._plan_viewer_is_stale("%1") is True
+
+
 def test_an_unreadable_cmdline_is_not_stale(monkeypatch):
     """Unknown is not a verdict: a cmdline we cannot read must not kill a pane."""
     frame = viewer(monkeypatch, CURRENT)
