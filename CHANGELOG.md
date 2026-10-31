@@ -4,6 +4,39 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.112] - 2026-10-31
+
+### Fixed
+
+- `plan` can now activate a plan-pane change on a pane that is already running
+  a viewer. `current_plan` checked for a running `micro` BEFORE the respawn
+  branch, so such a pane was only steered (`set readonly true`) and never
+  rebuilt — the launch flags a new build would use could never reach it, and
+  activation meant quitting the editor by hand. The pane's viewer argv is now
+  read from procfs and compared against the flags this build would launch, as a
+  contiguous run rather than as loose tokens, so `micro -readonly true -mouse
+  true -backup false` is not mistaken for a current `-mouse false`. A viewer
+  whose flags predate the build is reported as such, and rebuilding one
+  requires `--force`: a respawn kills the pane, and the README documents
+  editing in it via `set readonly false`, a runtime change that never reaches
+  the launch argv, so an automatic rebuild could discard unsaved edits. A pid
+  or cmdline that will not read counts as current, never stale — an unknown
+  must not cost a pane.
+- Installing a new hive-ide now reaches a running tmux server's key bindings.
+  `bind_keys()` ran only from `resume`, `working_dir_set`, `force_rebuild`,
+  `source_set` and a frame build, so after an install the server kept the
+  bindings of the build that started it — after 1.0.111 that left the plan pane
+  with the mouse released and no wheel at all, the exact regression those
+  bindings exist to prevent, and they had to be applied by hand. `bind_keys()`
+  now stamps the build it bound into `@hive_ide_bound_version`, and
+  `ensure_key_bindings()` re-binds when that stamp does not match the running
+  package. It is called only where there is a frame to bind, so a `plan` about
+  to open a terminal editor outside the frame does not reach for tmux.
+- `plan` no longer returns silently with exit 0 on the steer path, which read
+  as a no-op. A command in `QUIET_SUCCESS_COMMANDS` may now say what it did, so
+  `plan` reports whether it steered, respawned or opened a terminal editor —
+  and, for a steered viewer, that its launch flags are older than this build.
+
 ## [1.0.111] - 2026-10-28
 
 ### Fixed
