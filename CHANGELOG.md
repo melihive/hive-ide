@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.113] - 2026-11-02
+
 ### Fixed
 
 - A held conversation no longer costs the whole frame. `open` refused to build a
