@@ -302,10 +302,11 @@ class Frame:
     def socket_path(self) -> str:
         """The socket path `tmux -L <self.socket>` resolves to for this process.
 
-        Resolved by `SocketReaper.default_directory`, which follows tmux's own
-        `TMUX_TMPDIR` -> `TMPDIR` -> `/tmp` order. Every verdict below compares a
-        real `$TMUX` against this, so a resolution that differs from tmux's is not
-        a cosmetic difference: it makes the caller's own server look foreign.
+        Resolved by `SocketReaper.default_directory`, so the two cannot drift.
+        Every verdict below compares a real `$TMUX` against this, so a resolution
+        that differs from tmux's own is not a cosmetic difference: it makes the
+        caller's own server look foreign, and the guards then refuse the relaunch
+        and defer the rebuild that a healthy pane is entitled to.
         """
         return str(SocketReaper.default_directory() / self.socket)
 
@@ -882,6 +883,18 @@ class Frame:
     @staticmethod
     def _is_sleeping(record: dict[str, Any]) -> bool:
         return (record.get("sleep") or {}).get("state") == "sleeping"
+
+    @classmethod
+    def _blocked_agent_command(cls, detail: str) -> str:
+        """The agent pane of a session whose driver could not start.
+
+        It carries the reason, in the pane, because that is where the person
+        looking at the empty column is. The sleeping message would be a lie here
+        — the session is not asleep — and it names `hive-ide chat`, which for a
+        held conversation now refuses rather than duplicating the driver.
+        """
+        message = shlex.quote(f"\n  hive-ide: no agent — {detail}\n\n")
+        return cls._interactive_command(f'printf %s {message}; exec "${{SHELL:-/bin/sh}}"')
 
     @classmethod
     def _sleeping_agent_command(cls) -> str:
@@ -1487,6 +1500,13 @@ class Frame:
                 "driver": driver.get("id"),
                 "opened": "existing-agent-pane",
             }
+        # Every other launch path goes through this check; this one did not, and
+        # it is the path `chat` takes when there is no agent pane or when the
+        # caller IS that pane. Running the recorded `--resume` argv there starts a
+        # second driver on a conversation another process holds, which is the
+        # fault the guard exists for — and a driverless pane is exactly where a
+        # user is told to run `chat`.
+        self.prepare_agent_launch(record)
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
             if driver.get("id") == "claude":
@@ -1615,8 +1635,9 @@ class Frame:
         raise HeldConversationError(
             f"Conversation {reference[:8]} is already held by {who}; not starting a "
             "second agent on it. A second driver on one conversation leaves the pane "
-            "permanently blank. Stop that process, or use `hive-ide chat` to attach a "
-            "fresh conversation."
+            "permanently blank. Stop that process, or give this session another "
+            "conversation with `hive-ide attach-conversation --session-id="
+            f"{record['id']} --reference=<id>`."
         )
 
     def pane_pid(self, pane_id: str) -> int | None:
@@ -2119,7 +2140,11 @@ class Frame:
 
     @serialized
     def build(
-        self, record: dict[str, Any], *, force: bool = False, no_driver: bool = False
+        self,
+        record: dict[str, Any],
+        *,
+        force: bool = False,
+        no_driver: str | bool = False,
     ) -> str:
         PaneLeases(self).check(record["id"], force=force)
         working_dir = record["working_dir"]
@@ -2173,7 +2198,7 @@ class Frame:
         if not target:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
         try:
-            return self._finish_build(
+            window = self._finish_build(
                 record, target, working_dir, no_driver=no_driver
             )
         except BaseException:
@@ -2185,6 +2210,9 @@ class Frame:
             # a second. The half-built window goes, and the error still propagates.
             self.tmux(["kill-window", "-t", target])
             raise
+        if not no_driver:
+            self._clear_open_error(record)
+        return window
 
     def _finish_build(
         self,
@@ -2192,16 +2220,16 @@ class Frame:
         target: str,
         working_dir: str,
         *,
-        no_driver: bool = False,
+        no_driver: str | bool = False,
     ) -> str:
         """Fill the window's agent and plan panes.
 
-        `no_driver` builds the window with the sleeping pane message in place of a
-        driver, for a session whose driver cannot start right now. The window, its
-        sidebar and its plan are what make the session reachable at all — from
-        there `hive-ide chat` can start a fresh conversation and the error key can
-        show what happened. Refusing the window instead left the session with no
-        surface to act from.
+        `no_driver` builds the window with no driver, for a session whose driver
+        cannot start right now; a string is shown in the agent pane as the reason.
+        The window, its sidebar and its plan are what make the session reachable
+        at all — the sidebar marks it, the error key shows the recorded error, and
+        the pane itself carries the reason. Refusing the window instead left the
+        session with no surface to act from.
         """
         # A sleeping session starts no driver, so there is nothing for a held
         # conversation to collide with — refusing its window was pure loss, and it
@@ -2209,11 +2237,16 @@ class Frame:
         # not apply. `wake` runs the launch paths, and prepares there.
         if not no_driver and not self._is_sleeping(record):
             self.prepare_agent_launch(record)
-        agent_command = (
-            self._sleeping_agent_command()
-            if no_driver or self._is_sleeping(record)
-            else self._agent_command(record)
-        )
+        if no_driver:
+            agent_command = (
+                self._blocked_agent_command(no_driver)
+                if isinstance(no_driver, str)
+                else self._sleeping_agent_command()
+            )
+        elif self._is_sleeping(record):
+            agent_command = self._sleeping_agent_command()
+        else:
+            agent_command = self._agent_command(record)
         for role, command in (
             ("agent", agent_command),
             ("plan", self._plan_command(record)),
@@ -3040,7 +3073,6 @@ class Frame:
                         built_sleeping.append(record["id"])
                     else:
                         built.append(record["id"])
-                    self._clear_open_error(record)
             except HeldConversationError as exc:
                 # One session's collision must not cost the frame. The window still
                 # goes up — without a driver — so the session stays reachable: its
@@ -3050,7 +3082,7 @@ class Frame:
                 # clean. Recorded as failed either way, and deliberately NOT cleared.
                 failed.append(self._record_open_error(record, exc))
                 try:
-                    self.build(record, no_driver=True)
+                    self.build(record, no_driver=str(exc))
                     built_driverless.append(record["id"])
                 except HiveIdeError:
                     pass

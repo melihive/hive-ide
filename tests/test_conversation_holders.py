@@ -242,7 +242,9 @@ def test_a_held_conversation_fails_that_session_in_open(tmp_path, monkeypatch):
             ["display-message", "-p", "-t", agent, "#{pane_start_command}"]
         ).stdout
         assert REF not in started
-        assert "hive-ide chat" in started
+        # The pane says why it has no agent, where the user is looking.
+        assert "no agent" in started
+        assert "already held by pid 900" in started
 
         recorded = store.read("errors", record["id"])
         assert recorded is not None, "open did not record why the session failed"

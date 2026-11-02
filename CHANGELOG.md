@@ -14,6 +14,24 @@ All notable changes to `hive-ide` will be documented in this file.
   sleeping message that names `hive-ide chat`, the sidebar marks the error, and
   the recorded error survives until a build or a relaunch settles it. The second
   driver is still refused — that part was never the bug.
+- `chat` no longer starts a second driver on a held conversation. Its direct
+  launch — the path taken when the session has no agent pane, or when the caller
+  IS that pane — ran the recorded `--resume` argv in the caller's own terminal
+  without the holder check every other launch path goes through. A driverless
+  pane is exactly where a user is invited to run `chat`, so this was the first
+  thing the new pane would have led them into.
+- A driverless agent pane carries the reason it has no agent, in the pane. It
+  used to show the sleeping message, which is untrue for a session that is not
+  asleep and points at `chat`.
+- The held-conversation refusal no longer tells the reader to run `hive-ide
+  chat`, which now refuses too; it names `attach-conversation` with the session
+  id filled in.
+- A successful driver-bearing build clears the recorded open error whichever
+  path asked for it. The clear lived in `open`, so `rebuild` — what
+  `switch-driver` and `force-rebuild` call — left the old error standing after a
+  successful switch away from the blocked conversation, and `verify` went on
+  reporting a session that was already fixed. A driverless build keeps it:
+  nothing is fixed yet.
 - `open`'s fatal message now names each session and its reason. It reported only
   how many sessions had failed and pointed at `hive-ide verify`, while the reasons
   it already held were recorded and then dropped: the raise happens before the
@@ -27,13 +45,12 @@ All notable changes to `hive-ide` will be documented in this file.
 - The recorded error's recovery line no longer names the session directory and
   the package source whatever the cause; it points at the detail, which says what
   actually happened.
-- `socket_path` follows tmux's own `TMUX_TMPDIR` -> `TMPDIR` -> `/tmp` order
-  instead of skipping `TMPDIR`. macOS sets a per-user `TMPDIR` for every GUI and
-  launchd session, so this package's idea of its own socket sat a directory away
-  from the one its `tmux` calls used: a pane on the live server could not
-  recognise the server it was running on, which refuses the very relaunch a held
-  conversation tells the user to run, and the socket reaper inventoried a
-  directory the frame had never used.
+- `socket_path` is resolved in one place (`SocketReaper.default_directory`) so
+  the frame and the socket reaper cannot drift, and both now document why
+  `TMPDIR` is not part of that resolution: tmux does not read it, so adding it
+  would point the package at a directory tmux never uses on every macOS GUI and
+  launchd session, and the caller-identity verdicts — which compare a real
+  `$TMUX` against this path — would stop recognising the caller's own server.
 
 ## [1.0.112] - 2026-10-31
 

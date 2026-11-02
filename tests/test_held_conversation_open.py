@@ -120,15 +120,20 @@ def test_a_held_conversation_still_gets_its_window(store, monkeypatch, tmp_path)
         assert [failure["name"] for failure in opened["failed"]] == ["HELD"]
         assert f"already held by pid {HELD_PID}" in opened["failed"][0]["error"]
 
-        # The agent pane carries the sleeping message, NOT a second driver on the
-        # held conversation — which is the whole point of the refusal.
+        # The agent pane says why there is no agent — in the pane, where the
+        # person looking at the empty column is — and carries no second driver on
+        # the held conversation, which is the point of the refusal.
         agent = (frame.role_panes(held["id"]) or {})["agent"]
         started = frame.tmux(
             ["display-message", "-p", "-t", agent, "#{pane_start_command}"]
         ).stdout
-        assert "hive-ide chat" in started
+        assert "no agent" in started
+        assert f"already held by pid {HELD_PID}" in started
         assert "--resume" not in started
         assert "7b4fe520-held" not in started
+        # Not the sleeping message: this session is not asleep, and that text
+        # points at `hive-ide chat`, which for a held conversation refuses.
+        assert "agent sleeping" not in started
 
         # The error stands until the session actually gets a driver, so the
         # sidebar keeps marking it and the error key keeps answering.
@@ -211,6 +216,86 @@ def test_a_relaunched_driver_clears_the_recorded_error(store, monkeypatch):
 
 
 # -- and verify can finally answer -----------------------------------------
+
+
+def test_chat_refuses_instead_of_duplicating_the_driver(store, monkeypatch):
+    """`chat` from inside the driverless pane must not start the duplicate.
+
+    Found by the cross-model review of this change: `current_chat`'s direct
+    launch runs the recorded `--resume` argv in the caller's own terminal with no
+    holder check, and that is the path taken when the caller IS the agent pane —
+    which is precisely where the driverless pane invites the user to run it. It
+    would have recreated the blank pane this whole guard exists to prevent.
+    """
+    record = _session(store, "HELD", driver_id="claude", reference="7b4fe520-held")
+    _hold(monkeypatch)
+    launched: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        launched.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%4"})
+    monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: True)
+    # A resolvable pane pid, so the guard can tell this session's own driver from
+    # an outside one; without it the guard declines to refuse on a guess, which
+    # is its own deliberate behaviour and not what this test is about.
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 5555)
+    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Reply())
+
+    with pytest.raises(HeldConversationError):
+        frame.current_chat(record)
+
+    assert not any(
+        "7b4fe520-held" in " ".join(argv) for argv in launched
+    ), f"chat launched a second driver on a held conversation: {launched}"
+
+
+def test_the_refusal_does_not_point_back_at_the_command_that_refused(store, monkeypatch):
+    """It told the reader to run `hive-ide chat`, which now refuses too."""
+    record = _session(store, "HELD", driver_id="claude", reference="7b4fe520-held")
+    _hold(monkeypatch)
+    frame = Frame(store, socket="sock")
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+
+    with pytest.raises(HeldConversationError) as raised:
+        frame.refuse_held_conversation(record)
+
+    message = str(raised.value)
+    assert "hive-ide chat" not in message
+    assert "attach-conversation" in message
+    assert record["id"] in message
+
+
+def test_a_driver_bearing_build_settles_the_recorded_error(store, monkeypatch):
+    """Any path that starts the driver clears it; a driverless build keeps it.
+
+    Also from the review: the clear lived in `open`, so `rebuild` — which
+    `switch-driver` and `force-rebuild` call — left the old error in place after
+    a successful switch away from the blocked conversation, and `verify` went on
+    reporting a session that was already fixed.
+    """
+    record = _session(store, "HELD", driver_id="claude", reference="7b4fe520-held")
+    frame = Frame(store, socket="sock")
+
+    def fake_tmux(self, argv, **kw):
+        if argv[0] in ("new-window", "new-session"):
+            return _Reply(stdout="@7\n")
+        return _Reply()
+
+    monkeypatch.setattr(Frame, "tmux", fake_tmux)
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "_refresh_source_if_needed", lambda self, r, i: None)
+    monkeypatch.setattr(Frame, "_finish_build", lambda self, r, t, wd, **kw: t)
+
+    frame._record_open_error(record, HeldConversationError("held by pid 7"))
+    frame.build(record, no_driver="held by pid 7")
+    assert store.read("errors", record["id"]) is not None, "a driverless build fixed nothing"
+
+    frame.build(record)
+    assert store.read("errors", record["id"]) is None
 
 
 def test_verify_reads_back_the_recorded_open_errors(store):
