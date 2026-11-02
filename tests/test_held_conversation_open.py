@@ -298,6 +298,68 @@ def test_a_driver_bearing_build_settles_the_recorded_error(store, monkeypatch):
     assert store.read("errors", record["id"]) is None
 
 
+def test_a_successful_chat_settles_the_recorded_error(store, monkeypatch):
+    """The natural recovery: the holder exits, `chat` runs in the driverless pane.
+
+    From the second review round. The clear covered `respawn_agent` but not
+    `chat`'s direct launch, which is the path taken from inside that very pane —
+    so the session stayed marked and `verify` kept answering `ok: false` after
+    the user had already fixed it.
+    """
+    record = _session(store, "HELD", driver_id="claude", reference="7b4fe520-held")
+    frame = Frame(store, socket="sock")
+    frame._record_open_error(record, HeldConversationError("held by pid 9"))
+    # The holder is gone now, so nothing refuses the launch.
+    monkeypatch.setattr(
+        ConversationHolders,
+        "holders",
+        classmethod(lambda cls, ref, *, exclude_tree=None, rows=None: []),
+    )
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Reply())
+    monkeypatch.setattr(
+        subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+
+    assert frame.current_chat(record)["opened"] == "terminal"
+    assert store.read("errors", record["id"]) is None
+
+
+def test_chat_launches_the_reconciled_argv_not_the_stale_one(store, monkeypatch):
+    """Preparation can rewrite the record, so the argv must be read after it.
+
+    Also from the second round, and introduced by the guard above: `argv` is
+    captured at the top of `current_chat`, and `prepare_agent_launch` drops a
+    conversation confirmed gone — so the launch would have resumed a deleted id
+    while the stored session already said otherwise.
+    """
+    record = _session(store, "HELD", driver_id="claude", reference="stale-ref")
+    frame = Frame(store, socket="sock")
+    launched: list[list[str]] = []
+
+    def reconcile(self, rec):
+        rec["driver"] = {
+            **(rec.get("driver") or {}),
+            "launch_argv": ["claude", "--name", "HELD"],
+            "resume": {},
+        }
+
+    monkeypatch.setattr(Frame, "prepare_agent_launch", reconcile)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Reply())
+
+    def fake_run(argv, **kwargs):
+        launched.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    frame.current_chat(record)
+
+    assert launched == [["claude", "--name", "HELD"]], launched
+    assert not any("stale-ref" in " ".join(argv) for argv in launched)
+
+
 def test_verify_reads_back_the_recorded_open_errors(store):
     """The store `open` writes is the record of the last failure; verify shows it."""
     first = _session(store, "ONE", driver_id="claude", reference="aaa-1")

@@ -1507,6 +1507,12 @@ class Frame:
         # fault the guard exists for — and a driverless pane is exactly where a
         # user is told to run `chat`.
         self.prepare_agent_launch(record)
+        # `prepare_agent_launch` reconciles the record: a conversation confirmed
+        # gone is dropped, which rewrites `driver` and its argv. `argv` was read
+        # before that, so launching it would run the stale `--resume <deleted-id>`
+        # while the stored session already says otherwise. Re-read both.
+        driver = record.get("driver") or driver
+        argv = list(driver.get("launch_argv") or argv)
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
             if driver.get("id") == "claude":
@@ -1517,6 +1523,7 @@ class Frame:
                 fallback = subprocess.run(fallback_argv, cwd=record["working_dir"])
                 if fallback.returncode == 0:
                     self.clear_sleep(record)
+                    self._clear_open_error(record)
                     return {
                         "session_id": record["id"],
                         "driver": driver.get("id"),
@@ -1524,6 +1531,7 @@ class Frame:
                     }
             raise HiveIdeError(f"The agent exited with status {result.returncode}.")
         self.clear_sleep(record)
+        self._clear_open_error(record)
         return {
             "session_id": record["id"],
             "driver": driver.get("id"),

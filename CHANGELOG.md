@@ -26,6 +26,10 @@ All notable changes to `hive-ide` will be documented in this file.
 - The held-conversation refusal no longer tells the reader to run `hive-ide
   chat`, which now refuses too; it names `attach-conversation` with the session
   id filled in.
+- A successful `chat` clears the recorded open error too, and launches the argv
+  the record holds AFTER preparation rather than the one read before it: dropping
+  a conversation confirmed gone rewrites the driver, so the launch would have
+  resumed a deleted id while the stored session already said otherwise.
 - A successful driver-bearing build clears the recorded open error whichever
   path asked for it. The clear lived in `open`, so `rebuild` — what
   `switch-driver` and `force-rebuild` call — left the old error standing after a
