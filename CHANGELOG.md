@@ -4,6 +4,37 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- A held conversation no longer costs the whole frame. `open` refused to build a
+  window for a session whose conversation another process already held, and when
+  that was every session on the workspace — a workspace of agent sessions — it
+  built nothing and exited 2. One fleet machine was unopenable for three days.
+  Such a session now gets its window WITHOUT a driver: the agent pane carries the
+  sleeping message that names `hive-ide chat`, the sidebar marks the error, and
+  the recorded error survives until a build or a relaunch settles it. The second
+  driver is still refused — that part was never the bug.
+- `open`'s fatal message now names each session and its reason. It reported only
+  how many sessions had failed and pointed at `hive-ide verify`, while the reasons
+  it already held were recorded and then dropped: the raise happens before the
+  result is returned.
+- `verify` reads back the recorded open errors (`open_errors`, `error_findings`)
+  and no longer skips the conversation-holder scan when the frame is down. That
+  gate blinded it in the one state where a holder is the answer — a holder is a
+  process, so it outlives the frame — and `verify` answered `ok: true` to the very
+  machine whose every open was being refused. A standing error now makes `ok`
+  false.
+- The recorded error's recovery line no longer names the session directory and
+  the package source whatever the cause; it points at the detail, which says what
+  actually happened.
+- `socket_path` follows tmux's own `TMUX_TMPDIR` -> `TMPDIR` -> `/tmp` order
+  instead of skipping `TMPDIR`. macOS sets a per-user `TMPDIR` for every GUI and
+  launchd session, so this package's idea of its own socket sat a directory away
+  from the one its `tmux` calls used: a pane on the live server could not
+  recognise the server it was running on, which refuses the very relaunch a held
+  conversation tells the user to run, and the socket reaper inventoried a
+  directory the frame had never used.
+
 ## [1.0.112] - 2026-10-31
 
 ### Fixed

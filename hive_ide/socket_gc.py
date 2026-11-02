@@ -51,7 +51,21 @@ class SocketReaper:
 
     @staticmethod
     def default_directory() -> Path:
-        base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+        """Where tmux keeps this process's sockets.
+
+        `TMUX_TMPDIR`, then `TMPDIR`, then `/tmp` — tmux's own order, and the
+        `TMPDIR` step is not optional. macOS gives every GUI and launchd session a
+        per-user `TMPDIR` under `/var/folders`, so reading only `TMUX_TMPDIR` put
+        this package's idea of its socket a whole directory away from the one its
+        own `tmux` calls were using: a pane on the live server failed to recognise
+        the server it was running on, and the reaper inspected a directory the
+        frame had never used.
+        """
+        base = (
+            os.environ.get("TMUX_TMPDIR")
+            or os.environ.get("TMPDIR")
+            or "/tmp"
+        )
         return Path(base) / f"tmux-{os.getuid()}"
 
     @staticmethod

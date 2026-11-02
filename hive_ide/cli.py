@@ -1205,6 +1205,38 @@ def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _recorded_open_errors(
+    store: StateStore, sessions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The `errors` store, as plain rows: what the last `open` could not open.
+
+    Written by `Frame._record_open_error` and cleared when that session builds or
+    its driver relaunches, so a row here means the failure still stands.
+
+    Restricted to live sessions on purpose. These rows make `verify` report `ok:
+    false`, and nothing deletes the row of a session that was archived while it
+    was failing — so without this filter one archived session would hold the
+    whole workspace unhealthy with nothing left to fix.
+    """
+    live = {session["id"] for session in sessions}
+    rows: list[dict[str, Any]] = []
+    for document in store.list("errors"):
+        if (document.get("session_id") or "") not in live:
+            continue
+        rows.append(
+            {
+                "session_id": document.get("session_id") or "",
+                "component": document.get("component") or "",
+                "summary": document.get("summary") or "Could not open session",
+                "detail": document.get("detail") or "",
+                "recovery": document.get("recovery") or "",
+                "observed_at": document.get("observed_at") or "",
+            }
+        )
+    rows.sort(key=lambda row: row["observed_at"], reverse=True)
+    return rows
+
+
 def _conversation_holders(
     frame: Frame, sessions: list[dict[str, Any]], rows: list[tuple[int, int, str]]
 ) -> list[dict[str, Any]]:
@@ -1219,8 +1251,10 @@ def _conversation_holders(
     process checks and a scan per check both doubles the cost and lets the checks
     disagree about what they saw.
     """
-    if not frame.exists():
-        return []
+    # Deliberately NOT gated on the frame existing. A holder is a process, not a
+    # pane, so it outlives the frame — and "frame down, conversation still held" is
+    # precisely the state that refuses every `open`. Gating here reported a healthy
+    # machine in the one case where this finding was the answer.
     if not rows:
         return []          # could not observe; report nothing rather than guess
     out: list[dict[str, Any]] = []
@@ -1341,7 +1375,10 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     )
     # Two conditions that were completely invisible when they caused a visible
     # freeze on 2026-10-13, and that nothing else reports.
-    process_rows = ConversationHolders.snapshot() if frame.exists() else []
+    # The holder check runs with no frame (see `_conversation_holders`), so the
+    # process table is read unconditionally. `unmanaged` and `agentless` still need
+    # a live server to observe.
+    process_rows = ConversationHolders.snapshot()
     unmanaged = frame.unmanaged_sessions() if frame.exists() else []
     now = time.time()
     unmanaged_findings = [
@@ -1366,7 +1403,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     incomplete = (
         ["could not read the process table, so the conversation-holder and "
          "missing-agent checks did not run"]
-        if frame.exists() and not process_rows
+        if not process_rows
         else []
     )
     agent_findings = [
@@ -1413,6 +1450,15 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
     ).verify()
+    # `open` records why each session could not be opened, and its own fatal
+    # message used to send the reader here to "inspect the recorded session
+    # errors" — which nothing in this CLI could read back. The store is the
+    # durable record of the last failure, so verify is where it belongs.
+    open_errors = _recorded_open_errors(store, sessions)
+    error_findings = [
+        f"{error['summary']}: {error['detail']} ({error['recovery']})"
+        for error in open_errors
+    ]
     return {
         "ok": (
             shutil.which("tmux") is not None
@@ -1422,6 +1468,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not holder_findings
             and not agent_findings
             and not half_built_findings
+            and not error_findings
             and not incomplete
         ),
         "protocol_version": PROTOCOL_VERSION,
@@ -1448,6 +1495,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "agentless_sessions": agentless,
         "half_built_findings": half_built_findings,
         "half_built_windows": half_built,
+        "error_findings": error_findings,
+        "open_errors": open_errors,
         # Inventory only — see the comment where this is computed.
         "dead_sockets": dead_sockets,
         "drivers": {

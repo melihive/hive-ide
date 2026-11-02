@@ -153,10 +153,16 @@ def test_verify_reports_nothing_when_the_process_table_is_unreadable(store, monk
     assert _conversation_holders(frame, sessions, ConversationHolders.snapshot()) == []
 
 
-def test_verify_does_not_read_the_process_table_with_no_frame_running(tmp_path, monkeypatch):
-    """No frame means nothing to compare processes against, so the scan is skipped
-    at the caller — which is also what keeps `verify` cheap on an unopened
-    workspace."""
+def test_verify_reads_the_process_table_with_no_frame_running(tmp_path, monkeypatch):
+    """A holder outlives the frame, so "no frame" is not a reason to skip the scan.
+
+    This test asserted the opposite — skip the scan with no frame, to keep
+    `verify` cheap on an unopened workspace — and that reasoning ("nothing to
+    compare processes against") had it backwards: with no frame, every holder is
+    by definition outside its agent pane, and a holder is exactly what refuses
+    every `open`. A machine sat unopenable for three days while `verify` answered
+    `ok: true` (2026-10-30). One `ps` on an unopened workspace is the price.
+    """
     from hive_ide import cli
 
     (tmp_path / "workspace").mkdir()
@@ -170,13 +176,16 @@ def test_verify_does_not_read_the_process_table_with_no_frame_running(tmp_path, 
     # every other collaborator here: this test is about a different condition.
     monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
     monkeypatch.setattr(
-        ConversationHolders, "snapshot", classmethod(lambda cls: called.append(1) or [])
+        ConversationHolders,
+        "snapshot",
+        classmethod(lambda cls: called.append(1) or [(1, 0, "init")]),
     )
     monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
 
     result = cli.cmd_verify(_verify_args(tmp_path))
 
-    assert called == [], "read ps with no frame to compare it against"
+    assert called == [1], "skipped the holder scan on the one state that needs it"
+    # A readable table with no frame is a complete check, not an incomplete one.
     assert result["incomplete"] == [], "no frame is not an incomplete check"
 
 

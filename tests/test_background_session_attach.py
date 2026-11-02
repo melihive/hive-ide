@@ -174,7 +174,7 @@ def test_a_failed_build_leaves_no_half_built_window(store, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "_finish_build",
-        lambda self, rec, target, wd: (_ for _ in ()).throw(HiveIdeError("held")),
+        lambda self, rec, target, wd, **kw: (_ for _ in ()).throw(HiveIdeError("held")),
     )
 
     with pytest.raises(HiveIdeError):

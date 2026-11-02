@@ -236,6 +236,7 @@ def test_caller_identity_truth_table(
     workspace.mkdir()
     frame = Frame(StateStore(tmp_path / "state", workspace), socket=THIS)
     monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
     for key, value in (("TMUX_PANE", pane), ("HIVE_IDE_TMUX_SOCKET", marker), ("TMUX", tmux)):
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -272,9 +273,24 @@ def test_tmux_variable_is_compared_by_full_socket_path(tmp_path, monkeypatch):
     monkeypatch.setattr(frame, "pane_ids", lambda _window_id: ["%3"])
 
     monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
     assert frame.socket_path() == f"/tmp/tmux-{os.getuid()}/{THIS}"
     monkeypatch.setenv("TMUX", _tmux_var(THIS))
     assert frame.caller_server() is True
+
+    # tmux falls back to TMPDIR before /tmp, and macOS sets TMPDIR for every GUI
+    # and launchd session. Resolving to /tmp there made a pane on the live server
+    # fail to recognise it, which refuses the relaunch the holder refusal itself
+    # recommends (`hive-ide chat`).
+    monkeypatch.setenv("TMPDIR", "/var/folders/zz/T")
+    assert frame.socket_path() == f"/var/folders/zz/T/tmux-{os.getuid()}/{THIS}"
+    monkeypatch.setenv("TMUX", _tmux_var(THIS, tmpdir="/var/folders/zz/T"))
+    assert frame.caller_server() is True
+    # TMUX_TMPDIR still wins over TMPDIR, as it does for tmux.
+    monkeypatch.setenv("TMUX_TMPDIR", "/pinned")
+    assert frame.socket_path() == f"/pinned/tmux-{os.getuid()}/{THIS}"
+    monkeypatch.delenv("TMUX_TMPDIR")
+    monkeypatch.delenv("TMPDIR")
 
     # Same basename on another tmux tmpdir is a different server: not a match,
     # and with nothing else to go on, unknown rather than outside.
