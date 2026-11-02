@@ -4783,7 +4783,7 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
@@ -4793,7 +4793,11 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
         "driver": "codex",
         "opened": "terminal",
     }
-    assert calls == [
+    # `chat` reads the process table first (the holder check that keeps it from
+    # starting a second driver on a live conversation); these tests are about the
+    # launch itself.
+    launches = [call for call in calls if call[0][0] != "ps"]
+    assert launches == [
         (
             ["codex", "resume", "--no-daemon", "-C", str(workspace), "conversation-1"],
             {"cwd": str(workspace)},
@@ -4823,7 +4827,7 @@ def test_current_chat_allows_plain_agent_without_conversation_reference(
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
@@ -4888,8 +4892,8 @@ def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
         if argv == ["claude", "--resume", "conversation-1", "--name", "CHAT"]:
-            return SimpleNamespace(returncode=1)
-        return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
@@ -4899,7 +4903,11 @@ def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch
         "driver": "claude",
         "opened": "claude",
     }
-    assert calls == [
+    # `chat` reads the process table first (the holder check that keeps it from
+    # starting a second driver on a live conversation); these tests are about the
+    # launch itself.
+    launches = [call for call in calls if call[0][0] != "ps"]
+    assert launches == [
         (["claude", "--resume", "conversation-1", "--name", "CHAT"], {"cwd": str(workspace)}),
         (["claude", "--name", "CHAT"], {"cwd": str(workspace)}),
     ]
@@ -4926,14 +4934,18 @@ def test_current_chat_never_uses_claude_agents_when_resume_fails(tmp_path, monke
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
         if argv == ["claude", "--resume", "stale-conversation", "--name", "CHAT"]:
-            return SimpleNamespace(returncode=1)
-        return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
 
     assert result["opened"] == "claude"
-    assert calls == [
+    # `chat` reads the process table first (the holder check that keeps it from
+    # starting a second driver on a live conversation); these tests are about the
+    # launch itself.
+    launches = [call for call in calls if call[0][0] != "ps"]
+    assert launches == [
         (["claude", "--resume", "stale-conversation", "--name", "CHAT"], {"cwd": str(workspace)}),
         (["claude", "--name", "CHAT"], {"cwd": str(workspace)}),
     ]

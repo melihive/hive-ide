@@ -4,6 +4,58 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- A held conversation no longer costs the whole frame. `open` refused to build a
+  window for a session whose conversation another process already held, and when
+  that was every session on the workspace — a workspace of agent sessions — it
+  built nothing and exited 2. One fleet machine was unopenable for three days.
+  Such a session now gets its window WITHOUT a driver: the agent pane carries the
+  sleeping message that names `hive-ide chat`, the sidebar marks the error, and
+  the recorded error survives until a build or a relaunch settles it. The second
+  driver is still refused — that part was never the bug.
+- `chat` no longer starts a second driver on a held conversation. Its direct
+  launch — the path taken when the session has no agent pane, or when the caller
+  IS that pane — ran the recorded `--resume` argv in the caller's own terminal
+  without the holder check every other launch path goes through. A driverless
+  pane is exactly where a user is invited to run `chat`, so this was the first
+  thing the new pane would have led them into.
+- A driverless agent pane carries the reason it has no agent, in the pane. It
+  used to show the sleeping message, which is untrue for a session that is not
+  asleep and points at `chat`.
+- The held-conversation refusal no longer tells the reader to run `hive-ide
+  chat`, which now refuses too; it names `attach-conversation` with the session
+  id filled in.
+- A successful `chat` clears the recorded open error too, and launches the argv
+  the record holds AFTER preparation rather than the one read before it: dropping
+  a conversation confirmed gone rewrites the driver, so the launch would have
+  resumed a deleted id while the stored session already said otherwise.
+- A successful driver-bearing build clears the recorded open error whichever
+  path asked for it. The clear lived in `open`, so `rebuild` — what
+  `switch-driver` and `force-rebuild` call — left the old error standing after a
+  successful switch away from the blocked conversation, and `verify` went on
+  reporting a session that was already fixed. A driverless build keeps it:
+  nothing is fixed yet.
+- `open`'s fatal message now names each session and its reason. It reported only
+  how many sessions had failed and pointed at `hive-ide verify`, while the reasons
+  it already held were recorded and then dropped: the raise happens before the
+  result is returned.
+- `verify` reads back the recorded open errors (`open_errors`, `error_findings`)
+  and no longer skips the conversation-holder scan when the frame is down. That
+  gate blinded it in the one state where a holder is the answer — a holder is a
+  process, so it outlives the frame — and `verify` answered `ok: true` to the very
+  machine whose every open was being refused. A standing error now makes `ok`
+  false.
+- The recorded error's recovery line no longer names the session directory and
+  the package source whatever the cause; it points at the detail, which says what
+  actually happened.
+- `socket_path` is resolved in one place (`SocketReaper.default_directory`) so
+  the frame and the socket reaper cannot drift, and both now document why
+  `TMPDIR` is not part of that resolution: tmux does not read it, so adding it
+  would point the package at a directory tmux never uses on every macOS GUI and
+  launchd session, and the caller-identity verdicts — which compare a real
+  `$TMUX` against this path — would stop recognising the caller's own server.
+
 ## [1.0.112] - 2026-10-31
 
 ### Fixed

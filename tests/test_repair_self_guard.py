@@ -276,6 +276,16 @@ def test_tmux_variable_is_compared_by_full_socket_path(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX", _tmux_var(THIS))
     assert frame.caller_server() is True
 
+    # TMPDIR must NOT move it: tmux reads TMUX_TMPDIR, else /tmp, and nothing
+    # else (tmux 3.8, and `tmux(1)`). macOS sets TMPDIR for every GUI and launchd
+    # session, so a TMPDIR step here — which looks like a portability fix — would
+    # point this at a directory tmux never uses, and the verdict below would stop
+    # recognising the caller's own server.
+    monkeypatch.setenv("TMPDIR", "/var/folders/zz/T")
+    assert frame.socket_path() == f"/tmp/tmux-{os.getuid()}/{THIS}"
+    assert frame.caller_server() is True
+    monkeypatch.delenv("TMPDIR")
+
     # Same basename on another tmux tmpdir is a different server: not a match,
     # and with nothing else to go on, unknown rather than outside.
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "tmuxdir"))

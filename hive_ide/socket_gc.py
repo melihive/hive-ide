@@ -51,6 +51,17 @@ class SocketReaper:
 
     @staticmethod
     def default_directory() -> Path:
+        """Where tmux keeps this process's sockets: `TMUX_TMPDIR`, else `/tmp`.
+
+        `TMPDIR` is deliberately NOT consulted, because tmux does not consult it
+        either — `tmux(1)`: "the sockets are all created in a directory tmux-UID
+        under the directory given by TMUX_TMPDIR or in /tmp". Adding a `TMPDIR`
+        step here looks like a portability fix and is the opposite: macOS sets a
+        per-user `TMPDIR` for every GUI and launchd session, so this would point
+        at a directory tmux never uses, and `socket_path` — which every caller
+        verdict compares against a real `$TMUX` — would stop recognising the
+        server the caller is actually on. Verified against tmux 3.8.
+        """
         base = os.environ.get("TMUX_TMPDIR") or "/tmp"
         return Path(base) / f"tmux-{os.getuid()}"
 
