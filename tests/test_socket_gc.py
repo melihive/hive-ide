@@ -14,6 +14,14 @@ import pytest
 from hive_ide.socket_gc import SocketReaper
 
 
+@pytest.fixture
+def tmp_path(tmp_path, monkeypatch):
+    # AF_UNIX paths are capped at 104 bytes on macOS. Keep real sockets and
+    # production connect probes, using short relative paths in an isolated cwd.
+    monkeypatch.chdir(tmp_path)
+    return Path(".")
+
+
 def _dead_socket(directory: Path, name: str, *, age: float = 7200.0) -> Path:
     """A socket file with nothing listening — bound, then closed."""
     path = directory / name

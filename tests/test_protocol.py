@@ -25,6 +25,7 @@ from hive_ide.errors import HiveIdeError, SchemaVersionError, UsageError
 from hive_ide.environments import EnvironmentManager, managed_interpreter
 from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
+from hive_ide.holders import ConversationHolders
 from hive_ide.hooks import HookInstaller
 from hive_ide.info import _card, _keys
 from hive_ide.monitor import ProcessSample, _parse_ps_rows, build_monitor
@@ -2708,9 +2709,12 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
     assert rebuilt == []
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, platform
 ):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ConversationHolders, "snapshot", staticmethod(lambda: [(123, 1, "fish")]))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -2779,7 +2783,12 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
     assert rebuilt == []
 
 
-def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ConversationHolders, "snapshot", staticmethod(lambda: [
+        (123, 1, "sh"), (456, 123, "node /fixture/bin/codex resume conversation-1"),
+    ]))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -2841,7 +2850,10 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     assert respawned == []
 
 
-def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ConversationHolders, "snapshot", staticmethod(lambda: [(123, 1, "sh")]))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -2942,9 +2954,15 @@ def test_repair_does_not_build_missing_sleeping_window(tmp_path, monkeypatch):
     assert ensured == []
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, platform
 ):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ConversationHolders, "snapshot", staticmethod(lambda: [
+        (123, 1, "sh"), (456, 123, "python3 wrapper.py"),
+        (789, 456, "node /fixture/bin/codex resume conversation-1"),
+    ]))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -3005,9 +3023,14 @@ def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
     assert respawned == []
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, platform
 ):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ConversationHolders, "snapshot", staticmethod(lambda: [
+        (123, 1, "sh"), (456, 123, "node /fixture/bin/codex resume conversation-1"),
+    ]))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     state = tmp_path / "state"

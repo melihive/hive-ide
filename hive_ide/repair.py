@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .drivers import DriverRegistry
 from .errors import HiveIdeError
 from .frame import Frame
 from .health import SessionHealth
+from .holders import ConversationHolders
 from .pane_lease import LeaseStore, PaneLeases, serialized
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
@@ -898,6 +900,17 @@ class SessionRepair:
         markers.discard("")
         if not markers:
             return True
+        if sys.platform == "darwin":
+            rows = ConversationHolders.snapshot()
+            if not any(pid == pane_pid for pid, _parent, _line in rows):
+                # Unknown must not authorize replacing a potentially live driver.
+                return True
+            descendants = ConversationHolders.descendants(pane_pid, rows)
+            return any(
+                any(marker.lower() in line.lower() for marker in markers)
+                for pid, _parent, line in rows
+                if pid != pane_pid and pid in descendants
+            )
         pids = Frame._process_tree(pane_pid)
         inspected = False
         for pid in pids:

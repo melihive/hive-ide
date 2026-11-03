@@ -400,6 +400,7 @@ class IdeRelayout:
         *,
         sleep=time.sleep,
         now: float | None = None,
+        token: str | None = None,
     ) -> bool:
         """True when a newer snap arrived during the short resize debounce.
 
@@ -410,7 +411,7 @@ class IdeRelayout:
         """
         if not path:
             return False
-        token = f"{now if now is not None else time.time()}:{os.getpid()}"
+        token = token or f"{now if now is not None else time.time()}:{os.getpid()}"
         marker = path + ".pending"
         try:
             os.makedirs(os.path.dirname(marker) or ".", exist_ok=True)
@@ -517,7 +518,7 @@ class IdeRelayout:
         return prev_side, prev_plan
 
     @staticmethod
-    def main(argv: list[str]) -> int:
+    def main(argv: list[str], *, debounced: bool = False) -> int:
         if "--state-home" in argv[1:]:
             parser = argparse.ArgumentParser(prog="python -m hive_ide.relayout")
             parser.add_argument("--state-home", required=True)
@@ -545,7 +546,26 @@ class IdeRelayout:
                 relayout_argv.extend([parsed.client_width, parsed.client_height])
             if parsed.window_id:
                 relayout_argv.append(parsed.window_id)
-            return IdeRelayout.main(relayout_argv)
+            # Debouncing needs concurrent writers, so do it BEFORE serialization.
+            # Recheck under the lock: a newer resize may arrive while we wait.
+            token = None
+            state_path = str(store.workspace_dir / "layout.json")
+            if (parsed.mode == "snap" and parsed.client_width and parsed.client_height
+                    and parsed.client_width.isdigit() and parsed.client_height.isdigit()):
+                token = f"{time.time()}:{os.getpid()}"
+                if IdeRelayout._coalesced_by_newer_snap(state_path, token=token):
+                    return 0
+            # Hooks run outside the CLI. Share its workspace lock so a window
+            # switch cannot swap panes concurrently with an explicit relayout.
+            with store.mutation_lock():
+                if token:
+                    try:
+                        with open(state_path + ".pending", encoding="utf-8") as fh:
+                            if fh.read() != token:
+                                return 0
+                    except OSError:
+                        pass  # preserve the debounce helper's fail-open contract
+                return IdeRelayout.main(relayout_argv, debounced=True)
         if len(argv) < 4:
             return 0
         sock = argv[1]
@@ -571,7 +591,8 @@ class IdeRelayout:
         if len(argv) > 11 and argv[10].isdigit() and argv[11].isdigit():
             forced_geometry = (int(argv[10]), int(argv[11]))
         target_window = argv[12] if len(argv) > 12 and argv[12] else None
-        if mode == "snap" and forced_geometry and IdeRelayout._coalesced_by_newer_snap(state_path):
+        if (not debounced and mode == "snap" and forced_geometry
+                and IdeRelayout._coalesced_by_newer_snap(state_path)):
             IdeRelayout._debug_write(
                 state_path,
                 {
