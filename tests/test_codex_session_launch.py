@@ -143,3 +143,38 @@ def test_verify_does_not_probe_wrappers_and_reports_missing_or_hung_codex(tmp_pa
         raise subprocess.TimeoutExpired("codex", 5)
     monkeypatch.setattr("hive_ide.cli.subprocess.run", hung)
     assert "TimeoutExpired" in _codex_isolation_findings(sessions)[0]
+
+
+def test_chat_isolates_the_argv_that_reconciliation_rewrote(tmp_path, monkeypatch):
+    """Dropping a dead conversation must not cost the launch its isolation.
+
+    `current_chat` reads the argv, prepares the launch — which rewrites `driver`
+    when a conversation is confirmed gone — and then re-reads it. A re-read taken
+    straight from `launch_argv` is isolated on neither pass, which left the one
+    path a driverless pane invites the user to run as the only un-isolated launch
+    in the frame. The two behaviours are covered apart; this pins them together.
+    """
+    store = StateStore(tmp_path / "state", tmp_path)
+    frame = Frame(store)
+    record = {"id": "session-a", "working_dir": str(tmp_path),
+              "driver": {"id": "codex",
+                         "launch_argv": ["codex", "resume", "deleted-thread"]}}
+    monkeypatch.setattr(frame, "role_panes", lambda _id: {})
+    monkeypatch.setattr(frame, "clear_sleep", lambda _record: None)
+
+    def reconcile(rec):
+        # What the guard does to a reference it confirms gone: the resume argument
+        # comes off, so the stored argv is no longer the one read on entry.
+        rec["driver"] = {"id": "codex", "launch_argv": ["codex"]}
+
+    monkeypatch.setattr(frame, "prepare_agent_launch", reconcile)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", run)
+    assert frame.current_chat(record)["opened"] == "terminal"
+    # The rewritten argv, isolated — and the stale id gone with it.
+    assert calls == [["codex", "--no-daemon"]]
