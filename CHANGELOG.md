@@ -11,10 +11,9 @@ All notable changes to `hive-ide` will be documented in this file.
   Arguments that look like environment assignments cannot supply pane identity.
   Repair reads one process snapshot and preserves the pane when its process tree
   is unobservable.
-- Release tests use portable socket paths and file-descriptor checks. Cleanup is
-  scoped to its own test run, preventing concurrent suites from killing each
-  other's tmux processes. Real tmux tests use an isolated home configuration;
-  vocabulary checks ignore build folders relative to the tree being scanned.
+- Release tests use portable socket paths and file-descriptor checks. Real tmux
+  tests use an isolated home configuration; vocabulary checks ignore build
+  folders relative to the tree being scanned.
 - `verify` checks whether each saved standard Codex executable accepts
   `--no-daemon`, and reports an actionable compatibility finding when it cannot
   confirm support. Unsupported clients never fall back to shared execution.
@@ -32,6 +31,345 @@ All notable changes to `hive-ide` will be documented in this file.
   incorrect conversation bindings need a separate explicit repair; this update
   does not guess their intended owner or relax the idle guard. Custom Codex
   wrappers must provide equivalent isolation themselves.
+## [1.0.113] - 2026-11-02
+
+### Fixed
+
+- A held conversation no longer costs the whole frame. `open` refused to build a
+  window for a session whose conversation another process already held, and when
+  that was every session on the workspace — a workspace of agent sessions — it
+  built nothing and exited 2. One fleet machine was unopenable for three days.
+  Such a session now gets its window WITHOUT a driver: the agent pane carries the
+  sleeping message that names `hive-ide chat`, the sidebar marks the error, and
+  the recorded error survives until a build or a relaunch settles it. The second
+  driver is still refused — that part was never the bug.
+- `chat` no longer starts a second driver on a held conversation. Its direct
+  launch — the path taken when the session has no agent pane, or when the caller
+  IS that pane — ran the recorded `--resume` argv in the caller's own terminal
+  without the holder check every other launch path goes through. A driverless
+  pane is exactly where a user is invited to run `chat`, so this was the first
+  thing the new pane would have led them into.
+- A driverless agent pane carries the reason it has no agent, in the pane. It
+  used to show the sleeping message, which is untrue for a session that is not
+  asleep and points at `chat`.
+- The held-conversation refusal no longer tells the reader to run `hive-ide
+  chat`, which now refuses too; it names `attach-conversation` with the session
+  id filled in.
+- A successful `chat` clears the recorded open error too, and launches the argv
+  the record holds AFTER preparation rather than the one read before it: dropping
+  a conversation confirmed gone rewrites the driver, so the launch would have
+  resumed a deleted id while the stored session already said otherwise.
+- A successful driver-bearing build clears the recorded open error whichever
+  path asked for it. The clear lived in `open`, so `rebuild` — what
+  `switch-driver` and `force-rebuild` call — left the old error standing after a
+  successful switch away from the blocked conversation, and `verify` went on
+  reporting a session that was already fixed. A driverless build keeps it:
+  nothing is fixed yet.
+- `open`'s fatal message now names each session and its reason. It reported only
+  how many sessions had failed and pointed at `hive-ide verify`, while the reasons
+  it already held were recorded and then dropped: the raise happens before the
+  result is returned.
+- `verify` reads back the recorded open errors (`open_errors`, `error_findings`)
+  and no longer skips the conversation-holder scan when the frame is down. That
+  gate blinded it in the one state where a holder is the answer — a holder is a
+  process, so it outlives the frame — and `verify` answered `ok: true` to the very
+  machine whose every open was being refused. A standing error now makes `ok`
+  false.
+- The recorded error's recovery line no longer names the session directory and
+  the package source whatever the cause; it points at the detail, which says what
+  actually happened.
+- `socket_path` is resolved in one place (`SocketReaper.default_directory`) so
+  the frame and the socket reaper cannot drift, and both now document why
+  `TMPDIR` is not part of that resolution: tmux does not read it, so adding it
+  would point the package at a directory tmux never uses on every macOS GUI and
+  launchd session, and the caller-identity verdicts — which compare a real
+  `$TMUX` against this path — would stop recognising the caller's own server.
+
+## [1.0.112] - 2026-10-31
+
+### Fixed
+
+- `plan` can now activate a plan-pane change on a pane that is already running
+  a viewer. `current_plan` checked for a running `micro` BEFORE the respawn
+  branch, so such a pane was only steered (`set readonly true`) and never
+  rebuilt — the launch flags a new build would use could never reach it, and
+  activation meant quitting the editor by hand. The pane's viewer argv is now
+  read from procfs and compared against the flags this build would launch, as a
+  contiguous run rather than as loose tokens, so `micro -readonly true -mouse
+  true -backup false` is not mistaken for a current `-mouse false`. A viewer
+  whose flags predate the build is reported as such, and rebuilding one
+  requires `--force`: a respawn kills the pane, and the README documents
+  editing in it via `set readonly false`, a runtime change that never reaches
+  the launch argv, so an automatic rebuild could discard unsaved edits. A pid
+  or cmdline that will not read counts as current, never stale — an unknown
+  must not cost a pane.
+- Installing a new hive-ide now reaches a running tmux server's key bindings.
+  `bind_keys()` ran only from `resume`, `working_dir_set`, `force_rebuild`,
+  `source_set` and a frame build, so after an install the server kept the
+  bindings of the build that started it — after 1.0.111 that left the plan pane
+  with the mouse released and no wheel at all, the exact regression those
+  bindings exist to prevent, and they had to be applied by hand. `bind_keys()`
+  now stamps the build it bound into `@hive_ide_bound_version`, and
+  `ensure_key_bindings()` re-binds when that stamp does not match the running
+  package. It is called only where there is a frame to bind, so a `plan` about
+  to open a terminal editor outside the frame does not reach for tmux.
+- `plan` no longer returns silently with exit 0 on the steer path, which read
+  as a no-op. A command in `QUIET_SUCCESS_COMMANDS` may now say what it did, so
+  `plan` reports whether it steered, respawned or opened a terminal editor —
+  and, for a steered viewer, that its launch flags are older than this build.
+
+## [1.0.111] - 2026-10-28
+
+### Fixed
+
+- The plan pane no longer lets its editor own the mouse. `micro` requests
+  any-event mouse tracking (SGR mode 1003), so tmux forwarded every motion over
+  the pane to it and a drag became micro's own selection rather than tmux's,
+  leaving the pane neither copyable nor scrollable the way the others are. The
+  plan pane's viewer is now launched with its mouse handling off as well as
+  read-only: `micro -readonly true -mouse false`, and `vim`/`nvim`/`vi`/`gvim`
+  `-R -c 'set mouse='`. Unknown editors are still launched unchanged, and the
+  editable plan/task/scratchpad popups are unaffected. Steering an
+  already-running micro deliberately does NOT touch `mouse`: micro's `set`
+  writes a global option through to the user's `settings.json`, so the launch
+  flag is the only safe lever and an open pane keeps its mouse until it is
+  reopened.
+- The wheel keeps working now that a viewer can decline the mouse. tmux 3.7's
+  default `WheelUpPane` forwards the event to any pane on the alternate screen
+  whether or not it asked for the mouse, so such a pane scrolled nowhere at all.
+  Root `WheelUpPane`/`WheelDownPane` bindings restore the pre-3.7 fallback —
+  arrow keys for an alternate-screen pane with no mouse grab — and leave
+  `send-keys -M` untouched for every pane that does grab it, including the
+  sidebar and agent panes.
+
+## [1.0.110] - 2026-10-27
+
+### Fixed
+
+- `Frame.pane_hive_ide_env` reports unknown (`None`) while the pane's pid is
+  still tmux's pre-exec fork (process name `tmux: server`; procfs `comm` on
+  Linux, `ps` elsewhere). That fork carries the server's environment, so repair
+  could read it as a confident, stale identity for the agent pane.
+- A hidden window's sidebar no longer loses its sessions when the window is
+  resized while nobody is painting it ("footer only, or one session" on switch
+  back, until wake repaints). Every window switch (`relayout --mode adopt`) and
+  client resize (`snap`) resizes hidden windows too. On tmux's normal screen a
+  full-height frame keeps its bottom: narrowing reflows and splits every
+  full-width row, and shortening drops rows from the top once it passes the
+  cursor on the last row. Frames now draw on the alternate screen, which tmux
+  never reflows, and park the cursor at home, so a shrink trims padding and the
+  footer instead of sessions. A sidebar also re-homes the cursor as it exits.
+
+## [1.0.109] - 2026-10-23
+
+### Fixed
+
+- A driver launch now sets its PATH inside the pane command (`/usr/bin/env
+  PATH=<path> sh -c …`, plain `env` where `/usr/bin/env` is missing) instead of
+  with `tmux -e PATH=`. tmux sets the PATH of a pane spawned by an unattached
+  client from that client after applying `-e`, so 1.0.108's fix was discarded
+  in exactly the daemon case it targeted and `wake` from launchd still exited
+  127. Sleeping and pane-lease launches are unchanged.
+
+## [1.0.108] - 2026-10-23
+
+### Fixed
+
+- Agent launches (window build, agent-pane relaunch, `wake`) carry a PATH that
+  can find the driver: the tmux server's global PATH, with the per-user bin dirs
+  (`~/.local/bin`, `$PIPX_BIN_DIR`, `$PNPM_HOME`, the npm prefix `bin`) appended,
+  or the client's PATH with them in front when the server reports none. A pane
+  spawned by an unattached client gets that client's PATH, so `wake` run from a
+  launchd daemon on macOS started `claude` without `~/.local/bin` and exited 127.
+- `wake` no longer reports a launch that failed as woke. It watches the agent
+  pane for up to 2 s; a driver that exits at once (the `driver command failed`
+  marker, or a dead pane) returns `launch_failed` with exit 1 and the session
+  goes back to sleep.
+
+## [1.0.107] - 2026-10-23
+
+### Added
+
+- `hive-ide wake --session=<ID> --prompt=<TEXT>` wakes a sleeping session and
+  resumes its conversation with a one-shot launch prompt (`claude --resume <id>
+  <TEXT>`, `codex resume <thread> <TEXT>`), through the ordinary window build or
+  agent-pane relaunch. Nothing is typed. It prints one JSON object and refuses
+  with exit 2 (`not_sleeping`, `unknown_session`, `bad_prompt`,
+  `driver_unsupported`) before changing anything; a failed launch exits 1 and
+  puts the session back to sleep. `capabilities` reports `wake-prompt`.
+
+### Fixed
+
+- Building a sleeping session's window no longer drops a pending handoff or
+  launch prompt: the sleeping window launches no driver, so the prompt now waits
+  for the next real launch instead of being discarded undelivered.
+
+## [1.0.106] - 2026-10-23
+
+### Added
+
+- `hive-ide create --driver=claude|codex --prompt=<TEXT>` gives a session its
+  first instruction at launch: the first launch passes it to the driver as its
+  initial prompt argument (`claude <TEXT>`, `codex <TEXT>`), then it is dropped so
+  a relaunch never repeats it. A handoff prompt still wins when both exist. It is
+  refused for other drivers, with `--adopt`, and for a value starting with `-`
+  (the driver would read it as an option), longer than 4000 characters, or
+  carrying control characters other than newline and tab. `capabilities`
+  reports `launch-prompt`.
+
+### Removed
+
+- `hive-ide nudge`, which typed a caller's line plus Enter into an agent pane.
+  Relay delivery is native now (Codex `codex queue`; Claude's asyncRewake waiter
+  and courier), and a disposable session that needs a first instruction gets it
+  through `create --prompt`, so nothing types into an agent pane any more.
+  `capabilities` no longer reports `nudge`. The pane and driver gates it shared
+  stay, used only by `driver-rename` (a rename the human asks for in their own
+  pane); the human-input check and the line-safety rules, which only `nudge`
+  used, are gone with it.
+
+## [1.0.105] - 2026-10-22
+
+### Fixed
+
+- `test_switching_windows_shows_the_right_order_and_never_blanks_the_pane` no
+  longer fails on a loaded machine. It told a woken sidebar from an unwoken one
+  with a 250ms stale-order budget (a working wake measured 259-633ms under load).
+  It now freezes the left window's keep-alive, so only the wake hook can repaint
+  it: the correct order arriving at all (5s ceiling) proves the wake, with no
+  blank frame and an unchanged pane pid. Its setup waits on real conditions
+  (laid-out column painted, sidebar process exited) instead of fixed sleeps.
+- A Codex turn that ends in an error (an API 400, a usage limit) no longer reads
+  as `working` forever. Codex runs no hook for a failed turn — no `Stop`, and its
+  hook events have no failure event — so the status left by `UserPromptSubmit`
+  never changed and anything holding work for an idle agent held it indefinitely.
+  The prompt hook now records Codex's `turn_id`, and status readers (`nudge`, the
+  sidebar) close that turn when Codex's own rollout records its end
+  (`task_complete`, which Codex also writes after an error, or `turn_aborted`).
+  A rollout that cannot be read is unknown and changes nothing.
+- `test_deferred_driver_switch_completes_from_outside_on_the_marker` no longer
+  flakes. tmux returns from building a pane before the pane's child has exec'd,
+  and for that moment `#{pane_pid}` is a forked copy of the tmux server carrying
+  the test process's environment — another session's `HIVE_IDE_SESSION_ID` when
+  the suite runs inside an ide pane — so a repair that read it then saw a "stale
+  agent environment" and rebuilt a healthy window. The test (and the shared live
+  fixture) now waits, with a deadline, for the agent pane to carry its own
+  session id before repairing.
+
+## [1.0.104] - 2026-10-22
+
+### Added
+
+- The chat pane's title names the session's relay agent — `HIDE (Lenka)` — so a
+  window says which agent it belongs to. The relay name is how these sessions are
+  referred to in conversation, and until now the mapping existed only in the relay
+  board's output. A session with no relay label shows its name alone rather than
+  empty brackets, which is the common case rather than an edge one. The sidebar and
+  the plan pane are unchanged; this is the chat pane only.
+- Setting a label repaints the pane titles in the same call. The label is written
+  by relay registration long after the window was built, so without this the name
+  appeared only on the next rebuild. Recording the label no longer depends on a
+  frame being up, so labelling a sleeping session still works.
+
+### Fixed
+
+- Retitling reports whether the titles were actually written. The results of the
+  tmux writes were discarded, so a caller was told the panes had been retitled even
+  when every write failed against a wedged server.
+- The tmux calls made while retitling are bounded. They run while the workspace
+  mutation lock is held and tmux has no timeout of its own, so an unresponsive
+  server could hang the call indefinitely and block every other command and hook
+  waiting on that lock — which no exception handler can recover from.
+
+### Note
+
+- The relay label is sanitised and length-bounded before it reaches the title.
+  `pane-border-format` renders the title through a format string, where `#` opens a
+  format or style sequence, so a `#` arriving from registration would distort the
+  border rather than print; and the chat pane's border is narrow enough that a long
+  name would crowd out the session name it annotates.
+
+## [1.0.103] - 2026-10-22
+
+### Fixed
+
+- The test suite no longer leaves tmux sockets in the machine's own tmux
+  directory. tmux keeps the socket FILE after its server exits, and a test's
+  `kill-server` does not remove it, so every test that started a real server
+  dropped one file that nothing in the suite ever collected — 462 had accumulated,
+  which is not merely untidy: it made the socket listing unusable for reading a
+  real frame. The whole run now gets its own private tmux directory, so nothing a
+  test starts can reach the real one even when its teardown never runs at all.
+- `verify` reports a half-built window: one pane, no role tag, which is a build
+  that created the window and then aborted before tagging it. Nothing maps a
+  session to an untagged window, so it can never be opened from the sidebar while
+  its sidebar loop keeps probing tmux once a second. The finding names the window
+  and the command that closes it.
+- `verify` reports how many of this package's socket files have no server behind
+  them, as inventory rather than a verdict — a dead socket file is clutter, not a
+  fault. The count is taken independently of what the reaper may delete right now:
+  reporting the reaper's candidates instead answered zero on an afternoon that had
+  just produced 150, because candidates exclude anything under an hour old and stop
+  at the removal cap.
+- A failed pane scan is now distinguishable from a clean frame. The scan returned
+  an empty list when it could not run at all, which `verify` read as "nothing
+  found" and reported as healthy; it now marks the run incomplete instead, so a
+  check that never ran cannot pass.
+
+### Note
+
+- The run's tmux directory is created atomically and privately rather than at a
+  predictable path. A predictable one could be pre-created by another local user
+  with the per-uid subdirectory symlinked at the real tmux directory, which would
+  have pointed the suite's own cleanup at it. The cleanup also no longer follows a
+  symlink or addresses anything that is not a socket.
+- That directory is placed under `/tmp` rather than the platform temporary
+  directory, which is long on macOS: a unix socket path is capped near 108 bytes
+  and tmux appends its own per-uid path, so honouring the platform value makes
+  real-tmux tests fail to start instead of being isolated.
+
+## [1.0.102] - 2026-10-22
+
+### Fixed
+
+- A session moved into the background can be opened again. A backgrounded driver
+  runs under its own detached host, which holds the conversation exactly as an
+  abandoned driver does — so the holder guard added in 1.0.96 refused to open it,
+  and the recorded error told the user to stop the process, which would have killed
+  the running session. A background session is now attached rather than refused:
+  the launch becomes the driver's own `attach` against the live session instead of
+  a second `--resume` that would never paint.
+- Being reparented to init is no longer read as abandonment on its own. A
+  background host is detached deliberately, so `ppid 1` is its normal state; the
+  orphan shape now requires that the holder is not a background host. The original
+  fault — a driver left holding a conversation with nothing owning it — still
+  reports as an orphan and still refuses a launch.
+- The exemption covers the whole background process tree, not just the host. The
+  host spawns the real driver as its child, and that child is often recognisable on
+  its own (an npm-installed driver runs as `node …/cli.js --session-id <ref>`)
+  while carrying no marker of its own, so exempting only the host left the child
+  refusing the launch — the same lockout one process down.
+- A failed window build no longer leaves a half-built window behind. The refusal
+  raises after the sidebar pane exists but before the panes are tagged, and an
+  untagged window can never be selected, because nothing maps a session to it. Each
+  retry therefore added another, each re-probing tmux once a second; fourteen
+  accumulated for one session before this was found. The window is now torn down
+  and the error still propagates.
+- `verify` no longer reports a backgrounded session as a conversation holder.
+  Holder findings fold into the `ok` verdict, so a frame was marked unhealthy for
+  using a supported feature, and the remedy printed alongside it was to stop a live
+  process.
+- An attach no longer consumes a handoff it never delivered. The attach carries no
+  handoff prompt, so the record is left pending for the next real launch instead of
+  being cleared as though it had been sent.
+- Attaching uses the driver's configured executable rather than a bare command
+  name, so a driver pinned to an absolute path or a wrapper is not bypassed via
+  `PATH`.
+- The background-host marker is matched by argv position rather than as a substring
+  of the whole command line. A conversation reference beside the words
+  `bg-pty-host` in a prompt previously read as a background session, which both
+  waved a genuine second driver through and selected `attach` when there was
+  nothing to attach to.
 
 ## [1.0.101] - 2026-10-22
 

@@ -238,6 +238,68 @@ class ConversationProbe:
         cwd = payload.get("cwd")
         return cwd if isinstance(cwd, str) and cwd else None
 
+    # Rollout records that end a turn: `task_complete` follows a finished turn AND
+    # one that failed (an API error is written as an `error` event, then
+    # `task_complete`); `turn_aborted` follows an interrupt.
+    CODEX_TURN_END_TYPES = frozenset({"task_complete", "turn_aborted"})
+    CODEX_TURN_START_TYPE = "task_started"
+    # The end of the current turn is the last record codex writes until the next
+    # prompt, so the tail is enough. Bounded: rollouts reach tens of MB.
+    CODEX_TAIL_BYTES = 256 * 1024
+
+    @staticmethod
+    def codex_turn_ended(reference: str, turn_id: str) -> bool | None:
+        """Did codex record the end of turn `turn_id` in this conversation's rollout?
+
+        True: a `task_complete` / `turn_aborted` for that turn is on disk. False:
+        the turn's `task_started` is the latest record of it, so it is still open.
+        None: anything else — no rollout, the turn is not in the tail, unreadable.
+        None is never evidence the turn ended.
+
+        This exists because codex runs no hook when a turn ends in an error (no
+        `Stop`; its hook events have no failure event), so the hook state left by
+        `UserPromptSubmit` would say `working` forever.
+        """
+        if not isinstance(reference, str) or not ConversationProbe.UUID_RE.fullmatch(reference):
+            return None
+        if not isinstance(turn_id, str) or not turn_id:
+            return None
+        sessions = ConversationProbe.codex_root() / "sessions"
+        if not sessions.is_dir():
+            return None
+        matches = sorted(sessions.glob(f"*/*/*/rollout-*-{reference}.jsonl"))
+        if not matches:
+            return None
+        try:
+            with matches[-1].open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                start = max(0, size - ConversationProbe.CODEX_TAIL_BYTES)
+                handle.seek(start)
+                data = handle.read()
+        except OSError:
+            return None
+        lines = data.split(b"\n")
+        if start > 0:
+            lines = lines[1:]  # the first line of a mid-file read is partial
+        needle = turn_id.encode("utf-8")
+        for line in reversed(lines):
+            if needle not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            payload = record.get("payload") if isinstance(record, dict) else None
+            if not isinstance(payload, dict) or payload.get("turn_id") != turn_id:
+                continue
+            kind = payload.get("type")
+            if kind in ConversationProbe.CODEX_TURN_END_TYPES:
+                return True
+            if kind == ConversationProbe.CODEX_TURN_START_TYPE:
+                return False
+        return None
+
     @staticmethod
     def codex(reference: str) -> ConversationStatus:
         unknown = ConversationStatus(ConversationState.UNKNOWN)

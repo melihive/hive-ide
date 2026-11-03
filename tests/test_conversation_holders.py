@@ -153,7 +153,7 @@ def test_prepare_agent_launch_refuses_when_another_process_holds_the_conversatio
         "holders",
         classmethod(
             lambda cls, ref, **kw: [
-                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True}
+                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True, "background": False}
             ]
         ),
     )
@@ -185,7 +185,15 @@ def test_respawn_agent_goes_through_prepare_agent_launch(store, monkeypatch):
 
 def test_a_held_conversation_fails_that_session_in_open(tmp_path, monkeypatch):
     """End to end on the reported path: a held conversation must make `open` REPORT
-    the session as failed, not build a window whose agent silently never paints."""
+    the session as failed, and must not start a second driver on the conversation.
+
+    It used to raise instead of building anything, on the grounds that a window
+    whose agent never paints is worse than no window. The pane does not go blank
+    and silent, though — it carries the sleeping message that names `hive-ide
+    chat` — and refusing the window turned ONE session's collision into no IDE at
+    all on a machine whose every session was an agent session (2026-10-30). So
+    the window goes up without a driver, and the session stays reported.
+    """
     import os
     import sys
     import uuid
@@ -214,16 +222,30 @@ def test_a_held_conversation_fails_that_session_in_open(tmp_path, monkeypatch):
         "holders",
         classmethod(
             lambda cls, ref, **kw: [
-                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True}
+                {"pid": 900, "ppid": 1, "command": "claude", "orphaned": True, "background": False}
             ]
         ),
     )
     frame = Frame(store, socket=f"hive-ide-test-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
-        with pytest.raises(UsageError):
-            # Every session failed, so no window could be opened — which is the
-            # correct outcome here, and the error names the count.
-            frame.open(no_attach=True)
+        opened = frame.open(no_attach=True)
+
+        # Reported as failed, and the frame is still usable.
+        assert [failure["name"] for failure in opened["failed"]] == ["ALPHA"]
+        assert opened["built_driverless"] == [record["id"]]
+        assert opened["built"] == []
+        assert record["id"] in frame.windows()
+
+        # No second driver on the held conversation — the point of the refusal.
+        agent = (frame.role_panes(record["id"]) or {})["agent"]
+        started = frame.tmux(
+            ["display-message", "-p", "-t", agent, "#{pane_start_command}"]
+        ).stdout
+        assert REF not in started
+        # The pane says why it has no agent, where the user is looking.
+        assert "no agent" in started
+        assert "already held by pid 900" in started
+
         recorded = store.read("errors", record["id"])
         assert recorded is not None, "open did not record why the session failed"
         assert "already held" in recorded["detail"], recorded["detail"]
@@ -347,7 +369,7 @@ def test_prepare_agent_launch_does_not_refuse_when_the_pane_pid_is_unknown(
         "holders",
         classmethod(
             lambda cls, ref, **kw: probed.append(kw)
-            or [{"pid": 900, "ppid": 1, "command": "claude", "orphaned": True}]
+            or [{"pid": 900, "ppid": 1, "command": "claude", "orphaned": True, "background": False}]
         ),
     )
 

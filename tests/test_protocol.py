@@ -788,7 +788,7 @@ def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
     focus_values = []
 
-    def fake_current_plan(_self, session, focus=False):
+    def fake_current_plan(_self, session, focus=False, force=False):
         focus_values.append(focus)
         return {
             "session_id": session["id"],
@@ -841,7 +841,7 @@ def test_cli_current_plan_repairs_missing_working_dir_before_open(
     monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
 
-    def fake_current_plan(_self, session, focus=False):
+    def fake_current_plan(_self, session, focus=False, force=False):
         opened.append(session["working_dir"])
         return {"session_id": session["id"], "opened": "plan-pane"}
 
@@ -4381,7 +4381,7 @@ def test_current_plan_opens_linked_file_outside_the_frame(tmp_path, monkeypatch)
     assert calls == [(["editor", "--wait", str(plan)], {})]
 
 
-def test_plan_pane_opens_micro_readonly_by_default(tmp_path, monkeypatch):
+def test_plan_pane_opens_micro_readonly_and_mouse_off_by_default(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     plan = workspace / "plans" / "example.md"
     plan.parent.mkdir(parents=True)
@@ -4399,10 +4399,13 @@ def test_plan_pane_opens_micro_readonly_by_default(tmp_path, monkeypatch):
 
     command = frame._plan_command(record)
 
-    assert shlex.join(["micro", "-readonly", "true", str(plan)]) in command
+    assert (
+        shlex.join(["micro", "-readonly", "true", "-mouse", "false", str(plan)])
+        in command
+    )
 
 
-def test_plan_pane_uses_vim_readonly_flag(tmp_path, monkeypatch):
+def test_plan_pane_uses_vim_readonly_and_mouse_off_flags(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     plan = workspace / "plans" / "example.md"
     plan.parent.mkdir(parents=True)
@@ -4420,7 +4423,10 @@ def test_plan_pane_uses_vim_readonly_flag(tmp_path, monkeypatch):
 
     command = frame._plan_command(record, line=9)
 
-    assert shlex.join(["nvim", "-R", "--clean", "+9", str(plan)]) in command
+    assert (
+        shlex.join(["nvim", "-R", "-c", "set mouse=", "--clean", "+9", str(plan)])
+        in command
+    )
 
 
 def test_plan_pane_leaves_unknown_editor_argv_unchanged(tmp_path, monkeypatch):
@@ -4444,6 +4450,7 @@ def test_plan_pane_leaves_unknown_editor_argv_unchanged(tmp_path, monkeypatch):
     assert shlex.join(["code", "--wait", str(plan)]) in command
     assert "-readonly" not in command
     assert " -R " not in command
+    assert "-mouse" not in command
 
 
 def test_current_plan_marks_live_micro_readonly_without_respawning(
@@ -4481,6 +4488,9 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
     assert ["send-keys", "-t", "%3", "goto 3", "Enter"] in calls
     assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
+    # micro's `set` persists a GLOBAL option to the user's settings.json, so
+    # steering a live viewer must never touch `mouse` — only the launch flag may.
+    assert not any("set mouse" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 
@@ -4524,6 +4534,7 @@ def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
     assert result["opened"] == "plan-pane"
     assert ["send-keys", "-t", "%3", "set readonly true", "Enter"] in calls
     assert not any("repopath.maxwidth" in " ".join(call) for call in calls)
+    assert not any("set mouse" in " ".join(call) for call in calls)
     assert not any(call[:2] == ["respawn-pane", "-k"] for call in calls)
 
 
@@ -4795,7 +4806,7 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
@@ -4805,7 +4816,11 @@ def test_current_chat_uses_recorded_resume_command_outside_frame(
         "driver": "codex",
         "opened": "terminal",
     }
-    assert calls == [
+    # `chat` reads the process table first (the holder check that keeps it from
+    # starting a second driver on a live conversation); these tests are about the
+    # launch itself.
+    launches = [call for call in calls if call[0][0] != "ps"]
+    assert launches == [
         (
             ["codex", "resume", "--no-daemon", "-C", str(workspace), "conversation-1"],
             {"cwd": str(workspace)},
@@ -4835,7 +4850,7 @@ def test_current_chat_allows_plain_agent_without_conversation_reference(
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
@@ -4900,8 +4915,8 @@ def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
         if argv == ["claude", "--resume", "conversation-1", "--name", "CHAT"]:
-            return SimpleNamespace(returncode=1)
-        return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
@@ -4911,7 +4926,11 @@ def test_current_chat_opens_plain_claude_when_resume_fails(tmp_path, monkeypatch
         "driver": "claude",
         "opened": "claude",
     }
-    assert calls == [
+    # `chat` reads the process table first (the holder check that keeps it from
+    # starting a second driver on a live conversation); these tests are about the
+    # launch itself.
+    launches = [call for call in calls if call[0][0] != "ps"]
+    assert launches == [
         (["claude", "--resume", "conversation-1", "--name", "CHAT"], {"cwd": str(workspace)}),
         (["claude", "--name", "CHAT"], {"cwd": str(workspace)}),
     ]
@@ -4938,14 +4957,18 @@ def test_current_chat_never_uses_claude_agents_when_resume_fails(tmp_path, monke
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
         if argv == ["claude", "--resume", "stale-conversation", "--name", "CHAT"]:
-            return SimpleNamespace(returncode=1)
-        return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("hive_ide.frame.subprocess.run", fake_run)
     result = frame.current_chat(record)
 
     assert result["opened"] == "claude"
-    assert calls == [
+    # `chat` reads the process table first (the holder check that keeps it from
+    # starting a second driver on a live conversation); these tests are about the
+    # launch itself.
+    launches = [call for call in calls if call[0][0] != "ps"]
+    assert launches == [
         (["claude", "--resume", "stale-conversation", "--name", "CHAT"], {"cwd": str(workspace)}),
         (["claude", "--name", "CHAT"], {"cwd": str(workspace)}),
     ]

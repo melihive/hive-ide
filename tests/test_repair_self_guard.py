@@ -64,6 +64,29 @@ def _window_ids(frame: Frame) -> list[str]:
     ).stdout.split()
 
 
+def _agent_pane_started(frame: Frame, session_id: str) -> bool:
+    """Has the session's agent pane exec'd its own command yet?
+
+    tmux returns from `new-window` / `split-window` before the pane's child has
+    exec'd: for that moment `#{pane_pid}` is still a forked copy of the tmux
+    SERVER, whose environment is whatever the test process had when the server
+    started. When the suite itself runs inside an ide pane that is another
+    session's `HIVE_IDE_SESSION_ID`, so a repair that reads the pane in that
+    window sees a "stale agent environment" and rebuilds a healthy window. The
+    pane has started once its root process carries THIS session's id — the -e
+    value tmux spawned it with.
+    """
+    pane_id = (frame.role_panes(session_id) or {}).get("agent")
+    env = frame.pane_hive_ide_env(pane_id) if pane_id else None
+    return bool(env) and env.get("HIVE_IDE_SESSION_ID") == session_id
+
+
+def _wait_agent_pane_started(frame: Frame, session_id: str) -> None:
+    assert _wait_for(
+        lambda: _agent_pane_started(frame, session_id), timeout=10.0
+    ), "the agent pane never exec'd its command with this session's identity"
+
+
 @pytest.fixture
 def live(tmp_path, monkeypatch):
     """One session built in a real tmux window on a throwaway socket.
@@ -91,6 +114,7 @@ def live(tmp_path, monkeypatch):
         assert frame.ensure(record)
         roles = frame.role_panes(record["id"])
         assert roles is not None and set(roles) == {"sidebar", "agent", "plan"}
+        _wait_agent_pane_started(frame, record["id"])
 
         def identity(*, pane: str | None, marker: str | None, tmux: str | None) -> None:
             for key, value in (
@@ -251,6 +275,16 @@ def test_tmux_variable_is_compared_by_full_socket_path(tmp_path, monkeypatch):
     assert frame.socket_path() == f"/tmp/tmux-{os.getuid()}/{THIS}"
     monkeypatch.setenv("TMUX", _tmux_var(THIS))
     assert frame.caller_server() is True
+
+    # TMPDIR must NOT move it: tmux reads TMUX_TMPDIR, else /tmp, and nothing
+    # else (tmux 3.8, and `tmux(1)`). macOS sets TMPDIR for every GUI and launchd
+    # session, so a TMPDIR step here — which looks like a portability fix — would
+    # point this at a directory tmux never uses, and the verdict below would stop
+    # recognising the caller's own server.
+    monkeypatch.setenv("TMPDIR", "/var/folders/zz/T")
+    assert frame.socket_path() == f"/tmp/tmux-{os.getuid()}/{THIS}"
+    assert frame.caller_server() is True
+    monkeypatch.delenv("TMPDIR")
 
     # Same basename on another tmux tmpdir is a different server: not a match,
     # and with nothing else to go on, unknown rather than outside.
@@ -741,6 +775,58 @@ def test_pane_identity_falls_back_to_direct_children_only(tmp_path, monkeypatch)
     assert frame.pane_hive_ide_env("%9") is None
 
 
+def test_pane_identity_is_unknown_while_the_pid_is_the_tmux_server_fork(tmp_path, monkeypatch):
+    """Before the pane's child execs, `#{pane_pid}` is a fork of the tmux server
+    carrying the server's environment. That must read as unknown, never as the
+    pane's (stale) identity."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket=THIS)
+    monkeypatch.setattr(frame, "_pane_pid", lambda _pane_id: 100)
+    monkeypatch.setattr(Frame, "_child_pids", staticmethod(lambda _pid: []))
+    server_env = {"HIVE_IDE_SESSION_ID": "server-session", "PATH": "x"}
+    monkeypatch.setattr(Frame, "_process_env", staticmethod(lambda _pid: dict(server_env)))
+
+    monkeypatch.setattr(Frame, "_is_tmux_server", staticmethod(lambda _pid: True))
+    assert frame.pane_hive_ide_env("%9") is None
+
+    # Once the child has exec'd, the same environ is the pane's own answer.
+    monkeypatch.setattr(Frame, "_is_tmux_server", staticmethod(lambda _pid: False))
+    assert frame.pane_hive_ide_env("%9") == {"HIVE_IDE_SESSION_ID": "server-session"}
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="procfs comm is Linux-only")
+def test_tmux_server_fork_is_detected_from_the_real_process_name(tmp_path, monkeypatch):
+    """A real process named `tmux: server` (the name tmux gives its server and
+    every pre-exec fork) yields unknown; the same process under another name
+    yields its environment."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket=THIS)
+    ready = tmp_path / "ready"
+    script = (
+        "import pathlib, sys, time\n"
+        "if sys.argv[1]: pathlib.Path('/proc/self/comm').write_text(sys.argv[1])\n"
+        "pathlib.Path(sys.argv[2]).write_text('ok')\n"
+        "time.sleep(30)\n"
+    )
+    env = {**os.environ, "HIVE_IDE_SESSION_ID": "server-session"}
+    for name, server in (("tmux: server", True), ("", False)):
+        ready.unlink(missing_ok=True)
+        proc = subprocess.Popen([sys.executable, "-c", script, name, str(ready)], env=env)
+        try:
+            assert _wait_for(ready.exists)
+            monkeypatch.setattr(frame, "_pane_pid", lambda _pane_id, pid=proc.pid: pid)
+            observed = frame.pane_hive_ide_env("%9")
+            if server:
+                assert observed is None
+            else:
+                assert (observed or {}).get("HIVE_IDE_SESSION_ID") == "server-session"
+        finally:
+            proc.kill()
+            proc.wait()
+
+
 def test_respawn_helpers_refuse_the_callers_own_pane(live):
     roles = live.frame.role_panes(live.record["id"])
     pids_before = _pane_pids(live.frame, roles)
@@ -921,7 +1007,9 @@ def test_deferred_driver_switch_completes_from_outside_on_the_marker(
         "driver-switch"
     ]
 
-    # A second outside run has nothing owed and nothing to do.
+    # A second outside run has nothing owed and nothing to do — once the
+    # replacement's agent pane has actually started (see _agent_pane_started).
+    _wait_agent_pane_started(live.frame, live.record["id"])
     again = live.repair(inert)
     assert again["rebuilt"] is False
     assert live.frame.windows()[live.record["id"]] == replacement

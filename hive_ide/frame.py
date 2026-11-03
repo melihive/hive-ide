@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,12 @@ from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
 from .agents import AgentResumeState
 from .conversation import ConversationGuard
-from .errors import HiveIdeError, UsageError
+from .errors import HeldConversationError, HiveIdeError, UsageError
 from .holders import ConversationHolders
 from .layout import IdeLayout
 from .pane_lease import LeaseStore, PaneLeases, serialized
 from .python_cmd import PythonCommand
+from .socket_gc import SocketReaper
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
 
@@ -44,12 +46,18 @@ class Frame:
         "emacs",
         "emacsclient",
     }
-    PLAN_PANE_READONLY_FLAGS = {
-        "micro": ["-readonly", "true"],
-        "vim": ["-R"],
-        "nvim": ["-R"],
-        "vi": ["-R"],
-        "gvim": ["-R"],
+    # The plan pane is a viewer, so its editor is launched read-only AND with its
+    # own mouse handling off. An editor that grabs the mouse (micro asks for
+    # any-event tracking, mode 1003) owns every motion over the pane, so a drag
+    # becomes its selection instead of tmux's and the pane stops being copyable
+    # or scrollable the way every other pane is. Leaving the mouse to tmux keeps
+    # click-to-focus, drag-to-copy, and the wheel binding below.
+    PLAN_PANE_VIEWER_FLAGS = {
+        "micro": ["-readonly", "true", "-mouse", "false"],
+        "vim": ["-R", "-c", "set mouse="],
+        "nvim": ["-R", "-c", "set mouse="],
+        "vi": ["-R", "-c", "set mouse="],
+        "gvim": ["-R", "-c", "set mouse="],
     }
     INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
@@ -176,6 +184,55 @@ class Frame:
         rows.sort(key=lambda r: r["created_epoch"] or 0, reverse=True)
         return rows
 
+    def half_built_windows(self) -> list[dict[str, Any]] | None:
+        """Windows on this frame that a build began and never finished.
+
+        A frame window has three panes, each tagged with its role. ONE pane with no
+        role tag is a build that created the window and then aborted before tagging
+        it — and because nothing maps a session to an untagged window, such a window
+        can never be selected from the sidebar. So it is invisible except as
+        clutter, while its sidebar keep-alive re-probes tmux once a second forever.
+        Fourteen accumulated for a single session on 2026-10-22, when a launch
+        refusal raised mid-build; `build` now tears its own window down, so these
+        are either residue from before that fix or a new abort worth knowing about.
+
+        Scoped to this frame's OWN session rather than the whole socket: an
+        unmanaged session sharing the socket legitimately has untagged one-pane
+        windows, and reporting those would make this finding noise.
+
+        Returns [] for "scanned, none found" and **None** for "could not scan" —
+        three states, not two. Collapsing the scan failure into an empty list let
+        `verify` report a confidently healthy frame on a check that never ran, which
+        is the whole reason `incomplete` exists.
+        """
+        if not self.exists():
+            return []
+        result = self.tmux(
+            [
+                "list-panes",
+                "-s",
+                "-t",
+                self.target,
+                "-F",
+                "#{window_id}\t#{window_name}\t#{@hive_ide_pane}",
+            ]
+        )
+        if result.returncode != 0:
+            return None             # could not look; not the same as nothing there
+        panes: dict[str, list[tuple[str, str]]] = {}
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3:
+                continue
+            window, name, role = (f.strip() for f in fields)
+            panes.setdefault(window, []).append((name, role))
+        out = [
+            {"window": window, "name": rows[0][0]}
+            for window, rows in panes.items()
+            if len(rows) == 1 and not rows[0][1]
+        ]
+        return sorted(out, key=lambda row: row["window"])
+
     def unmanaged_sessions(self) -> list[dict[str, Any]]:
         """Sessions on this socket that are not this frame.
 
@@ -243,9 +300,15 @@ class Frame:
         return os.environ.get("TMUX_PANE") or None
 
     def socket_path(self) -> str:
-        """The socket path `tmux -L <self.socket>` resolves to for this process."""
-        base = os.environ.get("TMUX_TMPDIR") or "/tmp"
-        return os.path.join(base, f"tmux-{os.getuid()}", self.socket)
+        """The socket path `tmux -L <self.socket>` resolves to for this process.
+
+        Resolved by `SocketReaper.default_directory`, so the two cannot drift.
+        Every verdict below compares a real `$TMUX` against this, so a resolution
+        that differs from tmux's own is not a cosmetic difference: it makes the
+        caller's own server look foreign, and the guards then refuse the relaunch
+        and defer the rebuild that a healthy pane is entitled to.
+        """
+        return str(SocketReaper.default_directory() / self.socket)
 
     @staticmethod
     def tmux_var_socket_path(value: str | None) -> str | None:
@@ -448,11 +511,20 @@ class Frame:
         first with an IDE key answers, else `{}` if any was readable.
 
         `{}` means an environment was read and carries no IDE identity. `None`
-        means nothing could be observed: the pane's pid did not resolve, or
-        neither the root nor any direct child had a readable environment.
+        means nothing could be observed: the pane's pid did not resolve, the
+        pid is still the tmux server's pre-exec fork, or neither the root nor
+        any direct child had a readable environment.
+
+        The pre-exec fork matters: tmux forks the pane's process and only then
+        execs the `sh -c` wrapper, so for a moment `#{pane_pid}` is a copy of
+        the server whose environ is the SERVER's — a confident, wrong identity.
+        The check runs before the read because exec is one-way: a pid that is
+        no longer the server when checked cannot hand back the server's env.
         """
         pid = self._pane_pid(pane_id)
         if pid is None:
+            return None
+        if self._is_tmux_server(pid):
             return None
         root = self._process_env(pid)
         if root:
@@ -467,6 +539,33 @@ class Frame:
             if identity:
                 return identity
         return {} if readable else None
+
+    @staticmethod
+    def _is_tmux_server(pid: int) -> bool:
+        """Is `pid` a tmux server process (the server, or its pre-exec fork)?
+
+        tmux renames its server to `tmux: server`: on Linux that is the
+        `comm` (procfs), elsewhere the process title `ps` reports. Unreadable
+        means the process is gone or unobservable; that is not the server, and
+        the env read that follows reports unknown on its own.
+        """
+        if sys.platform.startswith("linux"):
+            try:
+                name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8")
+            except OSError:
+                return False
+            return name.strip().startswith("tmux: server")
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "comm=", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return "tmux: server" in result.stdout
 
     @staticmethod
     def _hive_ide_keys(env: dict[str, str]) -> dict[str, str]:
@@ -682,6 +781,55 @@ class Frame:
             env.extend(["-e", f"HIVE_IDE_PANE_ROLE={role}", "-e", "HIVE_IDE_PANE_LEASE="])
         return env
 
+    def _driver_argv(self, command: str) -> list[str]:
+        """The pane argv for a driver launch: `command` run with a PATH that can
+        find the driver (see `_launch_path`).
+
+        The PATH is set by `env` inside the pane command, not by `-e PATH=`: tmux
+        (3.x) sets the PATH of a pane spawned by an unattached client from that
+        client AFTER applying `-e`, so a `-e PATH=` from a daemon is discarded and
+        the pane gets the daemon's PATH anyway.
+        """
+        env = "/usr/bin/env" if os.path.exists("/usr/bin/env") else "env"
+        return [env, f"PATH={self._launch_path()}", "sh", "-c", command]
+
+    def _launch_path(self) -> str:
+        """The PATH an agent pane is launched with, so it can find its driver.
+
+        tmux gives a pane spawned by an unattached client (a launchd daemon running
+        `wake`) that CLIENT's PATH, not the server's, and a daemon's PATH lacks the
+        per-user bin dirs a driver such as `claude` lives in: the pane exits 127.
+        The server's global PATH is the one the user's own panes get. The per-user
+        dirs are appended to it in case the server itself was started by such a
+        client; with no server PATH, the client's PATH is used with them in front.
+        """
+        result = self.tmux(["show-environment", "-g", "PATH"], timeout=2)
+        name, sep, server = result.stdout.strip().partition("=")
+        server = server if result.returncode == 0 and sep and name == "PATH" else ""
+        entries = [e for e in (server or os.environ.get("PATH", "")).split(os.pathsep) if e]
+        extra = [d for d in dict.fromkeys(self._user_bin_dirs()) if d not in entries]
+        return os.pathsep.join([*entries, *extra] if server else [*extra, *entries])
+
+    @staticmethod
+    def _user_bin_dirs() -> list[str]:
+        """Where per-user installs put driver executables."""
+        home = Path.home()
+        dirs = [str(home / ".local" / "bin")]
+        dirs += [os.environ[v] for v in ("PIPX_BIN_DIR", "PNPM_HOME") if os.environ.get(v)]
+        prefix = os.environ.get("NPM_CONFIG_PREFIX") or ""
+        if not prefix:
+            try:
+                lines = (home / ".npmrc").read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            for line in lines:
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == "prefix":
+                    prefix = value.strip()
+        if prefix:
+            dirs.append(str(Path(os.path.expanduser(prefix)) / "bin"))
+        return dirs
+
     def _refresh_source_if_needed(
         self, record: dict[str, Any], interpreter: str
     ) -> None:
@@ -760,11 +908,52 @@ class Frame:
         return (record.get("sleep") or {}).get("state") == "sleeping"
 
     @classmethod
+    def _blocked_agent_command(cls, detail: str) -> str:
+        """The agent pane of a session whose driver could not start.
+
+        It carries the reason, in the pane, because that is where the person
+        looking at the empty column is. The sleeping message would be a lie here
+        — the session is not asleep — and it names `hive-ide chat`, which for a
+        held conversation now refuses rather than duplicating the driver.
+        """
+        message = shlex.quote(f"\n  hive-ide: no agent — {detail}\n\n")
+        return cls._interactive_command(f'printf %s {message}; exec "${{SHELL:-/bin/sh}}"')
+
+    @classmethod
     def _sleeping_agent_command(cls) -> str:
         return cls._interactive_command(
             "printf '\\n  hive-ide: agent sleeping. Run `hive-ide chat` to wake.\\n\\n'; "
             'exec "${SHELL:-/bin/sh}"'
         )
+
+    @classmethod
+    def _attach_argv(cls, driver: dict[str, Any]) -> list[str] | None:
+        """`attach` argv when this driver's conversation is live in the background.
+
+        A backgrounded session already owns its conversation, so the recorded
+        `--resume` argv would put a SECOND driver on it and the pane would never
+        paint. The driver's own `attach` reconnects to the running session, which is
+        what opening the session means while it is backgrounded.
+
+        None when there is nothing to attach: no reference, a driver with no attach
+        of its own, or no background host observed. The last case folds an
+        unreadable process table into "resume as usual" deliberately — not seeing a
+        host is not evidence there is none, and a normal resume is the recoverable
+        direction, where a wrong attach would reconnect nothing.
+        """
+        if driver.get("id") != "claude":
+            return None
+        reference = (driver.get("resume") or {}).get("reference")
+        if not isinstance(reference, str) or not reference:
+            return None
+        if not ConversationHolders.background_hosts(reference):
+            return None
+        # The configured executable, not a bare `claude`: a declarative driver can
+        # replace the bundled command with an absolute path or a wrapper, and
+        # attaching through whatever is on PATH could reach a different install.
+        argv = driver.get("launch_argv") or []
+        executable = argv[0] if argv else "claude"
+        return [executable, "attach", ConversationHolders.attach_id(reference)]
 
     def _record_python(self, record: dict[str, Any]) -> str:
         source = record.get("source") or {}
@@ -804,8 +993,18 @@ class Frame:
     @classmethod
     def _agent_command(cls, record: dict[str, Any]) -> str:
         driver = record.get("driver") or {}
+        # `_agent_argv`, not the raw `launch_argv`: Codex isolation is enforced at
+        # the execution boundary so a stored pre-fix argv is isolated too. An attach
+        # is exempt by construction — it reconnects to a process that already runs,
+        # so there is no shared daemon for it to inherit.
         argv = cls._agent_argv(record) or [os.environ.get("SHELL", "/bin/sh")]
-        argv = cls._argv_with_handoff_prompt(argv, record)
+        attach = cls._attach_argv(driver)
+        if attach:
+            # An attach reconnects to a turn already in flight, so a handoff prompt
+            # does not belong on it — that is a thing you say to a fresh driver.
+            argv = attach
+        else:
+            argv = cls._argv_with_handoff_prompt(argv, record)
         command = shlex.join(argv)
         handoff = record.get("handoff")
         if isinstance(handoff, dict) and handoff:
@@ -838,19 +1037,46 @@ class Frame:
             'exec "${SHELL:-/bin/sh}"'
         )
 
+    PROMPT_DRIVERS = ("claude", "codex")
+    LAUNCH_PROMPT_MAX = 4000
+
+    @classmethod
+    def launch_prompt_problem(cls, prompt: Any, driver_id: str | None) -> str | None:
+        """Why `prompt` cannot be a session's launch prompt, or None when it can.
+
+        It is passed as the driver's positional prompt argument, never typed, so
+        the only hazards are a driver that takes no prompt, a value the driver
+        would parse as an option (a leading `-`), and bytes argv cannot carry.
+        """
+        if driver_id not in cls.PROMPT_DRIVERS:
+            return "only the claude and codex drivers take a launch prompt"
+        if not isinstance(prompt, str) or not prompt.strip():
+            return "empty"
+        if len(prompt) > cls.LAUNCH_PROMPT_MAX:
+            return f"longer than {cls.LAUNCH_PROMPT_MAX} characters"
+        if prompt != prompt.strip():
+            return "leading or trailing whitespace"
+        if prompt.startswith("-"):
+            return "must not start with - (the driver would read it as an option)"
+        if any(ord(ch) < 0x20 and ch not in "\n\t" for ch in prompt) or "\x7f" in prompt:
+            return "control characters are not allowed"
+        return None
+
     @classmethod
     def _argv_with_handoff_prompt(
         cls, argv: list[str], record: dict[str, Any]
     ) -> list[str]:
-        handoff = record.get("handoff")
-        if not isinstance(handoff, dict):
-            return argv
-        prompt = handoff.get("target_driver_prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            return argv
+        """Append the one prompt this launch carries: a handoff's, else the
+        session's launch prompt (`create --prompt`). Never typed into the pane."""
         driver_id = (record.get("driver") or {}).get("id")
-        if driver_id not in {"claude", "codex"}:
+        if driver_id not in cls.PROMPT_DRIVERS:
             return argv
+        handoff = record.get("handoff")
+        prompt = handoff.get("target_driver_prompt") if isinstance(handoff, dict) else None
+        if not isinstance(prompt, str) or not prompt.strip():
+            prompt = record.get("launch_prompt")
+            if cls.launch_prompt_problem(prompt, driver_id):
+                return argv
         return [*argv, prompt]
 
     def _plan_command(
@@ -920,7 +1146,7 @@ class Frame:
     def _plan_pane_editor_argv(cls, editor: list[str]) -> list[str]:
         if not editor:
             return editor
-        flags = cls.PLAN_PANE_READONLY_FLAGS.get(Path(editor[0]).name)
+        flags = cls.PLAN_PANE_VIEWER_FLAGS.get(Path(editor[0]).name)
         if not flags:
             return list(editor)
         return [editor[0], *flags, *editor[1:]]
@@ -958,6 +1184,74 @@ class Frame:
         if not raw:
             return None
         return Path(raw.decode("utf-8", errors="replace")).name
+
+    @staticmethod
+    def _process_argv(pid: int) -> list[str] | None:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        decoded = raw.decode("utf-8", errors="replace")
+        return [part for part in decoded.split("\0") if part]
+
+    def _plan_viewer_is_stale(self, pane_id: str) -> bool:
+        """True when the pane's open viewer lacks a flag this build would pass.
+
+        A pane that already holds a viewer is only ever STEERED, never rebuilt,
+        so a release that changes the launch flags cannot reach it: 1.0.111
+        shipped `micro -mouse false` and every open plan pane kept its mouse
+        until someone quit micro by hand. Reading the running argv is what lets
+        `current_plan` notice and respawn instead of steering forever.
+
+        Unreadable is not stale. A pid that will not resolve, or a cmdline that
+        will not read, returns False — an unknown must never cost a pane.
+        """
+        editor = self._editor_argv()
+        name = Path(editor[0]).name if editor else ""
+        flags = self.PLAN_PANE_VIEWER_FLAGS.get(name) if name else None
+        if not flags:
+            return False
+        pid = self._pane_pid(pane_id)
+        if pid is None:
+            return False
+        for candidate in self._process_tree(pid):
+            if self._process_command_name(candidate) != name:
+                continue
+            argv = self._process_argv(candidate)
+            if argv is None:
+                return False
+            return not self._argv_carries(argv, flags)
+        return False
+
+    @staticmethod
+    def _argv_carries(argv: list[str], flags: list[str]) -> bool:
+        """True when `flags` appears in `argv` as one contiguous run.
+
+        Membership alone is not enough, because the flags are option/value
+        pairs: `micro -readonly true -mouse true -backup false` contains every
+        token of `-readonly true -mouse false` while meaning the opposite — the
+        mouse is still grabbed, and reading it as current suppresses the very
+        warning that would get it reopened. `_plan_pane_editor_argv` always
+        emits the flags contiguously after the editor, so matching the run
+        reads the pairing correctly and still fits `vim -R -c 'set mouse='`,
+        where `-R` takes no value at all.
+        """
+        return any(
+            argv[i:i + len(flags)] == flags
+            for i in range(len(argv) - len(flags) + 1)
+        )
+
+    @staticmethod
+    def _plan_steer_say(path: Path, *, stale: bool) -> str:
+        steered = f"Steered the plan pane's open viewer to {path} (readonly)."
+        if not stale:
+            return steered
+        return (
+            f"{steered} Its launch flags are older than this build — close it"
+            " and run `plan` again, or `plan --force`, to pick up the current ones."
+        )
 
     @staticmethod
     def plan_focus_line(path: Path) -> int:
@@ -1132,13 +1426,36 @@ class Frame:
         path = self.plan_path(record)
         line = self.plan_focus_line(path) if focus else None
         pane_id = (self.role_panes(record["id"]) or {}).get("plan")
+        if pane_id:
+            # Only where there IS a frame to bind. A plan opened outside the
+            # frame falls through to a terminal editor and has no server of
+            # ours to heal, so reaching for tmux there is pure noise.
+            self.ensure_key_bindings()
         # Steering a live micro is harmless, so it only needs "not provably the
         # caller's pane"; the respawn below kills the pane, so it needs a settled
         # "not the caller's pane" and otherwise falls back to a terminal editor.
         verdict = self.pane_is_caller(pane_id) if pane_id else None
-        if pane_id and verdict is not True:
-            if self._pane_has_micro(pane_id):
+        if pane_id and verdict is not True and self._pane_has_micro(pane_id):
+            stale = self._plan_viewer_is_stale(pane_id)
+            # A respawn kills the pane, so rebuilding needs BOTH an explicit
+            # request and a settled "not the caller's pane". Staleness alone is
+            # not enough: README documents editing from a long-lived plan pane
+            # (`set readonly false`), a runtime change that never reaches the
+            # launch argv — so a pane that reads stale may hold unsaved edits,
+            # and replacing it unasked would discard them. A stale viewer is
+            # steered and SAYS it is stale; the operator asks for the rebuild.
+            if not (force and verdict is False):
                 self._send_micro_command(pane_id, "set readonly true")
+                # Deliberately NOT `set mouse false` here. `readonly` is a
+                # per-buffer option, so steering it is local and free; `mouse` is
+                # global, and micro's `set` WRITES a global option through to the
+                # user's settings.json — measured: it rewrites the file, adds
+                # "mouse": false and drops keys it does not recognise. That would
+                # disable the mouse in every later micro, including the editable
+                # popups. `setlocal mouse false` does not persist but also does
+                # not take effect, so the launch flag in PLAN_PANE_VIEWER_FLAGS is
+                # the only safe lever: a micro that was already running keeps its
+                # mouse until the pane respawns.
                 if focus:
                     self._send_micro_command(pane_id, f"goto {line}")
                     self.tmux(["select-pane", "-t", pane_id])
@@ -1147,6 +1464,9 @@ class Frame:
                     "plan": str(path),
                     "line": line,
                     "opened": "plan-pane",
+                    "action": "steered",
+                    "stale_viewer": stale,
+                    "say": self._plan_steer_say(path, stale=stale),
                 }
         if pane_id and verdict is False:
             result = self.tmux(
@@ -1175,6 +1495,8 @@ class Frame:
                 "plan": str(path),
                 "line": line,
                 "opened": "plan-pane",
+                "action": "respawned",
+                "say": f"Reopened the plan pane on {path}.",
             }
         editor = self._editor_argv()
         if line and line > 1 and Path(editor[0]).name in self.PLUS_LINE_EDITORS:
@@ -1187,6 +1509,7 @@ class Frame:
             "plan": str(path),
             "line": line,
             "opened": "terminal",
+            "action": "terminal",
         }
 
     def current_chat(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -1224,6 +1547,19 @@ class Frame:
                 "driver": driver.get("id"),
                 "opened": "existing-agent-pane",
             }
+        # Every other launch path goes through this check; this one did not, and
+        # it is the path `chat` takes when there is no agent pane or when the
+        # caller IS that pane. Running the recorded `--resume` argv there starts a
+        # second driver on a conversation another process holds, which is the
+        # fault the guard exists for — and a driverless pane is exactly where a
+        # user is told to run `chat`.
+        self.prepare_agent_launch(record)
+        # `prepare_agent_launch` reconciles the record: a conversation confirmed
+        # gone is dropped, which rewrites `driver` and its argv. `argv` was read
+        # before that, so launching it would run the stale `--resume <deleted-id>`
+        # while the stored session already says otherwise. Re-read both.
+        driver = record.get("driver") or driver
+        argv = list(driver.get("launch_argv") or argv)
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
             if driver.get("id") == "claude":
@@ -1234,6 +1570,7 @@ class Frame:
                 fallback = subprocess.run(fallback_argv, cwd=record["working_dir"])
                 if fallback.returncode == 0:
                     self.clear_sleep(record)
+                    self._clear_open_error(record)
                     return {
                         "session_id": record["id"],
                         "driver": driver.get("id"),
@@ -1241,6 +1578,7 @@ class Frame:
                     }
             raise HiveIdeError(f"The agent exited with status {result.returncode}.")
         self.clear_sleep(record)
+        self._clear_open_error(record)
         return {
             "session_id": record["id"],
             "driver": driver.get("id"),
@@ -1314,7 +1652,7 @@ class Frame:
         lets `open` record it per session in `failed`, so it is reported instead of
         silently skipped.
 
-        Three things are deliberately NOT a refusal, because each would block a
+        Four things are deliberately NOT a refusal, because each would block a
         launch the user asked for:
 
         - the session's own agent pane, whose driver this launch is replacing;
@@ -1322,7 +1660,12 @@ class Frame:
           every relaunch there would make the IDE unopenable;
         - a pane whose pid tmux will not report, since without it the session's own
           driver cannot be told from an outside one, and treating "unknown" as
-          "outside" blocks a healthy session from relaunching.
+          "outside" blocks a healthy session from relaunching;
+        - a BACKGROUND session host, which holds the conversation because the user
+          backgrounded it on purpose. That is not a collision to refuse but a
+          session to attach, and `_agent_command` launches `attach` for it. Refusing
+          it instead made a perfectly live session unopenable and, because the raise
+          lands mid-`build`, left a half-built window behind on every retry.
         """
         reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
         if not reference:
@@ -1331,17 +1674,25 @@ class Frame:
         exclude = self.pane_pid(agent_pane) if agent_pane else None
         if agent_pane and exclude is None:
             return      # cannot establish ownership; do not refuse on a guess
-        held = ConversationHolders.holders(reference, exclude_tree=exclude)
+        rows = ConversationHolders.snapshot()
+        held = ConversationHolders.holders(reference, exclude_tree=exclude, rows=rows)
+        # A background session is attachable, so it is not a conflict. The exemption
+        # covers the host AND its children, because the host's child is usually the
+        # real driver and carries no marker of its own. Only holders that would
+        # genuinely collide with a fresh driver can refuse a launch.
+        backgrounded = ConversationHolders.background_tree(reference, rows=rows)
+        held = [h for h in held if h["pid"] not in backgrounded]
         if not held:
             return
         who = ", ".join(
             f"pid {h['pid']}" + (" (orphaned)" if h["orphaned"] else "") for h in held
         )
-        raise HiveIdeError(
+        raise HeldConversationError(
             f"Conversation {reference[:8]} is already held by {who}; not starting a "
             "second agent on it. A second driver on one conversation leaves the pane "
-            "permanently blank. Stop that process, or use `hive-ide chat` to attach a "
-            "fresh conversation."
+            "permanently blank. Stop that process, or give this session another "
+            "conversation with `hive-ide attach-conversation --session-id="
+            f"{record['id']} --reference=<id>`."
         )
 
     def pane_pid(self, pane_id: str) -> int | None:
@@ -1374,14 +1725,82 @@ class Frame:
                 "-c",
                 self.safe_working_dir(record),
                 *self._environment(record, role="agent"),
-                "sh",
-                "-c",
-                self._agent_command(record),
+                *self._driver_argv(self._agent_command(record)),
             ]
         )
         if result.returncode != 0:
             raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
+        # The driver this session could not start is now running, so the recorded
+        # open error is spent. `hive-ide chat` is what the held-conversation refusal
+        # tells the user to run; leaving the error behind would mark the session
+        # broken after the user had fixed it.
+        self._clear_open_error(record)
         return True
+
+    def wake_agent(self, record: dict[str, Any]) -> str:
+        """Launch a woken session's driver through the ordinary launch paths.
+
+        The caller has already cleared the sleep state and stored the one-shot
+        launch prompt, so `_agent_command` resumes the conversation with the
+        prompt as its last argv. No window: `build` makes one. A window (the
+        sleeping shell in its agent pane): `respawn_agent` relaunches that pane.
+        Nothing is typed into any pane. Returns "built" or "respawned".
+        """
+        target = self.windows().get(record["id"])
+        if not target:
+            target = self.build(record)
+            self._confirm_agent_launch((self._role_panes_in_window(target) or {}).get("agent"))
+            return "built"
+        roles = self._role_panes_in_window(target)
+        pane_id = (roles or {}).get("agent")
+        if not pane_id:
+            raise HiveIdeError(
+                "The session window's agent pane could not be found; run "
+                "`hive-ide repair` and retry."
+            )
+        if not self.respawn_agent(record, pane_id):
+            raise HiveIdeError(
+                "The agent pane may be the pane this command runs in; run wake "
+                "from another pane or a plain terminal."
+            )
+        self._clear_consumed_handoff(record)
+        self._confirm_agent_launch(pane_id)
+        return "respawned"
+
+    LAUNCH_SETTLE_SECONDS = 2.0
+    LAUNCH_POLL_SECONDS = 0.2
+    LAUNCH_FAILED_MARKER = "hive-ide: driver command failed with exit"
+
+    def _confirm_agent_launch(self, pane_id: str | None) -> None:
+        """Raise when the driver just launched in `pane_id` exits at once.
+
+        `respawn-pane` succeeds as soon as tmux starts `sh`, so a driver that is
+        not on PATH (exit 127) still looked like a wake. The agent command prints
+        `LAUNCH_FAILED_MARKER` and execs a shell on a non-zero exit, so the pane
+        stays alive: the marker is the evidence, with `pane_dead` for a pane whose
+        shell itself died. Bounded by `LAUNCH_SETTLE_SECONDS`; a pane tmux will not
+        describe is not evidence of failure, so it never raises on a guess.
+        """
+        if not pane_id:
+            return
+        deadline = time.monotonic() + self.LAUNCH_SETTLE_SECONDS
+        while True:
+            state = self.tmux(
+                ["display-message", "-p", "-t", pane_id, "#{pane_dead}\t#{pane_dead_status}"],
+                timeout=1,
+            )
+            dead, _, status = state.stdout.strip().partition("\t")
+            if state.returncode == 0 and dead.strip() == "1":
+                raise HiveIdeError(f"The agent exited at launch (status {status.strip() or '?'}).")
+            shown = self.tmux(["capture-pane", "-p", "-J", "-t", pane_id], timeout=1)
+            if shown.returncode == 0:
+                for line in shown.stdout.splitlines():
+                    if self.LAUNCH_FAILED_MARKER in line:
+                        hint = " (127: the driver was not found on the launch PATH)" if line.strip().endswith(" 127") else ""
+                        raise HiveIdeError(f"The agent exited at launch: {line.strip()}{hint}.")
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(self.LAUNCH_POLL_SECONDS)
 
     def sleep_agent(self, record: dict[str, Any]) -> dict[str, Any]:
         driver = record.get("driver") or {}
@@ -1542,7 +1961,7 @@ class Frame:
     ) -> dict[str, Any]:
         """Type `/rename <name>` into the live agent pane.
 
-        Same gates as `nudge` (`nudge.AgentNudge`), decided from hook state and
+        Gates from `nudge.AgentNudge`, decided from hook state and
         never the screen: the pane must be a live, observable agent outside copy
         mode; Claude must have reported a hook and not have a dialog
         Notification latest; Codex must be provably idle unless `force`. The
@@ -1602,13 +2021,18 @@ class Frame:
         }
 
     def _clear_consumed_handoff(self, record: dict[str, Any]) -> None:
-        if not isinstance(record.get("handoff"), dict):
+        """Drop the launch inputs a driver launch just delivered: the handoff and
+        the session's one-shot launch prompt, so a later relaunch never repeats it."""
+        keys = ("handoff", "launch_prompt")
+        if not any(key in record for key in keys):
             return
         fresh = self.store.read("sessions", record["id"]) or record
-        if isinstance(fresh.get("handoff"), dict):
-            fresh.pop("handoff", None)
+        if any(key in fresh for key in keys):
+            for key in keys:
+                fresh.pop(key, None)
             self.store.write("sessions", record["id"], fresh)
-        record.pop("handoff", None)
+        for key in keys:
+            record.pop(key, None)
 
     def _tag(
         self,
@@ -1637,14 +2061,34 @@ class Frame:
         self._retitle_panes(target, record)
 
     @serialized
-    def _retitle_panes(self, target: str, record: dict[str, Any]) -> None:
+    def _retitle_panes(self, target: str, record: dict[str, Any]) -> bool:
+        """Write the titles; True only when every write for every pane succeeded.
+
+        The results used to be discarded, so a caller was told the panes had been
+        retitled even when every write failed — `cmd_label` reported
+        `"retitled": true` against a wedged server that had changed nothing.
+        """
         titles = self._pane_titles(record)
         roles = self._order_role_panes(target)
+        ok = True
         for role, title in titles.items():
             pane = roles.get(role)
-            if pane:
-                self.tmux(["select-pane", "-T", title, "-t", pane])
-                self.tmux(["set-option", "-p", "-t", pane, "@hive_ide_title", title])
+            if not pane:
+                continue
+            for args in (
+                ["select-pane", "-T", title, "-t", pane],
+                ["set-option", "-p", "-t", pane, "@hive_ide_title", title],
+            ):
+                if self.tmux(args, timeout=self.RETITLE_TIMEOUT).returncode != 0:
+                    ok = False
+        return ok
+
+    #: Bounds the tmux calls made while retitling. `cmd_label` reaches this path
+    #: holding the workspace mutation lock, and tmux has no timeout of its own, so
+    #: an unresponsive server would hang labelling and block every other command
+    #: and hook waiting on that lock. A timed-out call returns a failed result
+    #: rather than raising, which the success check already handles.
+    RETITLE_TIMEOUT = 3.0
 
     @serialized
     def retitle_panes(self, record: dict[str, Any]) -> bool:
@@ -1659,20 +2103,45 @@ class Frame:
             if not pane:
                 continue
             current = self.tmux(
-                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"]
+                ["display-message", "-p", "-t", pane, "#{@hive_ide_title}"],
+                timeout=self.RETITLE_TIMEOUT,
             ).stdout.strip()
             if current != title:
                 changed = True
                 break
-        if changed:
-            self._retitle_panes(target, record)
-        return changed
+        if not changed:
+            return False
+        return self._retitle_panes(target, record)
+
+    @staticmethod
+    def _relay_suffix(record: dict[str, Any]) -> str:
+        """The session's relay agent name, ready to append, or '' when it has none.
+
+        Nine of fifteen live sessions carry no relay label, so the absence is the
+        normal case and must render as nothing at all rather than as empty brackets.
+
+        Sanitised rather than trusted: the value is written by relay registration,
+        not typed here, and the border is drawn through `pane-border-format`, where
+        `#` opens a format or style sequence — so a `#` arriving in the title would
+        distort the border instead of printing. Bounded too, because the chat pane's
+        border is narrow and a long name would crowd out the session name it is
+        meant to annotate.
+        """
+        labels = record.get("labels")
+        if not isinstance(labels, dict):
+            return ""
+        value = labels.get("relay")
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.replace("#", "").split())[:24]
 
     def _pane_titles(self, record: dict[str, Any]) -> dict[str, str]:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
+        name = str(record.get("name") or "chat")
+        relay = self._relay_suffix(record)
         return {
             "sidebar": workspace,
-            "agent": str(record.get("name") or "chat"),
+            "agent": f"{name} ({relay})" if relay else name,
             "plan": (LeaseStore(self.store).live(record["id"]) or {}).get("title")
             or self._plan_title(record),
         }
@@ -1725,7 +2194,13 @@ class Frame:
         return True
 
     @serialized
-    def build(self, record: dict[str, Any], *, force: bool = False) -> str:
+    def build(
+        self,
+        record: dict[str, Any],
+        *,
+        force: bool = False,
+        no_driver: str | bool = False,
+    ) -> str:
         PaneLeases(self).check(record["id"], force=force)
         working_dir = record["working_dir"]
         if not Path(working_dir).is_dir():
@@ -1777,12 +2252,56 @@ class Frame:
         target = created.stdout.strip()
         if not target:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
-        self.prepare_agent_launch(record)
-        agent_command = (
-            self._sleeping_agent_command()
-            if self._is_sleeping(record)
-            else self._agent_command(record)
-        )
+        try:
+            window = self._finish_build(
+                record, target, working_dir, no_driver=no_driver
+            )
+        except BaseException:
+            # The window exists but is not a frame window yet: it holds only the
+            # sidebar pane, carries no role or session tags, and so can never be
+            # selected — nothing maps the session to it. Leaving it behind made every
+            # retry add another, and a session whose launch always fails (a held
+            # conversation, say) accumulated nine of them, each re-probing tmux once
+            # a second. The half-built window goes, and the error still propagates.
+            self.tmux(["kill-window", "-t", target])
+            raise
+        if not no_driver:
+            self._clear_open_error(record)
+        return window
+
+    def _finish_build(
+        self,
+        record: dict[str, Any],
+        target: str,
+        working_dir: str,
+        *,
+        no_driver: str | bool = False,
+    ) -> str:
+        """Fill the window's agent and plan panes.
+
+        `no_driver` builds the window with no driver, for a session whose driver
+        cannot start right now; a string is shown in the agent pane as the reason.
+        The window, its sidebar and its plan are what make the session reachable
+        at all — the sidebar marks it, the error key shows the recorded error, and
+        the pane itself carries the reason. Refusing the window instead left the
+        session with no surface to act from.
+        """
+        # A sleeping session starts no driver, so there is nothing for a held
+        # conversation to collide with — refusing its window was pure loss, and it
+        # is the same mistake as refusing the frame: a check placed where it does
+        # not apply. `wake` runs the launch paths, and prepares there.
+        if not no_driver and not self._is_sleeping(record):
+            self.prepare_agent_launch(record)
+        if no_driver:
+            agent_command = (
+                self._blocked_agent_command(no_driver)
+                if isinstance(no_driver, str)
+                else self._sleeping_agent_command()
+            )
+        elif self._is_sleeping(record):
+            agent_command = self._sleeping_agent_command()
+        else:
+            agent_command = self._agent_command(record)
         for role, command in (
             ("agent", agent_command),
             ("plan", self._plan_command(record)),
@@ -1796,9 +2315,13 @@ class Frame:
                     "-c",
                     working_dir,
                     *self._environment(record, role=role),
-                    "sh",
-                    "-c",
-                    command,
+                    *(
+                        self._driver_argv(command)
+                        if role == "agent"
+                        and not no_driver
+                        and not self._is_sleeping(record)
+                        else ["sh", "-c", command]
+                    ),
                 ]
             )
             if result.returncode != 0:
@@ -1808,7 +2331,16 @@ class Frame:
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
-        self._clear_consumed_handoff(record)
+        if (
+            not no_driver
+            and not self._is_sleeping(record)
+            and not self._attach_argv(record.get("driver") or {})
+        ):
+            # An attach carries no handoff prompt, and a sleeping window launches no
+            # driver at all, so clearing the record in either case would drop a
+            # prompt that was never delivered. Left pending, it reaches the next
+            # real launch instead.
+            self._clear_consumed_handoff(record)
         return target
 
     def ensure(self, record: dict[str, Any]) -> bool:
@@ -2087,6 +2619,26 @@ class Frame:
         for window_id in self.windows().values():
             self.tmux(["set-window-option", "-t", window_id, "aggressive-resize", "off"])
 
+    def ensure_key_bindings(self) -> bool:
+        """Re-bind when the live tmux server's bindings predate this build.
+
+        `bind_keys()` runs only on resume, working-dir change, force rebuild,
+        source switch and frame build, so installing a new hive-ide leaves a
+        running server on its old bindings. After the 1.0.111 install the
+        server still had tmux's stock `WheelUpPane` and no `WheelDownPane` at
+        all — the plan pane had its mouse released and no wheel, which is the
+        exact regression that binding exists to prevent, and it had to be
+        applied by hand. The stamp lets an install self-heal on the next
+        command that touches the frame.
+        """
+        stamped = self.tmux(
+            ["show-option", "-gvq", "@hive_ide_bound_version"]
+        ).stdout.strip()
+        if stamped == __version__:
+            return False
+        self.bind_keys()
+        return True
+
     def bind_keys(self) -> None:
         self._normalize_frame_environment()
         self._normalize_status_rows()
@@ -2131,6 +2683,35 @@ class Frame:
                 "-M",
             ]
         )
+        # tmux 3.7's default WheelUpPane sends the wheel to any pane on the
+        # alternate screen, whether or not it asked for the mouse — so a viewer
+        # that leaves the mouse to tmux (the plan pane) gets no scrolling at all.
+        # Restore the pre-3.7 fallback for exactly that case: arrow keys. Panes
+        # that do grab the mouse, and the sidebar, keep `send-keys -M` unchanged.
+        wheel_bindings = (
+            (
+                "WheelUpPane",
+                "if-shell -F '#{alternate_on}' 'send-keys -N3 Up' 'copy-mode -e'",
+            ),
+            (
+                "WheelDownPane",
+                "if-shell -F '#{alternate_on}' 'send-keys -N3 Down'",
+            ),
+        )
+        for wheel_key, otherwise in wheel_bindings:
+            self.tmux(
+                [
+                    "bind-key",
+                    "-T",
+                    "root",
+                    wheel_key,
+                    "if-shell",
+                    "-F",
+                    "#{||:#{pane_in_mode},#{mouse_any_flag}}",
+                    "send-keys -M",
+                    otherwise,
+                ]
+            )
         new_modal = self._module(
             "newmodal",
             [
@@ -2428,6 +3009,7 @@ class Frame:
         self.tmux(
             ["set-option", "-g", "@hive_ide_bound_keys", " ".join(bound)]
         )
+        self.tmux(["set-option", "-g", "@hive_ide_bound_version", __version__])
 
     def verify_user_config(self) -> list[str]:
         findings: list[str] = []
@@ -2467,9 +3049,12 @@ class Frame:
                 "summary": f"Could not open session {record['name']}",
                 "detail": detail[:8192],
                 "retryable": True,
+                # Cause-agnostic on purpose: this text named the session directory
+                # and the package source whatever the cause, so a held conversation
+                # — the one failure that recurs — sent the reader looking at two
+                # things that were fine. `detail` says what actually happened.
                 "recovery": (
-                    "Fix the reported session directory or package source, then run "
-                    "hive-ide open again."
+                    "Resolve the cause in `detail`, then run hive-ide open again."
                 ),
                 "observed_at": utc_now(),
             },
@@ -2526,6 +3111,7 @@ class Frame:
             ).stdout.strip() or None
         built: list[str] = []
         built_sleeping: list[str] = []
+        built_driverless: list[str] = []
         failed: list[dict[str, str]] = []
         for record in sessions:
             try:
@@ -2534,15 +3120,35 @@ class Frame:
                         built_sleeping.append(record["id"])
                     else:
                         built.append(record["id"])
+            except HeldConversationError as exc:
+                # One session's collision must not cost the frame. The window still
+                # goes up — without a driver — so the session stays reachable: its
+                # sidebar row marks the error, the error key shows this text, and
+                # `hive-ide chat` can start a fresh conversation from there. The
+                # failed build already killed its half-built window, so this starts
+                # clean. Recorded as failed either way, and deliberately NOT cleared.
+                failed.append(self._record_open_error(record, exc))
+                try:
+                    self.build(record, no_driver=str(exc))
+                    built_driverless.append(record["id"])
+                except HiveIdeError:
+                    pass
+                continue
             except HiveIdeError as exc:
                 failed.append(self._record_open_error(record, exc))
                 continue
-            self._clear_open_error(record)
         windows = self.windows()
         if not windows:
+            # The reasons are already in hand, and this is the only place the user
+            # ever sees. Pointing at `verify` and dropping them stranded a machine
+            # for three days: the per-session detail was computed, written to the
+            # error store, and then discarded from the output.
+            reasons = "; ".join(
+                f"{failure['name']}: {failure['error']}" for failure in failed
+            )
             raise UsageError(
-                f"No session windows could be opened; {len(failed)} session(s) failed. "
-                "Run hive-ide verify and inspect the recorded session errors."
+                f"No session windows could be opened; {len(failed)} session(s) "
+                f"failed. {reasons or 'No reason was recorded.'}"
             )
         self.bind_keys()
         selected_window = (
@@ -2576,6 +3182,7 @@ class Frame:
             "tmux_session": self.target,
             "built": built,
             "built_sleeping": built_sleeping,
+            "built_driverless": built_driverless,
             "failed": failed,
             "windows": len(windows),
         }

@@ -463,6 +463,7 @@ class StateStore:
         driver: dict[str, Any],
         plan: dict[str, Any] | None = None,
         host: dict[str, Any] | None = None,
+        launch_prompt: str | None = None,
     ) -> dict[str, Any]:
         clean_name = " ".join(name.split())
         if not clean_name:
@@ -484,6 +485,10 @@ class StateStore:
             "archived_at": None,
             "host": host or {},
         }
+        if launch_prompt is not None:
+            # Passed to the driver as its initial prompt argument at the first
+            # launch, then dropped (`Frame._clear_consumed_handoff`).
+            record["launch_prompt"] = launch_prompt
         driver_id = driver.get("id") if isinstance(driver, dict) else None
         agents = AgentResumeState(record)
         agents.mark_active(driver_id if isinstance(driver_id, str) else None)

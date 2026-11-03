@@ -249,6 +249,9 @@ class IdeSidebar:
     HIDDEN_TICK_SECONDS = 5.0
     NO_WRAP, HOME, EL, CLEAR_BELOW, RESET = "\x1b[?7l", "\x1b[H", "\x1b[K", "\x1b[J", "\x1b[0m"
     CLEAR_SCREEN = "\x1b[2J"
+    # The alternate screen: tmux never reflows it on a width change. Entering it is a
+    # no-op once the pane is already there, so every frame can carry it.
+    ALT_SCREEN = "\x1b[?1049h"
     # Selection uses a REAL background colour, not reverse-video (SGR 7): erase-to-EOL
     # fills with the background colour, and reverse is only an attribute — so a
     # reverse-video bar stops at the text instead of reaching the pane edge.
@@ -587,16 +590,36 @@ class IdeSidebar:
         rows visible when the previous frame had more rows or when terminal scrollback text
         landed in the pane. A full visible-screen clear before each draw is cheap for a
         narrow sidebar and keeps old paths/error text from being mistaken for sessions.
+
+        A frame must also survive a RESIZE with nobody left to repaint it. A hidden
+        window's sidebar has exited, yet every window switch (`relayout --mode adopt`)
+        and client resize (`snap`) resizes every window, hidden ones included — late,
+        under load, often after the frame was painted. On the normal screen tmux keeps
+        the BOTTOM of a full-height frame and the sessions at the top are lost:
+
+        - narrower: tmux reflows, and every row that fills the full width (the
+          current session's background fill, the right-aligned footer `+`) splits
+          in two. The extra rows push the top rows into history.
+        - shorter: tmux drops rows below the cursor first, then from the top. A
+          frame that ends with the cursor on its last row loses its top rows.
+
+        So each frame is drawn on the alternate screen, which tmux never reflows, and
+        ends with the cursor parked at home. A shrink then trims the bottom: padding,
+        and the footer only when the shrink is larger than the padding. The session
+        rows survive. A focused loop re-parks the cursor on its input row afterwards;
+        that pane has a live painter.
         """
         if height is not None and len(lines) < height:
             lines = [*lines, *(IdeSidebar._row("") for _ in range(height - len(lines)))]
         return (
-            IdeSidebar.NO_WRAP
+            IdeSidebar.ALT_SCREEN
+            + IdeSidebar.NO_WRAP
             + IdeSidebar.HOME
             + IdeSidebar.CLEAR_SCREEN
             + IdeSidebar.HOME
             + "\n".join(lines)
             + IdeSidebar.CLEAR_BELOW
+            + IdeSidebar.HOME
         )
 
     @staticmethod
@@ -1671,7 +1694,10 @@ class IdeSidebar:
             return 0
         finally:
             if interactive:
-                sys.stdout.write(IdeSidebar.MOUSE_OFF + IdeSidebar.FOCUS_OFF)
+                # HOME: the frame left behind outlives this process, so leave it in the
+                # resize-safe state `_paint` describes even if the last paint parked the
+                # cursor on the (focused) input row.
+                sys.stdout.write(IdeSidebar.MOUSE_OFF + IdeSidebar.FOCUS_OFF + IdeSidebar.HOME)
                 sys.stdout.flush()
                 if saved is not None:
                     termios.tcsetattr(fd, termios.TCSADRAIN, saved)

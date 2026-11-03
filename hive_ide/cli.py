@@ -20,13 +20,12 @@ from .holders import ConversationHolders
 from .config import configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
-from .errors import HiveIdeError, UsageError
+from .errors import CommandOutcome, HiveIdeError, UsageError
 from .environments import EnvironmentManager
 from .frame import Frame
 from .handoff import HandoffPackage
 from .hooks import HookInstaller
 from .monitor import monitor_state
-from .nudge import AgentNudge
 from .pane_lease import LeaseError, LeaseStore, PaneLeases
 from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
@@ -48,7 +47,6 @@ WORKSPACE_MUTATIONS = frozenset(
         "driver-rename",
         "force-rebuild",
         "label",
-        "nudge",
         "open",
         "plan-set",
         "purge",
@@ -62,6 +60,7 @@ WORKSPACE_MUTATIONS = frozenset(
         "sleep",
         "status-event",
         "switch-driver",
+        "wake",
         "working-dir-set",
     }
 )
@@ -96,6 +95,10 @@ def _refresh_workspace_sources(store: StateStore) -> None:
 
 def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
+    if args.adopt and args.prompt is not None:
+        raise UsageError(
+            "--prompt starts a NEW conversation; it cannot be given to an adopted one."
+        )
     if args.adopt:
         adopted = _adopt_conversations(
             store,
@@ -123,6 +126,7 @@ def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
         working_dir=args.working_dir,
         plan=args.plan,
         source=args.source,
+        launch_prompt=args.prompt,
     )
 
 
@@ -147,9 +151,14 @@ def _create_session(
     working_dir: str | None,
     plan: str | None,
     source: str | None,
+    launch_prompt: str | None = None,
 ) -> dict[str, Any]:
     registry = configured_registry(config)
     selected_driver = driver_id or _default_driver_id(config)
+    if launch_prompt is not None:
+        problem = Frame.launch_prompt_problem(launch_prompt, selected_driver)
+        if problem:
+            raise UsageError(f"--prompt is not usable: {problem}.")
     driver = registry.get(selected_driver)
     availability = driver.detect()
     if not availability.available and selected_driver != "term":
@@ -171,6 +180,7 @@ def _create_session(
         ),
         driver=resolved,
         plan={"path": plan, "active_task": None},
+        launch_prompt=launch_prompt,
     )
 
 
@@ -380,6 +390,12 @@ def cmd_sleep(args: argparse.Namespace) -> dict[str, Any]:
     }
     record["last_active"] = now
     store.write("sessions", record["id"], record)
+    _write_sleeping_status(store, record, now)
+    return {**record, "sleep": {**record["sleep"], **result}}
+
+
+def _write_sleeping_status(store: StateStore, record: dict[str, Any], now: str) -> None:
+    """The status row the sidebar renders as the sleeping mark."""
     store.write(
         "status",
         record["id"],
@@ -393,7 +409,80 @@ def cmd_sleep(args: argparse.Namespace) -> dict[str, Any]:
             "observed_at": now,
         },
     )
-    return {**record, "sleep": {**record["sleep"], **result}}
+
+
+def _wake_outcome(reason: str, exit_code: int, detail: str | None = None) -> CommandOutcome:
+    payload: dict[str, Any] = {"ok": False, "woke": False, "reason": reason}
+    if detail:
+        payload["detail"] = detail
+    return CommandOutcome(payload, exit_code)
+
+
+def cmd_wake(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        return _wake(args)
+    except CommandOutcome:
+        raise
+    except (HiveIdeError, OSError) as exc:
+        # Every failure is a parsed result, never a bare stderr line.
+        raise _wake_outcome("failed", 1, str(exc)) from exc
+
+
+def _wake(args: argparse.Namespace) -> dict[str, Any]:
+    """Wake a SLEEPING session: resume its conversation with a one-shot prompt.
+
+    Sleeping is the session's own `sleep.state == "sleeping"` (set by `sleep`,
+    cleared by `chat`), the state the sidebar marks with the sleeping glyph. The
+    prompt is stored as the session's launch prompt and passed as the driver's
+    last argv by the ordinary launch path — never typed — then consumed. Refusals
+    exit 2 and change nothing; a failed launch exits 1 and restores the sleep.
+    """
+    store, _ = _context(args)
+    try:
+        record = store.find_session(args.session_id)
+    except HiveIdeError:
+        record = None
+    if record is None:
+        raise _wake_outcome("unknown_session", 2)
+    if not Frame._is_sleeping(record):
+        raise _wake_outcome("not_sleeping", 2)
+    driver = record.get("driver") or {}
+    driver_id = driver.get("id")
+    if driver_id not in Frame.PROMPT_DRIVERS:
+        raise _wake_outcome("driver_unsupported", 2)
+    problem = Frame.launch_prompt_problem(args.prompt, driver_id)
+    if problem:
+        raise _wake_outcome("bad_prompt", 2, problem)
+    if not AgentResumeState.reference_from_driver(driver):
+        # Nothing to resume: a launch here would start a NEW conversation.
+        raise _wake_outcome("no_conversation", 1)
+    handoff = record.get("handoff")
+    if isinstance(handoff, dict) and handoff.get("target_driver_prompt"):
+        # A pending handoff prompt wins the launch argv, so ours would be dropped.
+        raise _wake_outcome("handoff_pending", 1)
+    if Frame._attach_argv(driver):
+        # A backgrounded conversation is attached, and an attach carries no prompt.
+        raise _wake_outcome("conversation_backgrounded", 1)
+
+    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    slept = record.get("sleep")
+    record["launch_prompt"] = args.prompt
+    store.write("sessions", record["id"], record)
+    # Out of the sleeping state BEFORE the launch: a sleeping record builds the
+    # sleeping shell and launches no driver, so the prompt would never arrive.
+    frame.clear_sleep(record)
+    record = store.find_session(record["id"]) or record
+    try:
+        frame.wake_agent(record)
+    except (HiveIdeError, OSError) as exc:
+        current = store.find_session(record["id"])
+        if current is not None:
+            current.pop("launch_prompt", None)
+            current["sleep"] = slept
+            store.write("sessions", current["id"], current)
+            _write_sleeping_status(store, current, utc_now())
+        raise _wake_outcome("launch_failed", 1, str(exc)) from exc
+    return {"ok": True, "woke": True, "session": record["id"]}
 
 
 def cmd_rename(args: argparse.Namespace) -> dict[str, Any]:
@@ -500,7 +589,7 @@ def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
             "; ".join(repair["errors"]) or "The current session needs repair."
         )
     record = store.find_session(record["id"]) or record
-    return frame.current_plan(record, focus=args.focus)
+    return frame.current_plan(record, focus=args.focus, force=force)
 
 
 def cmd_scratchpad(args: argparse.Namespace) -> dict[str, Any]:
@@ -555,18 +644,23 @@ def cmd_label(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageError("Pass exactly one of --value or --clear.")
     store, _ = _context(args)
     record = store.set_label(args.session_id, args.key, None if args.clear else args.value)
+    # The chat pane's border carries the relay name, and relay registration sets
+    # that label long after the window was built — so without retitling here the
+    # name only appears on the next rebuild, which reads as the feature not working.
+    # Best-effort: a label is recorded whether or not a frame is up to repaint.
+    retitled = False
+    try:
+        # `label` has no --tmux-socket of its own, so resolve the default rather
+        # than reading an attribute this subcommand never defines.
+        socket = _socket(store, getattr(args, "tmux_socket", None))
+        retitled = Frame(store, socket=socket).retitle_panes(record)
+    except (HiveIdeError, UsageError, OSError):
+        retitled = False
     return {
         "session_id": record["id"],
         "labels": StateStore.labels(record),
+        "retitled": retitled,
     }
-
-
-def cmd_nudge(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
-    record = _session(store, args.session_id, None)
-    return AgentNudge(Frame(store, socket=_socket(store, args.tmux_socket))).nudge(
-        record, args.text, force=args.force
-    )
 
 
 def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
@@ -1112,6 +1206,38 @@ def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _recorded_open_errors(
+    store: StateStore, sessions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The `errors` store, as plain rows: what the last `open` could not open.
+
+    Written by `Frame._record_open_error` and cleared when that session builds or
+    its driver relaunches, so a row here means the failure still stands.
+
+    Restricted to live sessions on purpose. These rows make `verify` report `ok:
+    false`, and nothing deletes the row of a session that was archived while it
+    was failing — so without this filter one archived session would hold the
+    whole workspace unhealthy with nothing left to fix.
+    """
+    live = {session["id"] for session in sessions}
+    rows: list[dict[str, Any]] = []
+    for document in store.list("errors"):
+        if (document.get("session_id") or "") not in live:
+            continue
+        rows.append(
+            {
+                "session_id": document.get("session_id") or "",
+                "component": document.get("component") or "",
+                "summary": document.get("summary") or "Could not open session",
+                "detail": document.get("detail") or "",
+                "recovery": document.get("recovery") or "",
+                "observed_at": document.get("observed_at") or "",
+            }
+        )
+    rows.sort(key=lambda row: row["observed_at"], reverse=True)
+    return rows
+
+
 def _conversation_holders(
     frame: Frame, sessions: list[dict[str, Any]], rows: list[tuple[int, int, str]]
 ) -> list[dict[str, Any]]:
@@ -1126,8 +1252,10 @@ def _conversation_holders(
     process checks and a scan per check both doubles the cost and lets the checks
     disagree about what they saw.
     """
-    if not frame.exists():
-        return []
+    # Deliberately NOT gated on the frame existing. A holder is a process, not a
+    # pane, so it outlives the frame — and "frame down, conversation still held" is
+    # precisely the state that refuses every `open`. Gating here reported a healthy
+    # machine in the one case where this finding was the answer.
     if not rows:
         return []          # could not observe; report nothing rather than guess
     out: list[dict[str, Any]] = []
@@ -1142,9 +1270,17 @@ def _conversation_holders(
             # outside one, and reporting its own agent as a foreign holder would make
             # this finding noise on every healthy session.
             continue
+        backgrounded = ConversationHolders.background_tree(reference, rows=rows)
         for holder in ConversationHolders.holders(
             reference, exclude_tree=pane_pid, rows=rows
         ):
+            if holder["pid"] in backgrounded:
+                # A backgrounded session holds its own conversation by design, and
+                # opening it attaches rather than launching a second driver. Calling
+                # that a finding would mark a frame unhealthy for using a supported
+                # feature — and the remedy this finding prints is "stop that
+                # process", which here means killing live work.
+                continue
             out.append(
                 {
                     "session": session.get("name") or session["id"],
@@ -1270,7 +1406,10 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     )
     # Two conditions that were completely invisible when they caused a visible
     # freeze on 2026-10-13, and that nothing else reports.
-    process_rows = ConversationHolders.snapshot() if frame.exists() else []
+    # The holder check runs with no frame (see `_conversation_holders`), so the
+    # process table is read unconditionally. `unmanaged` and `agentless` still need
+    # a live server to observe.
+    process_rows = ConversationHolders.snapshot()
     unmanaged = frame.unmanaged_sessions() if frame.exists() else []
     now = time.time()
     unmanaged_findings = [
@@ -1295,7 +1434,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     incomplete = (
         ["could not read the process table, so the conversation-holder and "
          "missing-agent checks did not run"]
-        if frame.exists() and not process_rows
+        if not process_rows
         else []
     )
     agent_findings = [
@@ -1312,10 +1451,45 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "the pane permanently blank; stop that process before reopening the session."
         for h in held
     ]
+    # None means the scan could not run, which must reach `incomplete` rather than
+    # read as an empty finding list (see `half_built_windows`).
+    scanned_windows = frame.half_built_windows() if frame.exists() else []
+    half_built = scanned_windows or []
+    if scanned_windows is None:
+        incomplete = incomplete + [
+            "could not list the frame's panes, so the half-built-window check did "
+            "not run"
+        ]
+    half_built_findings = [
+        f"window {w['window']} ({w['name']!r}) holds one untagged pane: a build that "
+        "began and never finished. Nothing maps a session to an untagged window, so "
+        "it cannot be opened from the sidebar, and its sidebar loop keeps probing "
+        f"tmux once a second. Close it with `tmux -L {frame.socket} kill-window -t "
+        f"{w['window']}`."
+        for w in half_built
+    ]
+    # Inventory, not a verdict: a dead socket FILE is clutter, never a fault. It is
+    # reported because the only thing that collects it runs on `open` and skips
+    # anything under an hour old, so a question as ordinary as "is the suite
+    # cleaning up after itself?" had no answer short of listing the directory by
+    # hand — and by then 462 had accumulated and were hiding a stale session.
+    try:
+        dead_sockets = SocketReaper(Path(frame.socket_path()).parent).inventory()
+    except Exception:
+        dead_sockets = None          # could not look; not the same as none
     hook_findings = HookInstaller(
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
     ).verify()
+    # `open` records why each session could not be opened, and its own fatal
+    # message used to send the reader here to "inspect the recorded session
+    # errors" — which nothing in this CLI could read back. The store is the
+    # durable record of the last failure, so verify is where it belongs.
+    open_errors = _recorded_open_errors(store, sessions)
+    error_findings = [
+        f"{error['summary']}: {error['detail']} ({error['recovery']})"
+        for error in open_errors
+    ]
     return {
         "ok": (
             shutil.which("tmux") is not None
@@ -1324,6 +1498,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not client_findings
             and not holder_findings
             and not agent_findings
+            and not half_built_findings
+            and not error_findings
             and not incomplete
             and not codex_isolation_findings
         ),
@@ -1349,6 +1525,12 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "conversation_holders": held,
         "agent_findings": agent_findings,
         "agentless_sessions": agentless,
+        "half_built_findings": half_built_findings,
+        "half_built_windows": half_built,
+        "error_findings": error_findings,
+        "open_errors": open_errors,
+        # Inventory only — see the comment where this is computed.
+        "dead_sockets": dead_sockets,
         "codex_isolation_findings": codex_isolation_findings,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
@@ -1432,11 +1614,11 @@ def build_parser() -> argparse.ArgumentParser:
         "scratchpad": "Open the current plan's human-owned Scratchpad popup.",
         "chat": "Focus or resume the current session's agent pane.",
         "sleep": "Stop the current session's agent while keeping it in the active list.",
+        "wake": "Resume a sleeping session's conversation with a one-shot prompt.",
         "plan-set": "Attach, change, or clear a session plan.",
         "attach-conversation": "Attach a driver conversation ID to an existing session.",
         "driver-rename": "Send the IDE display name into a supported live driver pane.",
         "label": "Set or clear one short label on a session.",
-        "nudge": "Type one constant line into a session's agent pane when safe.",
         "working-dir-set": "Move a session to an existing working directory.",
         "force-rebuild": "Force replace one tmux window from its session record.",
         "relayout": "Reapply or adopt the tmux frame geometry.",
@@ -1477,6 +1659,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--source")
     create.add_argument("--adopt", action="store_true")
     create.add_argument("--reference")
+    create.add_argument("--prompt")
     create.set_defaults(handler=cmd_create)
 
     adopt = command("adopt")
@@ -1524,7 +1707,10 @@ def build_parser() -> argparse.ArgumentParser:
     current_plan.add_argument("--focus", action="store_true")
     current_plan.add_argument(
         "--force", action="store_true",
-        help="Revoke a live pane lease before replacing its content.",
+        help=(
+            "Revoke a live pane lease before replacing its content, and rebuild"
+            " an already-open viewer instead of steering it."
+        ),
     )
     current_plan.set_defaults(handler=cmd_current_plan)
 
@@ -1549,6 +1735,12 @@ def build_parser() -> argparse.ArgumentParser:
     sleep.add_argument("--tmux-socket")
     sleep.set_defaults(handler=cmd_sleep)
 
+    wake = command("wake")
+    wake.add_argument("--session", "--session-id", dest="session_id", required=True)
+    wake.add_argument("--prompt", required=True)
+    wake.add_argument("--tmux-socket")
+    wake.set_defaults(handler=cmd_wake)
+
     driver_rename = command("driver-rename")
     driver_rename.add_argument("--session-id", required=True)
     driver_rename.add_argument("--name")
@@ -1566,15 +1758,6 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument("--clear", action="store_true")
     label.set_defaults(handler=cmd_label)
 
-    nudge = command("nudge")
-    nudge.add_argument("--session-id", "--session", dest="session_id", required=True)
-    nudge.add_argument("--text", required=True)
-    nudge.add_argument("--tmux-socket")
-    nudge.add_argument(
-        "--force", action="store_true",
-        help="Type into Codex even when it is not provably idle (may interrupt its turn).",
-    )
-    nudge.set_defaults(handler=cmd_nudge)
 
     plan = command("plan-set")
     plan.add_argument("--session-id", required=True)
@@ -1768,9 +1951,10 @@ def build_parser() -> argparse.ArgumentParser:
             "pane-lease",
             "plan-set-defer-pane",
             "labels",
-            "nudge",
+            "launch-prompt",
             "turn-sequencing",
             "driver-rename-guard",
+            "wake-prompt",
         ],
     })
 
@@ -1807,7 +1991,12 @@ def main(argv: list[str] | None = None) -> int:
             result = args.handler(args)
         if not args.quiet and args.command not in QUIET_SUCCESS_COMMANDS:
             print(result if isinstance(result, str) else _json(result))
+        elif not args.quiet and isinstance(result, dict) and result.get("say"):
+            print(result["say"])
         return 0
+    except CommandOutcome as exc:
+        print(_json(exc.payload))
+        return exc.exit_code
     except LeaseError as exc:
         print(_json(exc.payload))
         return 2

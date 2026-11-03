@@ -26,14 +26,13 @@ managed environment, use `pipx install hive-ide`.
 
 - `hive-ide list`
 - `hive-ide open [--driver=claude|codex|antigravity|term] [--working-dir=<PATH>]`
-- `hive-ide create [--name=<NAME>] [--driver=claude|codex|antigravity|term] [--working-dir=<PATH>]`
+- `hive-ide create [--name=<NAME>] [--driver=claude|codex|antigravity|term] [--working-dir=<PATH>] [--prompt=<TEXT>]`
 - `hive-ide adopt --driver=claude|codex [--working-dir=<PATH>] [--limit=<N>]`
 - `hive-ide create --driver=claude|codex --adopt [--reference=<ID>]`
 - `hive-ide show --session-id=<ID>`
 - `hive-ide current`
 - `hive-ide capabilities`
 - `hive-ide label --session-id=<ID> --key=<KEY> (--value=<VALUE> | --clear)`
-- `hive-ide nudge --session-id=<ID> --text=<LINE> [--force]`
 - `hive-ide driver-rename --session-id=<ID> [--name=<NAME>] [--force]`
 - `hive-ide pane-lease --session-id=<ID> --role=plan --title=<TITLE> -- <argv…>`
 - `hive-ide pane-status [--session-id=<ID>]`
@@ -44,6 +43,7 @@ managed environment, use `pipx install hive-ide`.
 - `hive-ide attach-conversation --session-id=<ID> --reference=<REFERENCE>`
 - `hive-ide working-dir-set --session-id=<ID> --working-dir=<PATH>`
 - `hive-ide sleep [--session-id=<ID>]`
+- `hive-ide wake --session=<ID> --prompt=<TEXT>`
 - `hive-ide archive --session-id=<ID>`
 - `hive-ide resume --session-id=<ID>`
 - `hive-ide monitor` or `hive-ide top`
@@ -86,11 +86,18 @@ Use `hive-ide monitor` (alias: `top`) to inspect local agent/sidebar memory by
 session on Linux and macOS. Pass `--workspace` to limit the report to the current
 workspace.
 
-The right-side plan pane is read-only by default for known editors: `micro` uses
-`-readonly true`, and `vim`/`nvim`/`vi`/`gvim` use `-R`. Unknown editors are launched
-unchanged. Plan/task/scratchpad popups are intentional edit surfaces and stay editable.
-To edit from a long-lived `micro` plan pane, press `Ctrl-e`, run `reload`, then press
-`Ctrl-e` again and run `set readonly false`.
+The right-side plan pane is a viewer: for known editors it is launched read-only and
+with the editor's own mouse handling off, so tmux keeps the mouse. `micro` uses
+`-readonly true -mouse false`, and `vim`/`nvim`/`vi`/`gvim` use `-R -c 'set mouse='`.
+Unknown editors are launched unchanged. Leaving the mouse to tmux is what makes a click
+focus the pane, a drag select copyable text, and the wheel scroll; an editor that grabs
+the mouse turns every drag into its own selection instead. These are launch flags, so a
+plan pane that is already open keeps the editor it was started with until the pane is
+reopened — `micro`'s own `set mouse false` is not used because micro writes a global
+option through to the user's `settings.json`. Plan/task/scratchpad popups
+are intentional edit surfaces and stay editable. To edit from a long-lived `micro` plan
+pane, press `Ctrl-e`, run `reload`, then press `Ctrl-e` again and run
+`set readonly false`.
 
 Plan paths may be relative to the workspace/current working directory or absolute.
 Absolute paths are accepted as-is, so standalone/non-Hive users can attach personal
@@ -100,20 +107,37 @@ Labels are a small key -> short-text map on a session (at most 8 keys; key
 `^[a-z][a-z0-9_-]{0,15}$`; value at most 32 printable characters). The session
 card shows one row per label. Old records read as having no labels.
 
-`nudge` types one caller-supplied constant line plus Enter into the agent pane
-and returns `{sent, reason}`; it never composes text. The line must be printable
-ASCII, at most 200 characters, and must not start with `/`, `!`, `#` or `-`.
-The gate never reads the screen (pane width and hidden windows do not matter); it
+hive-ide never types a message into an agent pane. A session that needs a first
+instruction gets it at launch: `create --driver=claude|codex --prompt=<TEXT>`
+stores it and the first launch passes it as the driver's initial prompt argument
+(`claude <TEXT>`, `codex <TEXT>`); it is then dropped, so a relaunch never repeats
+it. The prompt is at most 4000 characters, has no control characters other than
+newline and tab, and must not start with `-`. It is refused with `--adopt` and for
+any other driver. Probe `capabilities` for `launch-prompt` before relying on it.
+
+`wake --session=<ID> --prompt=<TEXT>` wakes a SLEEPING session (one put to sleep
+with `sleep`, shown with the sleeping glyph) and resumes its conversation with
+`<TEXT>` as a one-shot launch prompt: `claude --resume <id> <TEXT>`,
+`codex resume <thread> <TEXT>`. It builds the session's window, or relaunches the
+agent pane of the window it already has; nothing is typed, the window is not
+selected, and the prompt is dropped once delivered. The prompt follows the
+`create --prompt` rules. It prints one JSON object: `{"ok": true, "woke": true,
+"session": "<id>"}` and exits 0; a refusal exits 2 with `{"ok": false, "woke":
+false, "reason": ...}` and changes nothing, where reason is `not_sleeping`,
+`unknown_session`, `bad_prompt` or `driver_unsupported`. Any other failure exits 1
+with a reason (`no_conversation` when there is nothing to resume,
+`handoff_pending`, `conversation_backgrounded`, `launch_failed` — which puts the
+session back to sleep — or `failed`). Probe `capabilities` for `wake-prompt`.
+
+`driver-rename` is the one typed input left: the human asks for it, and it types
+`/rename <name>` into their own agent pane. The gate never reads the screen; it
 decides from hook state. Claude queues typed input, so a working or idle Claude is
 allowed; it is refused (`claude_dialog_open`) while a dialog-type notification is
-its latest hook event, and (`state_unknown`) before any hook has reported. Codex
-is interrupted by typing mid-turn, so it is nudged only when the hook turn
-sequence proves its last turn ended cleanly (`codex_not_idle` otherwise) unless
-`--force` (which skips only that Codex check). Any driver is refused
-(`human_recent`) while a human typed in that pane within 60 seconds, while the
-pane is in copy mode or dead, or when the agent has exited to a shell. The result
-carries `basis: "hooks"`. `driver-rename` follows the same per-driver rule. Probe `capabilities`
-for `labels`, `nudge` and `turn-sequencing` before relying on them.
+its latest hook event, and (`state_unknown`) before any hook has reported. Codex is
+interrupted by typing mid-turn, so it is renamed only when the hook turn sequence
+proves its last turn ended cleanly unless `--force`. It is refused while the pane is
+in copy mode or dead, or when the agent has exited to a shell. Probe `capabilities`
+for `labels` and `turn-sequencing` before relying on them.
 
 Pane leases lend the PLAN pane until the child command exits or is released. The
 package restores the currently linked plan; `repair` recovers a dead supervisor.

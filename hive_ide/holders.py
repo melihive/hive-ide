@@ -64,7 +64,20 @@ class ConversationHolders:
     #: investigating an incident is exactly the process that would. The real drivers
     #: select a conversation as `claude --resume <ref>` and
     #: `codex resume -C <dir> <ref>`.
-    SELECTION_TOKENS = frozenset({"--resume", "resume", "--continue"})
+    SELECTION_TOKENS = frozenset({"--resume", "resume", "--continue", "--session-id"})
+
+    #: Argv marks of a driver's BACKGROUND session host. Claude Code runs a
+    #: backgrounded session under `claude bg-pty-host`, which is deliberately
+    #: detached — the whole point is that it outlives the terminal that started it,
+    #: so it is reparented to init and `ppid == 1` is its NORMAL state, not a fault.
+    #:
+    #: This distinction is why the flag exists. A background host holds the
+    #: conversation exactly as an abandoned driver does, so the holder check sees
+    #: them identically; but one is live work the user backgrounded on purpose and
+    #: the other is litter. Treating the first as the second told the user to kill a
+    #: running session (AGENT CHAT, 2026-10-22) and refused to reopen a session that
+    #: was never broken — it only needed attaching.
+    BACKGROUND_MARKERS = ("bg-pty-host",)
 
     @staticmethod
     def _ps() -> list[tuple[int, int, str]]:
@@ -153,15 +166,20 @@ class ConversationHolders:
                 continue
             if not cls._is_driver(command) or not cls._selects(command, reference):
                 continue
+            background = cls._is_background_host(command)
             found.append(
                 {
                     "pid": pid,
                     "ppid": ppid,
                     "command": command,
+                    # A backgrounded session's host is attachable, not abandoned.
+                    "background": background,
                     # ppid 1 with the session gone is the orphan shape: nothing owns
                     # it, nothing will reap it, and it is invisible until something
-                    # tries to reuse its conversation.
-                    "orphaned": ppid == 1,
+                    # tries to reuse its conversation. A background host is the one
+                    # case where ppid 1 is by design, so it is NOT an orphan — the
+                    # remedy for it is `claude attach`, never a kill.
+                    "orphaned": ppid == 1 and not background,
                 }
             )
         return found
@@ -202,6 +220,74 @@ class ConversationHolders:
         if reference not in tokens:
             return False
         return any(token in cls.SELECTION_TOKENS for token in tokens)
+
+    @classmethod
+    def _is_background_host(cls, command: str) -> bool:
+        """Is this the background host ITSELF, by argv position rather than text?
+
+        A plain substring search reads `claude --resume <ref> "Explain bg-pty-host
+        detection"` as a background host — and that is the worse direction here,
+        because it makes the guard wave a real second driver through AND makes the
+        launch pick `attach` when there is nothing to attach to. This module already
+        learned the lesson once, when `~/.claude/` in an unrelated path made an
+        ordinary shell look like a driver.
+
+        So the marker has to sit where an invocation puts it: as the subcommand
+        straight after argv[0], or as a flag. Both forms appear in the real argv,
+        and the flag form is what an interpreter-launched host carries.
+        """
+        tokens = command.split()
+        if len(tokens) < 2:
+            return False
+        for marker in cls.BACKGROUND_MARKERS:
+            if tokens[1] == marker or f"--{marker}" in tokens:
+                return True
+        return False
+
+    @classmethod
+    def background_tree(
+        cls, reference: str, rows: list[tuple[int, int, str]] | None = None
+    ) -> set[int]:
+        """Pids holding `reference` that belong to a background session.
+
+        The host and everything beneath it. The host spawns the real driver as its
+        child, and that child is often a recognisable driver in its own right — an
+        npm-installed claude runs as `node …/claude-code/cli.js --session-id <ref>`
+        — while carrying no marker of its own. Exempting only the host therefore
+        left the child refusing the launch: the same lockout, one process down.
+        """
+        rows = cls._ps() if rows is None else rows
+        out: set[int] = set()
+        for host in cls.background_hosts(reference, rows=rows):
+            pid = int(host["pid"])            # type: ignore[arg-type]
+            out.add(pid)
+            out |= cls.descendants(pid, rows)
+        return out
+
+    @classmethod
+    def background_hosts(
+        cls, reference: str, rows: list[tuple[int, int, str]] | None = None
+    ) -> list[dict[str, object]]:
+        """Holders of `reference` that are a driver's background session host.
+
+        A non-empty result means the conversation is live in the background and can
+        be reattached, so a launch must ATTACH rather than start a second driver or
+        refuse outright. Empty is not evidence of absence — it carries the same
+        unreadable-`ps` caveat as `holders`.
+        """
+        return [h for h in cls.holders(reference, rows=rows) if h["background"]]
+
+    @staticmethod
+    def attach_id(reference: str) -> str:
+        """The short id `claude attach` takes, derived from a conversation id.
+
+        `claude agents` lists a background session by the first segment of its
+        session id, which is what `attach` resolves; the full id is not what the
+        listing prints. Anything without a segment boundary is passed through
+        unchanged rather than truncated to a guess.
+        """
+        head = reference.split("-")[0]
+        return head or reference
 
     @classmethod
     def drivers_in_tree(
