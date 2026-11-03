@@ -1559,7 +1559,11 @@ class Frame:
         # before that, so launching it would run the stale `--resume <deleted-id>`
         # while the stored session already says otherwise. Re-read both.
         driver = record.get("driver") or driver
-        argv = list(driver.get("launch_argv") or argv)
+        # Through `_agent_argv` again, not the raw `launch_argv`: this is a launch,
+        # so Codex isolation has to apply to the re-read argv exactly as it did to
+        # the first one. Reading the raw value here left the one path a driverless
+        # pane invites the user to run as the only un-isolated launch in the frame.
+        argv = list(self._agent_argv(record) or argv)
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
             if driver.get("id") == "claude":
