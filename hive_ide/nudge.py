@@ -43,6 +43,7 @@ import subprocess
 import time
 from typing import Any, Callable
 
+from .launch_gate import PROCESS_MARKER
 from .turns import TurnSequence
 
 
@@ -134,6 +135,21 @@ class AgentNudge:
                 return True
         return False
 
+    def launch_gate_waiting(self, pane_pid: str) -> bool:
+        """Is this pane still holding a staggered launch?
+
+        Its process is Python with no driver under it — a shape the shell test
+        below does not cover, so a queued pane read as a live agent and `--force`
+        typed `/rename` into it, reporting success for input that no driver
+        existed to receive and that driver startup would discard.
+
+        An unreadable process table is not "waiting": the other gates already
+        refuse what they cannot observe, and answering "waiting" on no evidence
+        would block a rename of a perfectly live agent.
+        """
+        args = self._ps(["-p", pane_pid, "-o", "args="])
+        return bool(args) and PROCESS_MARKER in args
+
     def _status(self, session_id: str) -> dict[str, Any] | None:
         try:
             # A codex turn that ended in an error left `working` (no Stop hook).
@@ -151,6 +167,8 @@ class AgentNudge:
         command = facts["command"].rsplit("/", 1)[-1]
         if facts["dead"]:
             return False, "agent_not_running", facts["command"]
+        if self.launch_gate_waiting(facts["pid"]):
+            return False, "agent_queued", facts["command"]
         if command in self.SHELL_COMMANDS:
             running = self.wrapped_agent_running(facts["pid"])
             if running is None:

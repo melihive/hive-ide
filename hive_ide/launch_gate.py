@@ -140,6 +140,44 @@ class IdeLaunchGate:
             self._sleep(min(self.POLL_SECONDS, remaining))
 
 
+def held_conversation_reason() -> str | None:
+    """Why this launch must NOT start after all, re-checked at release.
+
+    `prepare_agent_launch` cleared this pane's conversation before the window was
+    built, which for a staggered launch is many seconds before the driver
+    actually starts. Another terminal resuming that conversation inside the wait
+    would otherwise get a second driver on it — the "frozen session" fault the
+    guard exists for: the orphan keeps the conversation, the fresh `--resume`
+    never paints, and the pane holds its stale frame. The wait widened that
+    window from an instant to seconds, so the check is made again at the end of
+    it.
+
+    Fails OPEN in every direction except a definite refusal. No environment, no
+    record, an unreadable process table or any error at all means launch: a
+    missed collision costs one confusing pane, and a false refusal costs the user
+    an agent for no reason.
+    """
+    try:
+        from .errors import HeldConversationError
+        from .frame import Frame
+        from .store import StateStore
+
+        store = StateStore(
+            os.environ["HIVE_IDE_STATE_HOME"], os.environ["HIVE_IDE_WORKSPACE_KEY"]
+        )
+        record = store.find_session(os.environ["HIVE_IDE_SESSION_ID"])
+        if record is None:
+            return None
+        frame = Frame(store, socket=os.environ.get("HIVE_IDE_TMUX_SOCKET") or "")
+        try:
+            frame.refuse_held_conversation(record)
+        except HeldConversationError as exc:
+            return str(exc) or "its conversation is held by another process"
+    except Exception:
+        return None
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Wait, then REPLACE this process with the driver command.
 
@@ -171,6 +209,15 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         gate.wait(args.delay)
+        held = held_conversation_reason()
+        if held:
+            # Starting the driver now would duplicate it on a conversation
+            # something else took during the wait. The pane carries the reason,
+            # because that is where the person looking at the empty column is,
+            # and `verify` reports the session as having no agent — which is
+            # exactly what it has.
+            print(f"\n  hive-ide: no agent — {held}\n", flush=True)
+            command = ["sh", "-c", 'exec "${SHELL:-/bin/sh}"']
     except (Exception, KeyboardInterrupt):
         # Fail open, and `KeyboardInterrupt` explicitly: a user who hits Ctrl-C
         # in a queued pane means "start it now", not "throw the agent away" —

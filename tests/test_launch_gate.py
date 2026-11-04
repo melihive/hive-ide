@@ -25,7 +25,20 @@ from types import SimpleNamespace
 import pytest
 
 from hive_ide.frame import Frame
+from hive_ide import launch_gate
 from hive_ide.launch_gate import IdeLaunchGate, main as gate_main
+
+
+def _gate_env() -> dict[str, str]:
+    """The environment for a real gate process in a test: this package, and no
+    inherited IDE session. A test that leaves `HIVE_IDE_*` in place has the gate
+    re-check whichever session the developer is sitting in."""
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("HIVE_IDE_")
+    }
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return env
 
 
 def _schedule(sessions, current_window=None, existing=None, sleeping=()):
@@ -239,7 +252,7 @@ def test_the_gate_execs_the_command_it_was_given(tmp_path):
             "--", str(probe), "--resume", "thread-a",
         ],
         capture_output=True, text=True, timeout=30,
-        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+        env=_gate_env(),
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.strip().splitlines()[-1]) == ["--resume", "thread-a"]
@@ -380,8 +393,7 @@ def test_a_session_named_like_a_flag_still_starts(tmp_path):
         sys.executable,
     )
     result = subprocess.run(
-        ["sh", "-c", pane], capture_output=True, text=True, timeout=30,
-        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+        ["sh", "-c", pane], capture_output=True, text=True, timeout=30, env=_gate_env(),
     )
     assert result.returncode == 0, result.stderr
     assert marker.exists(), "a flag-shaped session name cost the session its agent"
@@ -398,3 +410,67 @@ def test_ctrl_c_while_queued_starts_the_agent_rather_than_losing_it(monkeypatch)
     monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
     assert gate_main(["--delay=9", "--", "claude", "--resume", "x"]) == 1
     assert execs == [("claude", ["claude", "--resume", "x"])]
+
+
+def test_a_holder_appearing_during_the_wait_stops_the_launch(monkeypatch):
+    """The wait widened an existing race, so the guard runs again at the end of it.
+
+    `prepare_agent_launch` cleared the conversation before the window was built.
+    Starting the driver seconds later, after something else resumed that
+    conversation, is the duplicate-driver fault the guard exists for.
+    """
+    monkeypatch.setattr(IdeLaunchGate, "wait", lambda self, delay: "queued")
+    monkeypatch.setattr(
+        launch_gate, "held_conversation_reason",
+        lambda: "its conversation is held by pid 4242",
+    )
+    execs = []
+    monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
+    assert gate_main(["--delay=4", "--", "claude", "--resume", "x"]) == 1
+    assert execs and execs[0][0] == "sh", "the driver was started on a held conversation"
+    assert "claude" not in " ".join(execs[0][1])
+
+
+def test_an_unheld_conversation_launches_as_normal(monkeypatch):
+    monkeypatch.setattr(IdeLaunchGate, "wait", lambda self, delay: "queued")
+    monkeypatch.setattr(launch_gate, "held_conversation_reason", lambda: None)
+    execs = []
+    monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
+    assert gate_main(["--delay=4", "--", "claude", "--resume", "x"]) == 1
+    assert execs == [("claude", ["claude", "--resume", "x"])]
+
+
+def test_the_ownership_recheck_fails_open(monkeypatch, tmp_path):
+    """Every way of not knowing means launch: a missed collision costs one
+    confusing pane, a false refusal costs the user an agent for nothing."""
+    monkeypatch.delenv("HIVE_IDE_STATE_HOME", raising=False)
+    monkeypatch.delenv("HIVE_IDE_WORKSPACE_KEY", raising=False)
+    monkeypatch.delenv("HIVE_IDE_SESSION_ID", raising=False)
+    assert launch_gate.held_conversation_reason() is None
+
+
+def test_a_queued_pane_refuses_typed_input_even_with_force(monkeypatch, tmp_path):
+    """`driver-rename --force` typed `/rename` into a gate and called it sent.
+
+    `pane_gate` only checked for a driver when the pane ran a shell, and a queued
+    pane runs Python — so it read as a live agent and the input went nowhere a
+    driver could receive it.
+    """
+    from hive_ide.nudge import AgentNudge
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket="probe")
+    gate = AgentNudge(frame)
+    monkeypatch.setattr(
+        gate, "pane_facts",
+        lambda pane_id: {"in_mode": False, "command": "python3", "dead": False, "pid": "77"},
+    )
+    monkeypatch.setattr(
+        gate, "_ps",
+        lambda args: "/usr/bin/python3 -m hive_ide.launch_gate --delay=8 -- sh -c claude\n",
+    )
+    allowed, reason, _detail = gate.pane_gate("%7")
+    assert allowed is False
+    assert reason == "agent_queued"

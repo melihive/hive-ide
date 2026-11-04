@@ -19,7 +19,11 @@ All notable changes to `hive-ide` will be documented in this file.
   queued, because that one-shot instruction lives only in the pane once the
   window is built. `verify` recognises a waiting gate as a pending launch rather
   than a missing agent. The launch order is planned before repair runs, so the
-  windows repair builds are staggered too.
+  windows repair builds are staggered too. A gate re-checks conversation
+  ownership when it releases, so a conversation taken during the wait gets the
+  "no agent" pane rather than a second driver, and a waiting pane refuses typed
+  input (`driver-rename`, including `--force`) instead of reporting a rename no
+  driver received.
 
 ### Fixed
 
