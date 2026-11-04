@@ -1170,13 +1170,15 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         config=config,
     )
     store.write_path(store.config_snapshot_path(), snapshot)
-    SessionRepair(
-        store,
-        Frame(store, socket=socket),
-        registry=registry,
-    ).repair_all()
-    _reap_dead_sockets(Frame(store, socket=socket), keep={socket})
-    return Frame(store, socket=socket).open(no_attach=args.no_attach)
+    frame = Frame(store, socket=socket)
+    # Before repair, which builds any window that is missing: a launch order
+    # decided after that is decided over a frame that is already fully built, so
+    # it stages nothing and the whole frame starts at once. One frame, so the
+    # plan reaches the repair builds as well as `open`'s own.
+    frame.plan_launch_stagger()
+    SessionRepair(store, frame, registry=registry).repair_all()
+    _reap_dead_sockets(frame, keep={socket})
+    return frame.open(no_attach=args.no_attach)
 
 
 def _reap_dead_sockets(frame: Frame, *, keep: set[str]) -> None:

@@ -73,6 +73,10 @@ class Frame:
         )
         self.target = f"hive-ide-{store.workspace_hash[:8]}"
         self.python = sys.executable
+        # None means no open has planned its launch order yet, which is NOT the
+        # same as a plan with nothing in it: an unplanned frame plans on demand,
+        # a planned-and-empty one has decided there is nothing to stagger.
+        self._launch_plan: dict[str, float] | None = None
 
     def _ide_conf(self) -> Path | None:
         """Copy the user's tmux config while disabling continuum for this server."""
@@ -2411,9 +2415,20 @@ class Frame:
             self._clear_consumed_handoff(record)
         return target
 
-    def ensure(self, record: dict[str, Any], *, launch_delay: float = 0.0) -> bool:
+    def ensure(
+        self, record: dict[str, Any], *, launch_delay: float | None = None
+    ) -> bool:
+        """Build this session's window if it has none. True when it built one.
+
+        With no `launch_delay`, the frame's launch plan decides — which is what
+        makes repair's builds staggered too, without repair having to know the
+        plan exists. An explicit delay still wins, so a caller that means "now"
+        can say so.
+        """
         if record["id"] in self.windows():
             return False
+        if launch_delay is None:
+            launch_delay = (self._launch_plan or {}).get(record["id"], 0.0)
         self.build(record, launch_delay=launch_delay)
         return True
 
@@ -3167,6 +3182,30 @@ class Frame:
         clients.sort(key=lambda c: c["last_active_epoch"] or 0, reverse=True)
         return clients
 
+    def plan_launch_stagger(
+        self, sessions: list[dict[str, Any]] | None = None
+    ) -> dict[str, float]:
+        """Decide this open's launch order NOW, before anything builds a window.
+
+        `open` is not the only thing that builds windows: the CLI repairs first,
+        and repair builds any window that is missing. Deciding the order inside
+        `open` therefore decided nothing — by the time it ran, every window
+        already existed, the schedule was empty, and a cold start still launched
+        the whole frame in one burst. So the caller plans first and every `build`
+        that follows honours the plan, whichever of them does the building.
+        """
+        sessions = self.store.list("sessions") if sessions is None else sessions
+        self._launch_plan = self._launch_schedule(sessions, self.current_window())
+        return self._launch_plan
+
+    def current_window(self) -> str | None:
+        """The window this frame is displaying, or None if there is no frame."""
+        if not self.exists():
+            return None
+        return self.tmux(
+            ["display-message", "-p", "-t", self.target, "#{window_id}"]
+        ).stdout.strip() or None
+
     def _launch_schedule(
         self, sessions: list[dict[str, Any]], current_window: str | None
     ) -> dict[str, float]:
@@ -3228,19 +3267,19 @@ class Frame:
         sessions = self.store.list("sessions")
         if not sessions:
             raise UsageError("This workspace has no sessions. Run hive-ide create first.")
-        current_window = None
-        if self.exists():
-            current_window = self.tmux(
-                ["display-message", "-p", "-t", self.target, "#{window_id}"]
-            ).stdout.strip() or None
-        delays = self._launch_schedule(sessions, current_window)
+        current_window = self.current_window()
+        if self._launch_plan is None:
+            # Called directly rather than through the CLI, so nothing has planned
+            # this open's launch order; plan it here, where no window has been
+            # built yet either.
+            self.plan_launch_stagger(sessions)
         built: list[str] = []
         built_sleeping: list[str] = []
         built_driverless: list[str] = []
         failed: list[dict[str, str]] = []
         for record in sessions:
             try:
-                if self.ensure(record, launch_delay=delays.get(record["id"], 0.0)):
+                if self.ensure(record):
                     if self._is_sleeping(record):
                         built_sleeping.append(record["id"])
                     else:

@@ -18,7 +18,8 @@ All notable changes to `hive-ide` will be documented in this file.
   than not at all. A session carrying a handoff or a launch prompt is never
   queued, because that one-shot instruction lives only in the pane once the
   window is built. `verify` recognises a waiting gate as a pending launch rather
-  than a missing agent.
+  than a missing agent. The launch order is planned before repair runs, so the
+  windows repair builds are staggered too.
 
 ### Fixed
 

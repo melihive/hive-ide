@@ -266,82 +266,60 @@ def test_the_gate_reports_a_missing_command_instead_of_execing_nothing(capsys):
 # --------------------------------------------------------------- open's wiring
 
 
-def test_open_hands_each_build_its_own_place_in_the_queue(tmp_path, monkeypatch):
-    """The schedule has to REACH `build`, which is the whole point of computing it.
+def test_the_cli_stages_the_launches_repair_would_otherwise_start_at_once(
+    tmp_path, monkeypatch
+):
+    """Through `cmd_open`, not `Frame.open` — because the CLI repairs FIRST.
 
-    Pinned separately because every other test here would still pass if `open`
-    worked the delay out and then built every window with no delay at all.
+    Repair builds any window that is missing, so a launch order decided inside
+    `open` is decided over a frame that repair has already built in full: the
+    schedule comes out empty and the whole frame starts at once. A test that
+    calls `Frame.open` directly never sees that, which is how it was missed.
     """
+    from hive_ide import cli
     from hive_ide.store import StateStore
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
-    for index in range(5):
+    for index in range(6):
         store.create_session(
             name=f"S{index}",
             working_dir=workspace,
             source={"kind": "stable", "interpreter": sys.executable, "version": "t"},
             driver={"id": "claude", "launch_argv": ["claude"]},
         )
-    sessions = store.list("sessions")
-    frame = Frame(store, socket="probe")
     handed: list[tuple[str, float]] = []
+    windows: dict[str, str] = {}
 
-    monkeypatch.setattr(frame, "require_tmux", lambda: None)
-    monkeypatch.setattr(frame, "exists", lambda: False)
-    monkeypatch.setattr(frame, "bind_keys", lambda: None)
-    monkeypatch.setattr(frame, "_is_sleeping", lambda record: False)
-    monkeypatch.setattr(frame, "tmux", lambda *a, **k: SimpleNamespace(returncode=0, stdout=""))
-    # `windows()` is empty while the schedule is worked out, then reports what was
-    # built — which is what the real frame does as the loop fills it.
-    monkeypatch.setattr(frame, "windows", lambda: {sid: f"@{sid}" for sid, _ in handed})
+    def build(self, record, *, force=False, no_driver=False, launch_delay=0.0):
+        handed.append((record["name"], launch_delay))
+        windows[record["id"]] = f"@{len(windows)}"
+        return windows[record["id"]]
 
-    def ensure(record, *, launch_delay=0.0):
-        handed.append((record["id"], launch_delay))
-        return True
-
-    monkeypatch.setattr(frame, "ensure", ensure)
-    frame.open(no_attach=True)
-
-    assert [delay for _id, delay in handed] == [0.0, 0.0, 0.0, 0.0, 4.0]
-    assert handed[0][0] == sessions[0]["id"]
-
-
-def test_a_session_named_like_a_flag_still_starts(tmp_path):
-    """`--label=<name>`, not `--label <name>`.
-
-    A session may be called `--work`. As a separate word that name parses as
-    another flag, argparse exits 2 — and the shell has already `exec`ed the gate
-    by then, so the fallback is gone with it and the agent never starts.
-    """
-    marker = tmp_path / "it-ran"
-    pane = Frame._gated_pane_command(
-        _frame_for_argv(tmp_path),
-        f"touch {shlex.quote(str(marker))}",
-        0.01,
-        "--work",
-        sys.executable,
+    monkeypatch.setattr(Frame, "build", build)
+    monkeypatch.setattr(Frame, "windows", lambda self: dict(windows))
+    monkeypatch.setattr(Frame, "exists", lambda self: bool(windows))
+    monkeypatch.setattr(Frame, "require_tmux", lambda self: None)
+    monkeypatch.setattr(Frame, "bind_keys", lambda self: None)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, session_id: {})
+    monkeypatch.setattr(
+        Frame, "tmux",
+        lambda self, args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
-    result = subprocess.run(
-        ["sh", "-c", pane], capture_output=True, text=True, timeout=30,
-        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+    monkeypatch.setattr(cli, "_reap_dead_sockets", lambda frame, keep: None)
+
+    args = SimpleNamespace(
+        workspace_key=str(workspace), state_home=str(tmp_path / "state"),
+        config=str(tmp_path / "config.json"), tmux_socket="probe", no_attach=True,
+        name=None, driver=None, working_dir=None, plan=None, source=None,
+        stable_python=None,
     )
-    assert result.returncode == 0, result.stderr
-    assert marker.exists(), "a flag-shaped session name cost the session its agent"
+    cli.cmd_open(args)
 
-
-def test_ctrl_c_while_queued_starts_the_agent_rather_than_losing_it(monkeypatch):
-    # KeyboardInterrupt is not an Exception, so it used to escape the fail-open
-    # and close the pane. A user interrupting a wait wants the agent sooner.
-    def interrupt(self, delay):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(IdeLaunchGate, "wait", interrupt)
-    execs = []
-    monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
-    assert gate_main(["--delay=9", "--", "claude", "--resume", "x"]) == 1
-    assert execs == [("claude", ["claude", "--resume", "x"])]
+    assert len(handed) == 6, f"every window should be built once: {handed}"
+    # The one the user lands on plus a first batch start together; the rest wait.
+    assert [delay for _name, delay in handed] == [0.0, 0.0, 0.0, 0.0, 4.0, 4.0]
 
 
 def test_a_session_with_a_one_shot_instruction_is_never_queued():
@@ -384,3 +362,39 @@ def test_verify_does_not_call_a_waiting_gate_a_dead_agent(tmp_path, monkeypatch)
     # this test would pass on a check that reports nothing at all.
     dead = [(4242, 1, "sh -c claude")]
     assert [f["session"] for f in cli._agentless_sessions(frame, [session], dead)] == ["QUEUED"]
+
+
+def test_a_session_named_like_a_flag_still_starts(tmp_path):
+    """`--label=<name>`, not `--label <name>`.
+
+    A session may be called `--work`. As a separate word that name parses as
+    another flag, argparse exits 2 — and the shell has already `exec`ed the gate
+    by then, so the fallback is gone with it and the agent never starts.
+    """
+    marker = tmp_path / "it-ran"
+    pane = Frame._gated_pane_command(
+        _frame_for_argv(tmp_path),
+        f"touch {shlex.quote(str(marker))}",
+        0.01,
+        "--work",
+        sys.executable,
+    )
+    result = subprocess.run(
+        ["sh", "-c", pane], capture_output=True, text=True, timeout=30,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.exists(), "a flag-shaped session name cost the session its agent"
+
+
+def test_ctrl_c_while_queued_starts_the_agent_rather_than_losing_it(monkeypatch):
+    # KeyboardInterrupt is not an Exception, so it used to escape the fail-open
+    # and close the pane. A user interrupting a wait wants the agent sooner.
+    def interrupt(self, delay):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(IdeLaunchGate, "wait", interrupt)
+    execs = []
+    monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
+    assert gate_main(["--delay=9", "--", "claude", "--resume", "x"]) == 1
+    assert execs == [("claude", ["claude", "--resume", "x"])]
