@@ -898,7 +898,7 @@ def test_declined_ensure_with_absent_window_never_builds(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(Frame, "tmux", stub_tmux)
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
 
     result = SessionRepair(store, Frame(store, socket="hive-ide-stub")).repair(record)
 

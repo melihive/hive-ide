@@ -297,7 +297,7 @@ def test_repair_all_prunes_dead_legacy_plan_from_active_and_archive(tmp_path, mo
     store.path("archive", archived["id"]).write_text(
         json.dumps(archived), encoding="utf-8"
     )
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: True)
 
     result = SessionRepair(store, Frame(store, socket="test")).repair_all()
 
@@ -784,7 +784,7 @@ def test_cli_current_plan_is_quiet_on_success(tmp_path, monkeypatch, capsys):
         plan={"path": "plan.md", "active_task": None},
     )
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
     focus_values = []
 
@@ -838,7 +838,7 @@ def test_cli_current_plan_repairs_missing_working_dir_before_open(
     )
     opened = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
 
     def fake_current_plan(_self, session, focus=False, force=False):
@@ -1057,7 +1057,7 @@ def test_open_after_restart_prebuilds_sleeping_sessions_without_waking_agents(
     windows: dict[str, str] = {}
     built: list[str] = []
 
-    def fake_build(record):
+    def fake_build(record, **_kw):
         built.append(record["name"])
         windows[record["id"]] = f"@{len(windows) + 1}"
         return windows[record["id"]]
@@ -1117,7 +1117,7 @@ def test_open_after_restart_prebuilds_all_sleeping_sessions_as_shells(
     windows: dict[str, str] = {}
     built: list[str] = []
 
-    def fake_build(record):
+    def fake_build(record, **_kw):
         built.append(record["name"])
         windows[record["id"]] = f"@{len(windows) + 1}"
         return windows[record["id"]]
@@ -2003,7 +2003,7 @@ def test_repair_rehomes_missing_working_dir_to_workspace(tmp_path, monkeypatch):
     original_last_active = record["last_active"]
     calls = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, rec: calls.append(rec["working_dir"]) or True)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, rec, **_kw: calls.append(rec["working_dir"]) or True)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
     monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
 
@@ -2038,7 +2038,7 @@ def test_repair_migrates_stale_legacy_plan_key(tmp_path, monkeypatch):
             }
         }
     }
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: True)
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
 
@@ -2067,7 +2067,7 @@ def test_repair_reports_source_interpreter_that_cannot_import_package(
         driver=_term(),
     )
     ensured = []
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: ensured.append(True))
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: ensured.append(True))
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
 
@@ -2092,7 +2092,7 @@ def test_repair_accepts_importable_source_interpreter(tmp_path, monkeypatch):
         source={"kind": "dev", "interpreter": sys.executable, "version": "test"},
         driver=_term(),
     )
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: True)
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
 
@@ -2120,7 +2120,7 @@ def test_repair_refreshes_resume_command_after_rehoming_working_dir(
         },
     )
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: True)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: True)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
@@ -2246,7 +2246,7 @@ def test_cli_repair_repairs_missing_working_dir_before_build(tmp_path, monkeypat
     )
     ensured = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, rec: ensured.append(rec["working_dir"]) or True)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, rec, **_kw: ensured.append(rec["working_dir"]) or True)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
     monkeypatch.setattr(Frame, "bind_keys", lambda _self: None)
 
@@ -2364,7 +2364,7 @@ def test_repair_rebuilds_window_when_required_pane_is_missing(tmp_path, monkeypa
     )
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2399,7 +2399,7 @@ def test_repair_restores_missing_plan_without_rebuilding_live_agent(
     restored = []
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2437,7 +2437,7 @@ def test_repair_retitles_healthy_existing_window(tmp_path, monkeypatch):
     )
     retitled = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2479,7 +2479,7 @@ def test_repair_reapplies_columns_for_healthy_existing_window(tmp_path, monkeypa
     )
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2557,7 +2557,7 @@ def test_repair_refreshes_stale_sidebar_wrapper_without_rebuilding(
     refreshed = []
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2668,7 +2668,7 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
     )
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2732,7 +2732,7 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
     respawned = []
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2805,7 +2805,7 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     record["source"] = {}
     respawned = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2872,7 +2872,7 @@ def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypat
     respawned = []
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -2937,7 +2937,7 @@ def test_repair_does_not_build_missing_sleeping_window(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "ensure",
-        lambda _self, _record: ensured.append(_record["id"]) or False,
+        lambda _self, _record, **_kw: ensured.append(_record["id"]) or False,
     )
     monkeypatch.setattr(Frame, "role_panes", lambda _self, _session_id: {})
     monkeypatch.setattr(Frame, "agent_pane_command", lambda _self, _record: None)
@@ -2979,7 +2979,7 @@ def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
     record["source"] = {}
     respawned = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -3055,7 +3055,7 @@ def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
     rebuilt = []
     respawned = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -3126,7 +3126,7 @@ def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypat
     )
     respawned = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -3215,7 +3215,7 @@ def test_repair_respawns_only_the_sidebar_pane_with_deleted_cwd(tmp_path, monkey
     rebuilt = []
     respawned = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -3268,7 +3268,7 @@ def test_repair_rebuilds_window_with_deleted_agent_cwd(tmp_path, monkeypatch):
     )
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -3325,7 +3325,7 @@ def test_repair_rebuilds_window_with_stale_agent_environment(tmp_path, monkeypat
     )
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -3380,7 +3380,7 @@ def test_force_rebuild_replaces_public_rebuild_command(tmp_path, monkeypatch, ca
     )
     rebuilt = []
 
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "windows", lambda _self: {record["id"]: "@7"})
     monkeypatch.setattr(
         Frame,
@@ -5422,7 +5422,7 @@ def test_rebuild_wakes_inactive_agent_pane_and_restores_focus(tmp_path, monkeypa
     frame = Frame(store)
     calls = []
     monkeypatch.setattr(frame, "windows", lambda: {record["id"]: "@7"})
-    monkeypatch.setattr(frame, "build", lambda _record: "@9")
+    monkeypatch.setattr(frame, "build", lambda _record, **_kw: "@9")
 
     def fake_tmux(args, **_kwargs):
         calls.append(args)

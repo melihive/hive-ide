@@ -73,6 +73,10 @@ class Frame:
         )
         self.target = f"hive-ide-{store.workspace_hash[:8]}"
         self.python = sys.executable
+        # None means no open has planned its launch order yet, which is NOT the
+        # same as a plan with nothing in it: an unplanned frame plans on demand,
+        # a planned-and-empty one has decided there is nothing to stagger.
+        self._launch_plan: dict[str, float] | None = None
 
     def _ide_conf(self) -> Path | None:
         """Copy the user's tmux config while disabling continuum for this server."""
@@ -781,7 +785,14 @@ class Frame:
             env.extend(["-e", f"HIVE_IDE_PANE_ROLE={role}", "-e", "HIVE_IDE_PANE_LEASE="])
         return env
 
-    def _driver_argv(self, command: str) -> list[str]:
+    def _driver_argv(
+        self,
+        command: str,
+        *,
+        delay: float = 0.0,
+        label: str = "",
+        python: str | None = None,
+    ) -> list[str]:
         """The pane argv for a driver launch: `command` run with a PATH that can
         find the driver (see `_launch_path`).
 
@@ -789,9 +800,48 @@ class Frame:
         (3.x) sets the PATH of a pane spawned by an unattached client from that
         client AFTER applying `-e`, so a `-e PATH=` from a daemon is discarded and
         the pane gets the daemon's PATH anyway.
+
+        A positive `delay` puts `launch_gate` in front of the driver, which holds
+        the launch for that long unless the user selects the window first. It is
+        how `open` stops a whole frame of agents starting in the same second; a
+        relaunch of ONE pane passes no delay and is never gated. The gate execs
+        the same `sh -c <command>`, so the pane's own process still becomes the
+        driver and nothing downstream can tell a gated launch from a plain one.
         """
         env = "/usr/bin/env" if os.path.exists("/usr/bin/env") else "env"
-        return [env, f"PATH={self._launch_path()}", "sh", "-c", command]
+        prefix = [env, f"PATH={self._launch_path()}"]
+        if delay <= 0:
+            return [*prefix, "sh", "-c", command]
+        return [*prefix, "sh", "-c", self._gated_pane_command(command, delay, label, python)]
+
+    def _gated_pane_command(
+        self, command: str, delay: float, label: str, python: str | None
+    ) -> str:
+        """`command`, behind the launch gate — and still `command` if the gate
+        cannot start.
+
+        The gate is imported, so it depends on the pane's interpreter resolving
+        THIS package: a session pinned to another package source, or a checkout
+        run from a source tree whose `PYTHONPATH` the tmux server never saw, has
+        an interpreter that cannot import it. Without the fallback that pane's
+        command would exit and the pane would close — a stagger costing the user
+        an agent, which is the one outcome worth more than any amount of speed.
+        So the import is probed first, and both branches `exec`: the driver runs
+        exactly once either way, never twice.
+        """
+        interpreter = python or self.python
+        probe = shlex.join([interpreter, "-c", "import hive_ide.launch_gate"])
+        gate = PythonCommand.module_command(
+            "launch_gate",
+            # `--flag=value`, never `--flag value`: a session may be named
+            # `--work`, and as a separate word that name parses as another flag.
+            # argparse exits 2, and by then the shell has already `exec`ed the
+            # gate, so the fallback below is gone and the agent never starts.
+            [f"--delay={delay:g}", f"--label={label}"],
+            python=interpreter,
+        )
+        driver = shlex.join(["sh", "-c", command])
+        return f"if {probe} 2>/dev/null; then exec {gate} -- {driver}; fi; exec {driver}"
 
     def _launch_path(self) -> str:
         """The PATH an agent pane is launched with, so it can find its driver.
@@ -1771,6 +1821,16 @@ class Frame:
         self._confirm_agent_launch(pane_id)
         return "respawned"
 
+    #: How many driver launches `open` lets start together, and the gap it leaves
+    #: before the next batch. Sized for the cost of ONE start, not of a frame: a
+    #: `claude --resume` of a large conversation is a node boot, a transcript
+    #: parse and two Hive session-start hooks, and a 17-session workspace used to
+    #: run sixteen of those at once while the user waited on the one window they
+    #: had switched to. The window the user lands on is never gated, so these
+    #: govern only the agents nobody is looking at yet.
+    LAUNCH_BATCH = 3
+    LAUNCH_BATCH_SECONDS = 4.0
+
     LAUNCH_SETTLE_SECONDS = 2.0
     LAUNCH_POLL_SECONDS = 0.2
     LAUNCH_FAILED_MARKER = "hive-ide: driver command failed with exit"
@@ -2204,6 +2264,7 @@ class Frame:
         *,
         force: bool = False,
         no_driver: str | bool = False,
+        launch_delay: float = 0.0,
     ) -> str:
         PaneLeases(self).check(record["id"], force=force)
         working_dir = record["working_dir"]
@@ -2258,7 +2319,8 @@ class Frame:
             raise HiveIdeError(f"tmux did not return an id for window {record['name']}.")
         try:
             window = self._finish_build(
-                record, target, working_dir, no_driver=no_driver
+                record, target, working_dir, no_driver=no_driver,
+                launch_delay=launch_delay,
             )
         except BaseException:
             # The window exists but is not a frame window yet: it holds only the
@@ -2280,6 +2342,7 @@ class Frame:
         working_dir: str,
         *,
         no_driver: str | bool = False,
+        launch_delay: float = 0.0,
     ) -> str:
         """Fill the window's agent and plan panes.
 
@@ -2320,7 +2383,12 @@ class Frame:
                     working_dir,
                     *self._environment(record, role=role),
                     *(
-                        self._driver_argv(command)
+                        self._driver_argv(
+                            command,
+                            delay=launch_delay,
+                            label=str(record.get("name") or ""),
+                            python=self._record_python(record),
+                        )
                         if role == "agent"
                         and not no_driver
                         and not self._is_sleeping(record)
@@ -2347,10 +2415,21 @@ class Frame:
             self._clear_consumed_handoff(record)
         return target
 
-    def ensure(self, record: dict[str, Any]) -> bool:
+    def ensure(
+        self, record: dict[str, Any], *, launch_delay: float | None = None
+    ) -> bool:
+        """Build this session's window if it has none. True when it built one.
+
+        With no `launch_delay`, the frame's launch plan decides — which is what
+        makes repair's builds staggered too, without repair having to know the
+        plan exists. An explicit delay still wins, so a caller that means "now"
+        can say so.
+        """
         if record["id"] in self.windows():
             return False
-        self.build(record)
+        if launch_delay is None:
+            launch_delay = (self._launch_plan or {}).get(record["id"], 0.0)
+        self.build(record, launch_delay=launch_delay)
         return True
 
     @serialized
@@ -3103,16 +3182,97 @@ class Frame:
         clients.sort(key=lambda c: c["last_active_epoch"] or 0, reverse=True)
         return clients
 
+    def plan_launch_stagger(
+        self, sessions: list[dict[str, Any]] | None = None
+    ) -> dict[str, float]:
+        """Decide this open's launch order NOW, before anything builds a window.
+
+        `open` is not the only thing that builds windows: the CLI repairs first,
+        and repair builds any window that is missing. Deciding the order inside
+        `open` therefore decided nothing — by the time it ran, every window
+        already existed, the schedule was empty, and a cold start still launched
+        the whole frame in one burst. So the caller plans first and every `build`
+        that follows honours the plan, whichever of them does the building.
+        """
+        sessions = self.store.list("sessions") if sessions is None else sessions
+        self._launch_plan = self._launch_schedule(sessions, self.current_window())
+        return self._launch_plan
+
+    def current_window(self) -> str | None:
+        """The window this frame is displaying, or None if there is no frame."""
+        if not self.exists():
+            return None
+        return self.tmux(
+            ["display-message", "-p", "-t", self.target, "#{window_id}"]
+        ).stdout.strip() or None
+
+    def _launch_schedule(
+        self, sessions: list[dict[str, Any]], current_window: str | None
+    ) -> dict[str, float]:
+        """How long each session's driver launch waits, keyed by session id.
+
+        The session whose window this `open` will land on gets nothing to wait
+        for — that is the whole point, and it is why the schedule is decided here
+        rather than inside `build`, which sees one session at a time and cannot
+        know which one the user is about to look at.
+
+        Only launches this `open` actually STARTS are staggered: a session that
+        already has a window is not rebuilt, and a sleeping one starts no driver,
+        so neither belongs in the queue. Counting them would leave real launches
+        waiting out slots that nothing occupies.
+        """
+        existing = self.windows()
+        selected = next(
+            (
+                record["id"]
+                for record in sessions
+                if current_window and existing.get(record["id"]) == current_window
+            ),
+            None,
+        )
+        if selected is None:
+            # No frame yet, or its current window is gone: `open` selects the
+            # first session that gets a window, and the list is ordered by
+            # activity, so that is the one most recently worked in.
+            selected = next(
+                (record["id"] for record in sessions if record["id"] not in existing),
+                None,
+            )
+        queue = [
+            record["id"]
+            for record in sessions
+            if record["id"] not in existing
+            and record["id"] != selected
+            and not self._is_sleeping(record)
+            # A terminal session's "agent" is a shell: it costs nothing to start,
+            # so staggering it buys no time and would put a queue notice in front
+            # of a pane the user expects to be a prompt.
+            and (record.get("driver") or {}).get("id") != "term"
+            # A session carrying a handoff or a launch prompt has a ONE-SHOT
+            # instruction, and `_finish_build` drops it from the record as soon as
+            # the pane holds it — so while a gate waits, the queued process is the
+            # only copy left, and killing that pane loses the instruction. It is
+            # also a session someone has just set up, which is the last one to
+            # make wait.
+            and not record.get("handoff")
+            and not record.get("launch_prompt")
+        ]
+        return {
+            session_id: (index // self.LAUNCH_BATCH) * self.LAUNCH_BATCH_SECONDS
+            for index, session_id in enumerate(queue)
+        }
+
     def open(self, *, no_attach: bool = False) -> dict[str, Any]:
         self.require_tmux()
         sessions = self.store.list("sessions")
         if not sessions:
             raise UsageError("This workspace has no sessions. Run hive-ide create first.")
-        current_window = None
-        if self.exists():
-            current_window = self.tmux(
-                ["display-message", "-p", "-t", self.target, "#{window_id}"]
-            ).stdout.strip() or None
+        current_window = self.current_window()
+        if self._launch_plan is None:
+            # Called directly rather than through the CLI, so nothing has planned
+            # this open's launch order; plan it here, where no window has been
+            # built yet either.
+            self.plan_launch_stagger(sessions)
         built: list[str] = []
         built_sleeping: list[str] = []
         built_driverless: list[str] = []
