@@ -120,7 +120,7 @@ def test_a_gated_pane_runs_the_driver_through_the_gate(tmp_path):
     assert argv[-3:-1] == ["sh", "-c"]
     pane = argv[-1]
     assert "hive_ide.launch_gate" in pane
-    assert "--delay 4 " in pane and "--label COSTS" in pane
+    assert "--delay=4" in pane and "--label=COSTS" in pane
     # The driver command itself is handed over untouched, after the separator —
     # and again as the fallback, so each branch of the pane command runs it once.
     assert "-- sh -c 'claude --resume x'" in pane
@@ -306,3 +306,39 @@ def test_open_hands_each_build_its_own_place_in_the_queue(tmp_path, monkeypatch)
 
     assert [delay for _id, delay in handed] == [0.0, 0.0, 0.0, 0.0, 4.0]
     assert handed[0][0] == sessions[0]["id"]
+
+
+def test_a_session_named_like_a_flag_still_starts(tmp_path):
+    """`--label=<name>`, not `--label <name>`.
+
+    A session may be called `--work`. As a separate word that name parses as
+    another flag, argparse exits 2 — and the shell has already `exec`ed the gate
+    by then, so the fallback is gone with it and the agent never starts.
+    """
+    marker = tmp_path / "it-ran"
+    pane = Frame._gated_pane_command(
+        _frame_for_argv(tmp_path),
+        f"touch {shlex.quote(str(marker))}",
+        0.01,
+        "--work",
+        sys.executable,
+    )
+    result = subprocess.run(
+        ["sh", "-c", pane], capture_output=True, text=True, timeout=30,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.exists(), "a flag-shaped session name cost the session its agent"
+
+
+def test_ctrl_c_while_queued_starts_the_agent_rather_than_losing_it(monkeypatch):
+    # KeyboardInterrupt is not an Exception, so it used to escape the fail-open
+    # and close the pane. A user interrupting a wait wants the agent sooner.
+    def interrupt(self, delay):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(IdeLaunchGate, "wait", interrupt)
+    execs = []
+    monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
+    assert gate_main(["--delay=9", "--", "claude", "--resume", "x"]) == 1
+    assert execs == [("claude", ["claude", "--resume", "x"])]

@@ -164,8 +164,12 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         gate.wait(args.delay)
-    except Exception:
-        pass  # fail open: a gate must never be the reason an agent did not start
+    except (Exception, KeyboardInterrupt):
+        # Fail open, and `KeyboardInterrupt` explicitly: a user who hits Ctrl-C
+        # in a queued pane means "start it now", not "throw the agent away" —
+        # and it is not an `Exception`, so it used to escape this handler and
+        # close the pane.
+        pass
     os.execvp(command[0], command)
     return 1  # unreachable: execvp either replaces this process or raises
 

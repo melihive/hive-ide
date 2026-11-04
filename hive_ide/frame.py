@@ -829,7 +829,11 @@ class Frame:
         probe = shlex.join([interpreter, "-c", "import hive_ide.launch_gate"])
         gate = PythonCommand.module_command(
             "launch_gate",
-            ["--delay", f"{delay:g}", "--label", label],
+            # `--flag=value`, never `--flag value`: a session may be named
+            # `--work`, and as a separate word that name parses as another flag.
+            # argparse exits 2, and by then the shell has already `exec`ed the
+            # gate, so the fallback below is gone and the agent never starts.
+            [f"--delay={delay:g}", f"--label={label}"],
             python=interpreter,
         )
         driver = shlex.join(["sh", "-c", command])
