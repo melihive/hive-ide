@@ -342,3 +342,45 @@ def test_ctrl_c_while_queued_starts_the_agent_rather_than_losing_it(monkeypatch)
     monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
     assert gate_main(["--delay=9", "--", "claude", "--resume", "x"]) == 1
     assert execs == [("claude", ["claude", "--resume", "x"])]
+
+
+def test_a_session_with_a_one_shot_instruction_is_never_queued():
+    """Its prompt lives only in the pane once `build` has run.
+
+    `_finish_build` drops the handoff and the launch prompt from the record as
+    soon as the pane holds them, so a gate's wait is a window in which the queued
+    process is the only copy left — kill the pane then and the instruction is
+    gone. It is also the session someone has just set up.
+    """
+    sessions = _sessions(6)
+    sessions[1]["handoff"] = {"target_driver_prompt": "continue the plan"}
+    sessions[2]["launch_prompt"] = "you are a relay probe"
+    delays = _schedule(sessions)
+    assert "s1" not in delays and "s2" not in delays
+    assert [delays[f"s{index}"] for index in (3, 4, 5)] == [0.0, 0.0, 0.0]
+
+
+def test_verify_does_not_call_a_waiting_gate_a_dead_agent(tmp_path, monkeypatch):
+    """A queued pane is Python with no driver under it — so is a dead agent.
+
+    `verify` reporting `ok: false` for the frame's own deliberate stagger would
+    make every staggered open look broken.
+    """
+    from hive_ide import cli
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    frame = Frame(store, socket="probe")
+    session = {"id": "s1", "name": "QUEUED", "driver": {"id": "claude", "launch_argv": ["claude"]}}
+    monkeypatch.setattr(frame, "role_panes", lambda _id: {"agent": "%3"})
+    monkeypatch.setattr(frame, "pane_pid", lambda _pane: 4242)
+
+    waiting = [(4242, 1, "/usr/bin/python3 -m hive_ide.launch_gate --delay=8 -- sh -c claude")]
+    assert cli._agentless_sessions(frame, [session], waiting) == []
+
+    # The same pane with the gate gone and no driver IS a finding — otherwise
+    # this test would pass on a check that reports nothing at all.
+    dead = [(4242, 1, "sh -c claude")]
+    assert [f["session"] for f in cli._agentless_sessions(frame, [session], dead)] == ["QUEUED"]

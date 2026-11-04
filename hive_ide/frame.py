@@ -3209,6 +3209,14 @@ class Frame:
             # so staggering it buys no time and would put a queue notice in front
             # of a pane the user expects to be a prompt.
             and (record.get("driver") or {}).get("id") != "term"
+            # A session carrying a handoff or a launch prompt has a ONE-SHOT
+            # instruction, and `_finish_build` drops it from the record as soon as
+            # the pane holds it — so while a gate waits, the queued process is the
+            # only copy left, and killing that pane loses the instruction. It is
+            # also a session someone has just set up, which is the last one to
+            # make wait.
+            and not record.get("handoff")
+            and not record.get("launch_prompt")
         ]
         return {
             session_id: (index // self.LAUNCH_BATCH) * self.LAUNCH_BATCH_SECONDS

@@ -17,6 +17,7 @@ from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .adoption import AdoptableConversation, ConversationAdopter
 from .agents import AgentResumeState
 from .holders import ConversationHolders
+from .launch_gate import PROCESS_MARKER as LAUNCH_GATE_MARKER
 from .config import configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
@@ -1293,6 +1294,21 @@ def _conversation_holders(
     return out
 
 
+def _launch_gate_waiting(pane_pid: int, rows: list[tuple[int, int, str]]) -> bool:
+    """True when this pane holds a launch gate that has not released yet.
+
+    A staggered launch is a pane running Python with no driver beneath it, which
+    is the same shape as an agent that died — and a verify that calls a
+    deliberate wait a fault is a verify that gets ignored. The gate `exec`s the
+    driver when it releases, so the marker disappears at the moment there is an
+    agent to find; a pane still carrying it has not had its turn.
+    """
+    tree = ConversationHolders.descendants(pane_pid, rows)
+    return any(
+        pid in tree and LAUNCH_GATE_MARKER in command for pid, _ppid, command in rows
+    )
+
+
 def _agentless_sessions(
     frame: Frame, sessions: list[dict[str, Any]], rows: list[tuple[int, int, str]]
 ) -> list[dict[str, Any]]:
@@ -1330,6 +1346,8 @@ def _agentless_sessions(
         pane_pid = frame.pane_pid(agent_pane)
         if pane_pid is None:
             continue           # could not observe this pane; do not call it broken
+        if _launch_gate_waiting(pane_pid, rows):
+            continue           # a deliberate wait, not a dead agent
         if not ConversationHolders.drivers_in_tree(pane_pid, rows):
             out.append(
                 {

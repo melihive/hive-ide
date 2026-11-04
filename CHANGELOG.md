@@ -15,7 +15,10 @@ All notable changes to `hive-ide` will be documented in this file.
   single relaunch (`wake`, `chat`) is never gated. Where the gate's module cannot
   be imported — a session pinned to another package source, or a source checkout
   whose `PYTHONPATH` the tmux server never saw — the driver starts ungated rather
-  than not at all.
+  than not at all. A session carrying a handoff or a launch prompt is never
+  queued, because that one-shot instruction lives only in the pane once the
+  window is built. `verify` recognises a waiting gate as a pending launch rather
+  than a missing agent.
 
 ### Fixed
 

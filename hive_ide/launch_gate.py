@@ -29,7 +29,14 @@ import subprocess
 import sys
 import time
 
-__all__ = ["IdeLaunchGate", "main"]
+__all__ = ["IdeLaunchGate", "PROCESS_MARKER", "main"]
+
+#: How a gate that has not released yet appears in a process table. `verify`
+#: needs it to tell a pane that is WAITING from a pane whose agent died: both are
+#: a pane with no driver under it. Kept here, as a plain string, so this module
+#: still imports nothing but the standard library — it is the first thing that
+#: runs in an agent pane, and every import is paid once per pane.
+PROCESS_MARKER = "hive_ide.launch_gate"
 
 
 class IdeLaunchGate:
