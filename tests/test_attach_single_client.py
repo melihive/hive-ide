@@ -39,7 +39,7 @@ def test_attach_detaches_any_client_already_on_the_session(tmp_path, monkeypatch
     )
     monkeypatch.setattr(Frame, "require_tmux", lambda self: None)
     monkeypatch.setattr(Frame, "exists", lambda self: True)
-    monkeypatch.setattr(Frame, "ensure", lambda self, record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda self, record, **_kw: False)
     monkeypatch.setattr(Frame, "bind_keys", lambda self: None)
     monkeypatch.setattr(Frame, "windows", lambda self: {"s1": "@1"})
     monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Result("@1"))

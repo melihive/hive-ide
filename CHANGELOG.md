@@ -4,6 +4,19 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- `open` no longer starts every session's agent in the same second. The window it
+  selects launches immediately; every other driver it would start waits a
+  staggered turn behind `hive_ide.launch_gate`, three starts at a time. Selecting
+  a waiting window releases it at once, so a queued agent is never something the
+  user waits behind. Sessions that already have a window, sleeping sessions and
+  terminal sessions are not staggered — they start nothing, or start a shell. A
+  single relaunch (`wake`, `chat`) is never gated. Where the gate's module cannot
+  be imported — a session pinned to another package source, or a source checkout
+  whose `PYTHONPATH` the tmux server never saw — the driver starts ungated rather
+  than not at all.
+
 ### Fixed
 
 - macOS pane ownership checks now read native process environments and direct

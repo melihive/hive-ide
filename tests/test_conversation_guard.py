@@ -213,7 +213,7 @@ def test_repair_preview_reports_a_gone_reference_and_apply_drops_it(
 ):
     store, record, _workspace = _session(tmp_path)
     monkeypatch.setattr(Frame, "windows", lambda _self: {})
-    monkeypatch.setattr(Frame, "ensure", lambda _self, _record: False)
+    monkeypatch.setattr(Frame, "ensure", lambda _self, _record, **_kw: False)
     monkeypatch.setattr(Frame, "apply_columns", lambda _self, _record: None)
     repair = SessionRepair(store, Frame(store, socket="test"))
 
