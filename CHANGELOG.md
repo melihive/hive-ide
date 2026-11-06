@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.114] - 2026-11-06
+
 ### Changed
 
 - `open` no longer starts every session's agent in the same second. The window it
@@ -52,6 +54,7 @@ All notable changes to `hive-ide` will be documented in this file.
   incorrect conversation bindings need a separate explicit repair; this update
   does not guess their intended owner or relax the idle guard. Custom Codex
   wrappers must provide equivalent isolation themselves.
+
 ## [1.0.113] - 2026-11-02
 
 ### Fixed
