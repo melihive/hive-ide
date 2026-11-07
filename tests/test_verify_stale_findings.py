@@ -286,8 +286,12 @@ def test_codex_isolation_failure_makes_verify_not_ok(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("clients", [{"client": "/dev/pts/0", "size": "80x24", "last_active_epoch": 1},
-                     {"client": "/dev/pts/1", "size": "200x50", "last_active_epoch": 2}]),
+        # Two clients is NORMAL since mirroring; two CONTROLLERS is not — the
+        # window then flips between their sizes and reflows every pane.
+        ("clients", [{"client": "/dev/pts/0", "size": "80x24", "last_active_epoch": 1,
+                      "created_epoch": 1, "pid": 10, "controller": True},
+                     {"client": "/dev/pts/1", "size": "200x50", "last_active_epoch": 2,
+                      "created_epoch": 2, "pid": 11, "controller": True}]),
         ("holders", [{"session": "ALPHA", "reference": REF, "pid": 900, "ppid": 1, "orphaned": True}]),
     ],
 )
@@ -298,6 +302,10 @@ def test_each_stale_condition_makes_verify_not_ok(tmp_path, monkeypatch, field, 
     until now — including `clients`, added in 1.0.93, whose contribution to `ok`
     was never covered. A finding that prints but leaves `ok` true is a finding
     every script ignores.
+
+    The `clients` condition changed meaning in 2026-11-07: mirroring makes
+    several attached clients ordinary, so what verify reports is a frame with no
+    controller or more than one, not a frame with more than one client.
     """
     from hive_ide import cli
 
@@ -332,7 +340,28 @@ def test_verify_is_ok_when_none_of_the_three_conditions_is_present(tmp_path, mon
     monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(
-        Frame, "attached_clients", lambda self: [{"client": "/dev/pts/0", "size": "200x50", "last_active_epoch": 1}]
+        Frame,
+        "attached_clients",
+        lambda self: [
+            {
+                "client": "/dev/pts/0",
+                "size": "200x50",
+                "last_active_epoch": 1,
+                "created_epoch": 1,
+                "pid": 10,
+                "controller": True,
+            },
+            # A mirror alongside it: still the all-clear, which is the point of
+            # the feature — a second screen is no longer a defect.
+            {
+                "client": "/dev/pts/1",
+                "size": "80x24",
+                "last_active_epoch": 1,
+                "created_epoch": 0,
+                "pid": 9,
+                "controller": False,
+            },
+        ],
     )
     monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
     monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])

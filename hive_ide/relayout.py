@@ -183,18 +183,36 @@ class IdeRelayout:
 
     @staticmethod
     def _latest_client_geometry(socket: str) -> tuple[int, int] | None:
+        """The CONTROLLING client's size — never a mirror's.
+
+        MIRRORING has two halves. `window-size latest` is tmux's, and this is the
+        other, because relayout does not merely read the window size: it RESIZES
+        the window to whatever this returns. A client flagged `ignore-size` is a
+        mirror — tmux already refuses to size the frame to it, and relayout has to
+        refuse too, or the pane-reflow freeze that `ignore-size` prevents simply
+        moves one layer up: a mirror that happens to become the most recently
+        active client would drag every pane to its geometry anyway.
+
+        None when every client is a mirror, which leaves `canonical` to fall back
+        to the window's own geometry rather than resizing to a mirror.
+        """
         rows = IdeRelayout._tmux(
             socket,
             [
                 "list-clients",
                 "-F",
-                "#{client_activity}\t#{client_width}\t#{client_height}",
+                "#{client_activity}\t#{client_width}\t#{client_height}"
+                "\t#{client_flags}",
             ],
         )
         latest: tuple[int, int, int] | None = None
         for line in rows.splitlines():
-            activity, width, height = line.split("\t") if line.count("\t") == 2 else ("", "", "")
+            activity, width, height, flags = (
+                line.split("\t") if line.count("\t") == 3 else ("", "", "", "")
+            )
             if not (activity.isdigit() and width.isdigit() and height.isdigit()):
+                continue
+            if "ignore-size" in flags.split(","):
                 continue
             candidate = (int(activity), int(width), int(height))
             if latest is None or candidate[0] > latest[0]:
@@ -209,13 +227,13 @@ class IdeRelayout:
                 "list-clients",
                 "-F",
                 "#{client_activity}\t#{client_width}\t#{client_height}\t"
-                "#{client_tty}\t#{client_session}",
+                "#{client_tty}\t#{client_session}\t#{client_flags}",
             ],
         )
         clients = []
         for line in rows.splitlines():
-            activity, width, height, tty, session = (
-                line.split("\t") if line.count("\t") == 4 else ("", "", "", "", "")
+            activity, width, height, tty, session, flags = (
+                line.split("\t") if line.count("\t") == 5 else ("", "", "", "", "", "")
             )
             clients.append(
                 {
@@ -224,6 +242,7 @@ class IdeRelayout:
                     "height": int(height) if height.isdigit() else height,
                     "tty": tty,
                     "session": session,
+                    "mirror": "ignore-size" in flags.split(","),
                 }
             )
         return clients

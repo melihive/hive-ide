@@ -102,3 +102,74 @@ raise SystemExit(IdeRelayout.main([
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+
+
+def test_client_hooks_elect_before_relayout(tmp_path, monkeypatch):
+    """Both client hooks elect FIRST, then relayout.
+
+    As two independent hooks, relayout could read the departing client's 100x30
+    before the election demoted it, resize the panes to that, and leave a layout
+    nothing afterwards corrects. On detach the order matters for a second reason:
+    tmux preserves a zoom across an automatic resize, so a departing narrow
+    controller would leave the promoted wide survivor still zoomed for mobile.
+    """
+    store = StateStore(tmp_path / "state", tmp_path)
+    frame = Frame(store, socket="fixture")
+    calls = []
+
+    def tmux(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(frame, "tmux", tmux)
+    observer = tmp_path / "observe.py"
+    observer.write_text("import sys; print(sys.argv[1])\n")
+    monkeypatch.setattr(
+        frame,
+        "_module",
+        lambda module, args: shlex.join([sys.executable, str(observer), module]),
+    )
+
+    frame.bind_keys()
+
+    for hook in ("client-attached", "client-detached"):
+        installed = [
+            args[-1]
+            for args in calls
+            if args[0] == "set-hook"
+            and hook in args
+            and str(args[-1]).startswith("run-shell")
+        ]
+        assert len(installed) == 1, f"{hook}: expected one hook, got {installed}"
+        tokens = shlex.split(installed[0])
+        assert tokens[:2] == ["run-shell", "-b"]
+        observed = subprocess.run(
+            tokens[2], shell=True, capture_output=True, text=True, check=True
+        )
+        assert observed.stdout.splitlines() == ["clients", "relayout"], (
+            f"{hook} ran {observed.stdout.splitlines()}; the election must come "
+            "first or relayout decides from the wrong client"
+        )
+
+
+def test_the_election_holds_the_workspace_lock(tmp_path, monkeypatch):
+    """Serialized, not merely retried.
+
+    Three stale retries could each lose their race and still exit leaving two
+    controllers, with no election left to repair them — competing geometry votes,
+    which is the pane-reflow freeze. Elections take the same cross-process lock
+    state mutations take, so they cannot interleave at all.
+    """
+    store = StateStore(tmp_path / "state", tmp_path)
+    frame = Frame(store, socket="fixture")
+    held = []
+
+    monkeypatch.setattr(
+        Frame,
+        "attached_clients",
+        lambda self: (held.append(store.mutation_lock_held()), [])[1],
+    )
+
+    assert frame.elect_controller() is None
+    assert held, "the election never read the client list"
+    assert all(held), "the client list was read without the workspace lock held"
