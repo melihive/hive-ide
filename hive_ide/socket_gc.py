@@ -654,9 +654,9 @@ class OrphanSweeper:
             # anywhere in it may belong to the PANE's command rather than to tmux.
             # `-L` is therefore still what NAMES the socket.
             by_path = cls._SOCKET_PATH_FLAG.search(argv)
-            match = cls._SOCKET_FLAG.search(argv)
-            if match is not None:
-                name = match.group(1)
+            by_name = cls._SOCKET_FLAG.findall(argv)
+            if by_name:
+                name = by_name[-1]      # tmux takes the LAST, so a search is wrong
             elif by_path is not None:
                 name = PurePosixPath(by_path.group(1)).name
             else:
@@ -846,6 +846,15 @@ class OrphanSweeper:
                 continue
             if clients.get(name):
                 continue        # a client holds it: it may still be on a screen
+            if len(entries) > 1:
+                # One socket has ONE server. Two processes reading as servers on
+                # the same name is a contradiction, and the way it arises is a
+                # client misread: `new-session -A -s work python3 -d app.py`
+                # attaches, but the PANE command's `-d` is in the same flattened
+                # line as tmux's own flags, so the client scored as detached. It
+                # then stopped protecting the socket AND became a candidate
+                # itself. Treat the contradiction as unknown and keep both.
+                continue
             for pid, age, argv in entries:
                 if age < self.SERVER_MIN_AGE_SECONDS:
                     continue

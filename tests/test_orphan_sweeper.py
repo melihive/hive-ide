@@ -1485,3 +1485,59 @@ def test_a_server_that_actually_dies_IS_reported_as_killed():
 
     assert result["killed"] == [99]
     assert result["spared"] == []
+
+
+# -- the fourteenth review round ------------------------------------------------
+
+
+def test_a_pane_commands_own_dash_d_cannot_turn_a_client_into_a_server():
+    """`ps` puts tmux's flags and the PANE command's flags in one flat line.
+
+    `new-session -A -s work python3 -d app.py` ATTACHES — the `-d` belongs to
+    python. Scoring it as detached made the client read as a server, which cost
+    it its protective status and made it a candidate in its own right, so a reap
+    took down the client AND the live server it was attached to.
+
+    One socket has one server, so two of them is a contradiction, and a
+    contradiction on this path means keep everything.
+    """
+    rows = [
+        server(99, 86400 * 9),
+        (150, 86400 * 9,
+         f"tmux -L {SOCKET} new-session -A -s work python3 -d app.py"),
+    ]
+
+    servers, _clients, _shells = OrphanSweeper.classify(rows)
+    assert len(servers.get(SOCKET, [])) == 2, "the fixture no longer reproduces it"
+
+    result, kills = reap(rows, unreachable={SOCKET})
+    assert result["servers"] == [], "reaped a client and the server it was on"
+    assert kills.sent == []
+
+
+def test_one_genuine_server_on_a_socket_is_still_reaped():
+    """The falsifying half: the contradiction rule must not simply switch the
+    reaper off whenever more than nothing is on the socket."""
+    result, kills = reap([server(99, 86400 * 9)], unreachable={SOCKET})
+
+    assert result["servers"] == [99]
+    assert (99, signal.SIGTERM) in kills.sent
+
+
+def test_a_repeated_JOINED_socket_flag_protects_the_socket_tmux_is_on():
+    """`-L A -Lhive-ide-B` is a server on B. The token scan cannot see B, because
+    `-Lhive-ide-B` is a single token whose basename is the whole thing, and a
+    search for the flag stops at A — so B's live sidebars lost their protection
+    entirely."""
+    other = "hive-ide-beefcafe"
+    rows = [
+        (99, 7200, f"tmux -L {SOCKET} -L{other} new-session -d -s x -n N"),
+        shell(101, 7200, other),
+    ]
+
+    _servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert other in clients or other in _servers, "the effective socket was lost"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == [], "killed the sidebars of a live frame"
+    assert kills.sent == []
