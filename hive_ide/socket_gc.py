@@ -282,21 +282,38 @@ class OrphanSweeper:
     #: client matched on `-L` alone is invisible and its server loses the one
     #: protection that keeps a live screen alive. The basename IS the socket name.
     _SOCKET_PATH_FLAG = re.compile(r"-S\s+(\S+)")
+    #: A standalone `-d`: what makes a `new-session` a SERVER start rather than a
+    #: client that attaches. `attach -d` is excluded before this is consulted.
+    _DETACHED_FLAG = re.compile(r"(?<!\S)-d(?!\S)")
 
     def __init__(
         self,
         *,
-        rows: list[tuple[int, int, str]] | None = None,
+        rows: list[tuple[int, int, str]]
+             | Callable[[], list[tuple[int, int, str]]]
+             | None = None,
         kill: Callable[[int, int], None] | None = None,
         argv_of: Callable[[int], str | None] | None = None,
         now: float | None = None,
     ):
+        #: A list pins ONE snapshot; a CALLABLE is re-read on every access, which
+        #: is how a test can make the process table change between selecting a
+        #: candidate and signalling it — the pid-reuse window. Production passes
+        #: neither and gets `_ps`.
         self._rows = rows
         self._kill = kill or os.kill
         self._argv_reader = argv_of
         self.now = time.time() if now is None else now
 
     # -- process table ----------------------------------------------------------
+
+    def _snapshot(self) -> list[tuple[int, int, str]]:
+        """A fresh read of the process table, honouring an injected source."""
+        if self._rows is None:
+            return self._ps()
+        if callable(self._rows):
+            return list(self._rows())
+        return list(self._rows)
 
     @staticmethod
     def _ps() -> list[tuple[int, int, str]]:
@@ -366,7 +383,7 @@ class OrphanSweeper:
                     continue
                 match = cls._TMUX_SOCKET_FLAG.search(argv)
                 if match and SocketReaper.ours(match.group(1)):
-                    shells.setdefault(match.group(1), []).append((pid, age))
+                    shells.setdefault(match.group(1), []).append((pid, age, argv))
                 continue
             match = cls._SOCKET_FLAG.search(argv)
             name = match.group(1) if match else None
@@ -375,13 +392,21 @@ class OrphanSweeper:
                 name = PurePosixPath(by_path.group(1)).name if by_path else None
             if name is None or not SocketReaper.ours(name):
                 continue
-            # A client attaches. A server keeps its start argv, and the process
-            # that merely STARTS one shares that argv but exits in milliseconds,
-            # which the age floors exclude.
+            # Only a DETACHED `new-session -d` is a server. `tmux -L X new-session
+            # -A -s work` is a client that happens not to say "attach", and calling
+            # it a server let `reap` kill a live client and its panes. Everything
+            # unrecognised falls to `clients`, which is the protective side: a
+            # misread client spares a server, a misread server kills one.
+            #
+            # A server retains the argv of whatever client first started it, so if
+            # that was an attaching form the server reads as a client too — again
+            # erring toward keeping it.
             if "attach" in argv:
                 clients.setdefault(name, []).append(pid)
+            elif "new-session" in argv and cls._DETACHED_FLAG.search(argv):
+                servers.setdefault(name, []).append((pid, age, argv))
             else:
-                servers.setdefault(name, []).append((pid, age))
+                clients.setdefault(name, []).append(pid)
         return servers, clients, shells
 
     # -- sweep ------------------------------------------------------------------
@@ -397,7 +422,7 @@ class OrphanSweeper:
         no directory to be scoped wrongly.
         """
         protected = set(keep or ())
-        rows = self._rows if self._rows is not None else self._ps()
+        rows = self._snapshot()
         servers, clients, shells = self.classify(rows)
 
         doomed: list[tuple[str, int]] = []
@@ -411,17 +436,17 @@ class OrphanSweeper:
                 # table, so this should be impossible; treat the contradiction as
                 # unknown and keep everything rather than act on a confused read.
                 continue
-            for pid, age in entries:
+            for pid, age, argv in entries:
                 if age >= self.SHELL_MIN_AGE_SECONDS:
-                    doomed.append((name, pid))
+                    doomed.append((name, pid, argv))
 
         doomed = doomed[: self.MAX_KILLS]
         result = {
             "servers": [],
-            "shells": [pid for _n, pid in doomed],
-            "sockets": sorted({name for name, _pid in doomed}),
+            "shells": [pid for _n, pid, _a in doomed],
+            "sockets": sorted({name for name, _pid, _a in doomed}),
             "applied": apply,
-            "killed": self._terminate([pid for _n, pid in doomed], rows) if apply else [],
+            "killed": self._terminate([(pid, argv) for _n, pid, argv in doomed]) if apply else [],
         }
         return result
 
@@ -443,10 +468,21 @@ class OrphanSweeper:
         if probe.returncode == 0:
             return True
         blob = ((probe.stderr or "") + (probe.stdout or "")).lower()
-        if "no server running" in blob or "error connecting" in blob:
-            return False
         if "session not found" in blob or "can't find session" in blob:
             return True        # the server answered; it just has no such session
+        if "no server running" in blob:
+            return False       # tmux resolved the name and found nothing there
+        # `error connecting to <path> (<errno>)` — the ERRNO decides, not the
+        # prefix. A deleted socket (the orphan case, verified against a real one)
+        # reports ENOENT here, so the whole branch cannot be dismissed; but
+        # "Permission denied" in the same shape means we were not ALLOWED to look,
+        # which is not evidence that nothing is there. Reading the prefix alone
+        # either way is wrong: taking it all as False let an EACCES authorise a
+        # kill, and taking it all as unknown stopped every real orphan being found.
+        if "error connecting" in blob:
+            if "no such file or directory" in blob or "connection refused" in blob:
+                return False
+            return None
         return None
 
     def confirmed_unreachable(self, names: set[str]) -> set[str]:
@@ -455,7 +491,7 @@ class OrphanSweeper:
 
     def server_names(self) -> set[str]:
         """Socket names with a live server process, from the process table."""
-        rows = self._rows if self._rows is not None else self._ps()
+        rows = self._snapshot()
         servers, _clients, _shells = self.classify(rows)
         return set(servers)
 
@@ -473,19 +509,40 @@ class OrphanSweeper:
         branch somebody has to remember to write.
         """
         protected = set(keep or ())
-        rows = self._rows if self._rows is not None else self._ps()
+        rows = self._snapshot()
         servers, clients, _shells = self.classify(rows)
 
-        found: list[dict] = []
+        return [
+            {"socket": name, "pid": pid, "age_seconds": age}
+            for name, pid, age, _argv in self._orphan_server_rows(
+                unreachable=unreachable, keep=keep)
+        ]
+
+    def _orphan_server_rows(
+        self,
+        *,
+        unreachable: set[str],
+        keep: set[str] | None = None,
+    ) -> list[tuple[str, int, int, str]]:
+        """(socket, pid, age, argv) for the servers that look abandoned.
+
+        The argv is the identity `_terminate` revalidates against, so it has to
+        travel with the candidate rather than be re-derived later.
+        """
+        protected = set(keep or ())
+        rows = self._snapshot()
+        servers, clients, _shells = self.classify(rows)
+
+        found: list[tuple[str, int, int, str]] = []
         for name, entries in sorted(servers.items()):
             if name in protected or name not in unreachable:
                 continue
             if clients.get(name):
                 continue        # a client holds it: it may still be on a screen
-            for pid, age in entries:
+            for pid, age, argv in entries:
                 if age < self.SERVER_MIN_AGE_SECONDS:
                     continue
-                found.append({"socket": name, "pid": pid, "age_seconds": age})
+                found.append((name, pid, age, argv))
         return found
 
     def reap_servers(
@@ -501,32 +558,40 @@ class OrphanSweeper:
         take down live panes, and "unreachable" is only ever true of the namespace
         we probed. A person reading `verify` decides; this carries it out.
         """
-        found = self.orphan_servers(unreachable=unreachable, keep=keep)
-        pids = [entry["pid"] for entry in found][: self.MAX_KILLS]
-        rows = self._rows if self._rows is not None else self._ps()
+        found = self._orphan_server_rows(unreachable=unreachable, keep=keep)[: self.MAX_KILLS]
         return {
-            "servers": pids,
+            "servers": [pid for _n, pid, _age, _a in found],
             "shells": [],
-            "sockets": sorted({entry["socket"] for entry in found}),
+            "sockets": sorted({name for name, _p, _age, _a in found}),
             "applied": apply,
-            "killed": self._terminate(pids, rows) if apply else [],
+            "killed": self._terminate([(pid, argv) for _n, pid, _age, argv in found]) if apply else [],
         }
 
     # -- killing ----------------------------------------------------------------
 
-    def _terminate(self, pids: list[int], rows: list[tuple[int, int, str]]) -> list[int]:
-        """SIGTERM, grace, then SIGKILL — re-checking IDENTITY before escalating.
+    def _terminate(self, candidates: list[tuple[int, str]]) -> list[int]:
+        """SIGTERM, grace, then SIGKILL — re-checking IDENTITY before BOTH signals.
 
-        `kill(pid, 0)` proves only that the NUMBER is live. Between the SIGTERM and
-        the escalation the process can exit and the kernel can hand its pid to
-        something new, so liveness alone would SIGKILL an innocent stranger. The
-        argv we matched IS the identity: a survivor is only escalated when its pid
-        still carries the same argv. An argv we cannot read is unknown, and unknown
-        does not authorise a SIGKILL.
+        `kill(pid, 0)` proves only that the NUMBER is live. A pid can be recycled
+        at two different moments, and both needed closing:
+
+        Before the SIGTERM, because the gap between selecting a candidate and
+        signalling it is not small on the server path — `confirmed_unreachable`
+        runs a tmux probe per name, each with its own timeout, all inside that
+        window. So the table is re-read here and a pid whose argv has changed is
+        dropped rather than signalled.
+
+        Before the SIGKILL, because the grace window is another such gap.
+
+        The argv we matched IS the identity. An argv we cannot read is unknown, and
+        unknown authorises no signal at all.
         """
-        was = {pid: argv for pid, _age, argv in rows}
+        was = dict(candidates)
+        fresh = {pid: argv for pid, _age, argv in self._snapshot()}
         killed: list[int] = []
-        for pid in pids:
+        for pid, expected in candidates:
+            if fresh.get(pid) != expected:
+                continue        # exited, or the pid now belongs to something else
             try:
                 self._kill(pid, signal.SIGTERM)
                 killed.append(pid)
@@ -558,15 +623,3 @@ class OrphanSweeper:
         except (OSError, subprocess.SubprocessError):
             return None
         return probe.stdout.strip() or None
-        time.sleep(self.TERM_GRACE_SECONDS)
-        now = {pid: argv for pid, _age, argv in (self._rows if self._rows is not None else self._ps())}
-        for pid in killed:
-            if pid not in now:
-                continue            # gone: SIGTERM was enough
-            if now[pid] != was.get(pid):
-                continue            # pid reused by something else — not ours to kill
-            try:
-                self._kill(pid, signal.SIGKILL)
-            except OSError:
-                continue
-        return killed

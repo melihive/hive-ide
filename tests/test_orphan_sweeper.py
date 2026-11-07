@@ -343,3 +343,126 @@ def test_an_unreadable_argv_is_not_escalated_either():
     result, kills = sweep([shell(101, 7200)], survive={101}, argv_of=lambda pid: None)
 
     assert (101, signal.SIGKILL) not in kills.sent
+
+
+# -- the third review round -----------------------------------------------------
+
+
+def test_an_attached_new_session_client_is_not_mistaken_for_a_server():
+    """`tmux -L X new-session -A -s work` ATTACHES; it just never says "attach".
+
+    Classified as a server it became a reap candidate, so `reap --apply` could
+    kill a live client and the panes the user was looking at. Only a DETACHED
+    `new-session -d` is a server; everything unrecognised falls to the protective
+    side.
+    """
+    rows = [(99, 86400 * 9, f"tmux -L {SOCKET} new-session -A -s work")]
+
+    servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert servers == {}, "an attaching client was classified as a server"
+    assert list(clients) == [SOCKET]
+
+    result, kills = reap(rows, unreachable=[SOCKET])
+    assert result["servers"] == []
+    assert kills.sent == []
+
+
+def test_a_detached_new_session_is_still_recognised_as_a_server():
+    """The other direction — or the fix would spare every orphan there is."""
+    servers, clients, _shells = OrphanSweeper.classify([server(99, 7200)])
+
+    assert list(servers) == [SOCKET]
+    assert clients == {}
+
+
+def test_permission_denied_is_unknown_not_proof_of_no_server(monkeypatch):
+    """A socket we are not ALLOWED to reach is not a socket with nothing behind it.
+
+    `error connecting … (Permission denied)` was read as a positive "no server",
+    so an EACCES authorised killing a live server. Only tmux's own "no server
+    running" is proof; everything else is unknown, and unknown protects.
+    """
+    from hive_ide import socket_gc
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = "error connecting to /tmp/tmux-1000/x (Permission denied)"
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _Result())
+    assert OrphanSweeper.server_answers(SOCKET) is None, (
+        "a permission error was taken as proof that no server is there"
+    )
+
+    class _NoServer(_Result):
+        stderr = "no server running on /tmp/tmux-1000/x"
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _NoServer())
+    assert OrphanSweeper.server_answers(SOCKET) is False
+
+    # The ORPHAN case, and the reason the `error connecting` branch cannot simply
+    # be dismissed as unknown: a deleted socket reports ENOENT in exactly the same
+    # shape as the permission error above. Verified against a real orphan.
+    class _Deleted(_Result):
+        stderr = "error connecting to /tmp/tmux-1000/x (No such file or directory)"
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _Deleted())
+    assert OrphanSweeper.server_answers(SOCKET) is False, (
+        "a deleted socket must be positively unreachable, or no orphan is ever found"
+    )
+
+    class _Refused(_Result):
+        stderr = "error connecting to /tmp/tmux-1000/x (Connection refused)"
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _Refused())
+    assert OrphanSweeper.server_answers(SOCKET) is False
+
+    class _Weird(_Result):
+        stderr = "error connecting to /tmp/tmux-1000/x (Too many open files)"
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _Weird())
+    assert OrphanSweeper.server_answers(SOCKET) is None, (
+        "an errno we do not recognise is unknown, not proof of absence"
+    )
+
+    class _Alive(_Result):
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _Alive())
+    assert OrphanSweeper.server_answers(SOCKET) is True
+
+
+def test_an_unknown_probe_never_reaches_the_confirmed_unreachable_set(monkeypatch):
+    """The three states end up as two outcomes, and only one of them can kill."""
+    from hive_ide import socket_gc
+
+    answers = {"a": True, "b": False, "c": None}
+    monkeypatch.setattr(OrphanSweeper, "server_answers",
+                        staticmethod(lambda name: answers[name]))
+    assert OrphanSweeper().confirmed_unreachable({"a", "b", "c"}) == {"b"}
+
+
+def test_a_pid_reused_before_the_sigterm_is_never_signalled():
+    """The window between SELECTING a candidate and signalling it.
+
+    On the server path that window holds a tmux probe per socket, each with its
+    own timeout, so it is seconds wide rather than microseconds. A callable row
+    source lets the table change inside it: the pid is recycled before the
+    SIGTERM, and nothing may be sent to it at all.
+    """
+    rows = [shell(101, 7200)]
+    reused = [(101, 5, "/usr/bin/some-innocent-stranger --unrelated")]
+    snapshots = iter([rows, reused, reused, reused])
+
+    kills = _Kills()
+    sweeper = OrphanSweeper(rows=lambda: next(snapshots, reused), kill=kills)
+    sweeper.TERM_GRACE_SECONDS = 0.0
+
+    result = sweeper.sweep(apply=True)
+
+    assert result["shells"] == [101], "the candidate should still be selected"
+    assert kills.sent == [], (
+        "signalled a pid that no longer carries the argv it was selected on"
+    )
+    assert result["killed"] == []
