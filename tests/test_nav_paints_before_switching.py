@@ -183,3 +183,66 @@ def test_a_slow_repaint_does_not_delay_the_switch(monkeypatch):
         f"navigation waited {elapsed:.1f}s on the repaint; the budget is not "
         "bounding it and a stalled checkout will hang a keypress"
     )
+
+
+def test_the_prepaint_deadline_survives_the_renderers_own_handlers(tmp_path, monkeypatch):
+    """Codex review finding, round 2.
+
+    The first version raised `TimeoutError` from the alarm — and `TimeoutError`
+    is a subclass of `OSError`, which the checkout probes catch, and which the
+    sidebar provider wrapper catches as `Exception`. The deadline was therefore
+    swallowed INSIDE the renderer, which consumed the one-shot timer and let
+    every probe after it run unbounded: a 50ms budget measured 351ms.
+
+    So this drives the real renderer with a stalled git probe, rather than
+    mocking the whole paint away as the test above does.
+    """
+    import signal
+    import time as _time
+
+    from hive_ide import __version__ as _version
+    from hive_ide import git_status
+    from hive_ide.drivers import bundled_drivers
+    from hive_ide.nav import _PrepaintOverBudget
+    from hive_ide.sidebar import IdeSidebar
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    driver = bundled_drivers()["term"]
+    record = store.create_session(
+        name="ALPHA",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": _version},
+        driver=driver.resolve(
+            name="ALPHA", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+
+    def stalled_git(*_args, **_kwargs):
+        _time.sleep(5)
+        raise AssertionError("the probe should have been interrupted")
+
+    monkeypatch.setattr(git_status.subprocess, "run", stalled_git)
+
+    def _over_budget(_signum, _stack):
+        raise _PrepaintOverBudget()
+
+    previous = signal.signal(signal.SIGALRM, _over_budget)
+    signal.setitimer(signal.ITIMER_REAL, 0.05)
+    started = _time.monotonic()
+    try:
+        with pytest.raises(_PrepaintOverBudget):
+            IdeSidebar.canonical_frame(
+                store.home, store.workspace_key, record["id"], 80, 24
+            )
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    elapsed = _time.monotonic() - started
+
+    assert elapsed < 1.0, (
+        f"the renderer absorbed the deadline and ran for {elapsed:.2f}s; a "
+        "stalled checkout will hang a keypress"
+    )

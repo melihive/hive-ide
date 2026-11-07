@@ -19,6 +19,19 @@ from pathlib import Path
 from .state_compat import StateIO
 
 
+class _PrepaintOverBudget(BaseException):
+    """The pre-switch repaint ran past its budget.
+
+    Deliberately NOT an `Exception`. `TimeoutError` is a subclass of `OSError`,
+    and the renderer's own handlers catch `OSError` (the git probes) and
+    `Exception` (the sidebar provider wrapper) — so a `TimeoutError` raised from
+    the alarm was swallowed inside the renderer, which consumed the one-shot
+    timer and let every probe after it run unbounded. Measured: a 50ms budget
+    still took 351ms. Deriving from `BaseException` means nothing on the way out
+    catches it by accident.
+    """
+
+
 class IdeNav:
     """One keypress: pick the neighbouring ide session and select its window."""
 
@@ -176,12 +189,14 @@ class IdeNav:
             from .wake import IdeWake
 
             def _over_budget(_signum, _stack):
-                raise TimeoutError("sidebar prepaint over budget")
+                raise _PrepaintOverBudget()
 
             previous = signal.signal(signal.SIGALRM, _over_budget)
             signal.setitimer(signal.ITIMER_REAL, IdeNav.PREPAINT_BUDGET_SECONDS)
             try:
                 IdeWake.wake(skill_dir, repo, target_session_id, socket)
+            except _PrepaintOverBudget:
+                pass
             finally:
                 signal.setitimer(signal.ITIMER_REAL, 0)
                 signal.signal(signal.SIGALRM, previous)

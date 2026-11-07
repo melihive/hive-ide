@@ -3076,13 +3076,19 @@ class Frame:
                 f"run-shell -b {shlex.quote(elect + '; ' + relayout_window)}",
             ]
         )
+        # Relayout after the detach election too, not just the attach one. A
+        # departing narrow controller can leave the window it zoomed for mobile
+        # still zoomed: tmux preserves a zoom across an automatic resize, so
+        # promoting the wide survivor changes the geometry without restoring its
+        # columns. The election has to run first either way — relayout reads the
+        # controller's size.
         self.tmux(
             [
                 "set-hook",
                 "-t",
                 self.target,
                 "client-detached",
-                f"run-shell -b {shlex.quote(elect)}",
+                f"run-shell -b {shlex.quote(elect + '; ' + relayout_window)}",
             ]
         )
         for redundant_hook in ("client-active", "client-focus-in"):
@@ -3274,8 +3280,21 @@ class Frame:
         Read-then-write cannot be made atomic here, but it can be made
         self-correcting, which needs no lock and cannot deadlock a frame.
 
+        Retrying alone was not enough: with three stale attempts each losing its
+        race, the election could still exit leaving two controllers and nothing
+        scheduled to repair them. So elections are SERIALIZED on the workspace
+        lock -- the same cross-process lock state mutations take -- and the
+        retry loop stays only as a backstop for a client arriving mid-election.
+        Elections are a handful of tmux calls and run from a background hook, so
+        waiting for the lock costs nothing anyone can see.
+
         Returns the elected client, or None when nothing is attached.
         """
+        with self.store.mutation_lock():
+            return self._elect_controller_locked()
+
+    def _elect_controller_locked(self) -> str | None:
+        """`elect_controller`'s body, with the workspace lock already held."""
         controller: str | None = None
         for _ in range(self.ELECTION_ATTEMPTS):
             clients = self.attached_clients()
