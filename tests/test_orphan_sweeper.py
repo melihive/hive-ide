@@ -1016,7 +1016,10 @@ def test_the_socket_root_reader_reads_THAT_processs_environment_not_ours(tmp_pat
         assert marker.exists(), "the child never got as far as running"
 
         theirs = OrphanSweeper.socket_root_of(child.pid)
-        assert theirs == os.path.realpath(str(tmp_path))
+        # The answer is the directory QUALIFIED by the filesystem it is on, so it
+        # ends with the child's path rather than being it.
+        assert theirs is not None
+        assert theirs.endswith("\0" + os.path.realpath(str(tmp_path)))
         assert theirs != OrphanSweeper.our_socket_root(), (
             "read our own environment instead of the child's"
         )
@@ -1541,3 +1544,104 @@ def test_a_repeated_JOINED_socket_flag_protects_the_socket_tmux_is_on():
     result, kills = sweep(rows)
     assert result["shells"] == [], "killed the sidebars of a live frame"
     assert kills.sent == []
+
+
+# -- the fifteenth review round -------------------------------------------------
+
+
+def test_two_different_socket_flags_name_nothing_and_protect_both():
+    """A pane command's own `-L` is in the same flattened line as tmux's.
+
+    `tmux -LA new-session -A -s work worker.py -LB` attaches to A, so reading the
+    LAST flag protects B and leaves A — the socket a human is actually looking
+    at — unprotected. Reading the FIRST gets the opposite case wrong. Two
+    different values is a line we cannot read: it names nothing, and both are
+    protected.
+    """
+    other = "hive-ide-beefcafe"
+    rows = [
+        server(99, 86400 * 9),
+        (150, 86400 * 9,
+         f"tmux -L{SOCKET} new-session -A -s work worker.py -L{other}"),
+    ]
+
+    _servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert 150 in clients.get(SOCKET, []), "the attached client protected the wrong socket"
+    assert 150 in clients.get(other, []), "and should protect the other name too"
+
+    result, kills = reap(rows, unreachable={SOCKET, other})
+    assert result["servers"] == [], "reaped a server with a client attached to it"
+    assert kills.sent == []
+
+
+def test_two_different_socket_flags_are_never_a_candidate():
+    """Including when nothing else is on the socket: a name we could not read is
+    not a name we may kill on."""
+    other = "hive-ide-beefcafe"
+    rows = [(99, 86400 * 9,
+             f"tmux -L{SOCKET} -L{other} new-session -d -s x -n N")]
+
+    servers, _clients, _shells = OrphanSweeper.classify(rows)
+    assert servers == {}, "an unreadable line produced a kill candidate"
+
+    result, kills = reap(rows, unreachable={SOCKET, other})
+    assert result["servers"] == []
+    assert kills.sent == []
+
+
+def test_the_same_path_in_a_different_mount_namespace_is_a_different_directory():
+    """`/tmp` is not one directory.
+
+    A process in a container, or under a unit with `PrivateTmp`, has the same
+    uid and the same `TMUX_TMPDIR` string and a filesystem we cannot see into.
+    Comparing the strings says "we looked where its socket is" about a directory
+    that is not the one we probed.
+    """
+    ours = OrphanSweeper.our_socket_root()
+    rows = [server(99, 86400 * 9)]
+
+    elsewhere = f"mnt:999999999\0{OrphanSweeper.resolve_root(None)}"
+    assert elsewhere != ours, "the fixture must differ from our own namespace"
+
+    result, kills = reap(rows, unreachable={SOCKET},
+                         socket_root=lambda pid: elsewhere)
+
+    assert result["servers"] == [], "killed a server in another filesystem"
+    assert kills.sent == []
+
+
+@pytest.mark.skipif(not Path("/proc/self/ns/mnt").exists(),
+                    reason="no mount namespaces to read")
+def test_our_own_namespace_is_readable_and_ours():
+    assert OrphanSweeper.mount_namespace_of(os.getpid()) is not None
+    assert OrphanSweeper.mount_namespace_of(2 ** 22 + 7) is None
+    root = OrphanSweeper.our_socket_root()
+    assert root is not None and root.startswith("mnt:")
+
+
+def test_a_shell_merely_CARRYING_the_loop_text_is_not_the_loop():
+    """A diagnostic that prints the keep-alive as quoted data holds every
+    substring the classifier matched on. The loop has to BE the shell's command,
+    so the command must start the way `Frame` builds it — an `echo` wrapper
+    starts with `echo`."""
+    carrier = f'bash -c echo "{SHELL_ARGV.format(socket=SOCKET)}"; sleep 100000'
+    rows = [(101, 7200, carrier)]
+
+    _servers, _clients, shells = OrphanSweeper.classify(rows)
+    assert shells == {}, "a shell that merely quotes the loop was condemned"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == []
+    assert kills.sent == []
+
+
+def test_the_real_keep_alive_still_matches_the_required_shape():
+    """And the falsifying half, against the real builder rather than a copy."""
+    from hive_ide.frame import Frame
+
+    built = Frame._interactive_command(
+        f"while :; do if {Frame._sidebar_visible_probe()}; then x; sleep 1; "
+        "else sleep 1; fi; done")
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(built) is not None, (
+        "the shape check no longer matches what Frame builds"
+    )

@@ -343,6 +343,12 @@ class OrphanSweeper:
     )
     #: And it must actually RUN the sidebar, as a module.
     _KEEPALIVE_MODULE = "-m hive_ide.sidebar"
+    #: And the loop has to BE the shell's command, not text the shell is carrying.
+    #: A diagnostic that prints the whole loop as quoted data and then waits holds
+    #: every substring above, and was condemned on that alone. `Frame` builds the
+    #: command as `unset <names>; while :; do if <probe>; ...`, so the command
+    #: must START that way — an `echo` wrapper starts with `echo`.
+    _KEEPALIVE_SHAPE = re.compile(r"\Aunset [A-Za-z0-9_ ]+; while :; do if ")
 
     def __init__(
         self,
@@ -353,6 +359,7 @@ class OrphanSweeper:
         kill: Callable[[int, int], None] | None = None,
         answers: Callable[[str], bool | None] | None = None,
         socket_root: Callable[[int], str | None] | None = None,
+        our_root: Callable[[], str | None] | None = None,
         cmdline: Callable[[int], list[str] | None] | None = None,
         now: float | None = None,
     ):
@@ -369,6 +376,10 @@ class OrphanSweeper:
         #: Where a given process's sockets live. Not derivable from `rows` — it
         #: comes from the process's own environment — so it is its own seam.
         self._socket_root = socket_root or self.socket_root_of
+        #: Our own side of that comparison, injectable for the same reason: a
+        #: suite that pinned only the other side would pass on a host with no
+        #: `/proc` by protecting everything, which observes nothing.
+        self._our_root = our_root or self.our_socket_root
         #: The lossless argv, for the same reason: it is read per process and is
         #: not derivable from the `ps` rows that `rows` injects.
         self._cmdline = cmdline or self.cmdline_of
@@ -500,10 +511,27 @@ class OrphanSweeper:
         except OSError:
             return value or "/tmp"
 
+    @staticmethod
+    def mount_namespace_of(pid: int) -> str | None:
+        """Which filesystem a path NAMES for this process, or None if unreadable.
+
+        `/tmp` is not one directory. A process in a container, or under a systemd
+        unit with `PrivateTmp`, has its own — same uid, same string, different
+        filesystem. Comparing the two `TMUX_TMPDIR` strings then says "we looked
+        where its socket is" about a directory we cannot even see into.
+        """
+        try:
+            return f"mnt:{os.stat(f'/proc/{pid}/ns/mnt').st_ino}"
+        except OSError:
+            return None
+
     @classmethod
-    def our_socket_root(cls) -> str:
-        """The directory OUR probes look in."""
-        return cls.resolve_root(os.environ.get("TMUX_TMPDIR"))
+    def our_socket_root(cls) -> str | None:
+        """The directory OUR probes look in, qualified by the filesystem it is on."""
+        namespace = cls.mount_namespace_of(os.getpid())
+        if namespace is None:
+            return None
+        return f"{namespace}\0{cls.resolve_root(os.environ.get('TMUX_TMPDIR'))}"
 
     @staticmethod
     def socket_root_of(pid: int) -> str | None:
@@ -519,11 +547,15 @@ class OrphanSweeper:
         None — which protects, and leaves the server reap inert rather than
         guessing. The shell sweep is unaffected either way; see `sweep`.
         """
+        namespace = OrphanSweeper.mount_namespace_of(pid)
+        if namespace is None:
+            return None
         try:
             raw = Path(f"/proc/{pid}/environ").read_bytes()
         except OSError:
             return None
-        return OrphanSweeper.root_from_environ(raw)
+        root = OrphanSweeper.root_from_environ(raw)
+        return None if root is None else f"{namespace}\0{root}"
 
     @staticmethod
     def root_from_environ(raw: bytes) -> str | None:
@@ -568,7 +600,8 @@ class OrphanSweeper:
         agree it lives where we looked. Unreadable is not agreement.
         """
         theirs = self._socket_root(pid)
-        return theirs is not None and theirs == self.our_socket_root()
+        ours = self._our_root()
+        return theirs is not None and ours is not None and theirs == ours
 
     def _really_names_this_socket(self, pid: int, name: str) -> bool:
         """Does this process's REAL argv say it is on exactly this socket?
@@ -627,7 +660,10 @@ class OrphanSweeper:
             if executable != "tmux":
                 if executable not in cls._SHELL_COMMANDS:
                     continue        # not a shell: cannot be the keep-alive loop
-                if (cls._KEEPALIVE_SIGNATURE not in argv
+                command = argv.split(None, 2)
+                if (len(command) < 3 or command[1] != "-c"
+                        or cls._KEEPALIVE_SHAPE.match(command[2]) is None
+                        or cls._KEEPALIVE_SIGNATURE not in argv
                         or cls._KEEPALIVE_MODULE not in argv):
                     continue        # mentions the sidebar; is not the loop
                 match = cls._TMUX_SOCKET_FLAG.search(argv)
@@ -654,13 +690,22 @@ class OrphanSweeper:
             # anywhere in it may belong to the PANE's command rather than to tmux.
             # `-L` is therefore still what NAMES the socket.
             by_path = cls._SOCKET_PATH_FLAG.search(argv)
-            by_name = cls._SOCKET_FLAG.findall(argv)
-            if by_name:
-                name = by_name[-1]      # tmux takes the LAST, so a search is wrong
-            elif by_path is not None:
+            # Not the first `-L`, and not the last either. tmux takes the last of
+            # its OWN global options, but the pane command's flags are in the same
+            # flattened line — `tmux -LA new-session -A -s work worker.py -LB`
+            # attaches to A, and reading either end of the line gets it wrong one
+            # way or the other. Two different values is simply a line we cannot
+            # read, so it names nothing and both are protected.
+            flag_names = set(cls._SOCKET_FLAG.findall(argv))
+            if len(flag_names) == 1:
+                name = next(iter(flag_names))
+            elif not flag_names and by_path is not None:
                 name = PurePosixPath(by_path.group(1)).name
             else:
                 name = None
+            protects |= {candidate for candidate in flag_names
+                         if cls._SAFE_NAME.match(candidate)
+                         and SocketReaper.ours(candidate)}
             # A `-S` anywhere forfeits CANDIDACY, and so does a name we cannot
             # vouch for. Every reachability probe runs `tmux -L <name>`, which
             # resolves inside the CALLER's socket directory: a healthy detached
