@@ -451,6 +451,16 @@ class OrphanSweeper:
             raw = Path(f"/proc/{pid}/environ").read_bytes()
         except OSError:
             return None
+        return OrphanSweeper.root_from_environ(raw)
+
+    @staticmethod
+    def root_from_environ(raw: bytes) -> str | None:
+        """The same answer, from a block of environ bytes.
+
+        Split out from the read so the three outcomes can be pinned exactly: a
+        read of a live process races its own exec, so a test that reads once to
+        set up and lets the reader read again is testing two different moments.
+        """
         if not raw.strip(b"\0"):
             # An EMPTY read is not "the variable is unset" — every process has
             # some environment. It means we could not see this one's: the kernel
@@ -463,6 +473,13 @@ class OrphanSweeper:
         for item in raw.split(b"\0"):
             if item.startswith(b"TMUX_TMPDIR="):
                 value = item[len(b"TMUX_TMPDIR="):].decode("utf-8", "replace")
+                if value and not value.startswith("/"):
+                    # A RELATIVE root resolves against the working directory of
+                    # the process that used it, which is not ours. Resolving it
+                    # here answers with a directory this server may never have
+                    # seen — and if the answer happens to land on ours, that reads
+                    # as agreement and clears it to be killed.
+                    return None
                 return OrphanSweeper.resolve_root(value)
         return OrphanSweeper.resolve_root(None)
 
@@ -787,9 +804,10 @@ class OrphanSweeper:
     ) -> list[int]:
         """SIGTERM, grace, then SIGKILL — re-checking the candidate before EACH signal.
 
-        Two things can change between choosing a candidate and signalling it, and
-        the gap is not small: `confirm` runs a tmux probe per socket, each with its
-        own ten-second timeout, and the grace window is another such gap.
+        BOTH signals get both checks. Two things can change between choosing a
+        candidate and signalling it, and the gap is not small: `confirm` runs a
+        tmux probe per socket, each with its own ten-second timeout, and the grace
+        window is another such gap.
 
         The SOCKET can come back. A tmux server recreates its file on SIGUSR1, so a
         name that answered "no server" when the list was built may be serving panes
@@ -805,7 +823,7 @@ class OrphanSweeper:
         process-table read, then the signal on the very next line.
         """
         was = {pid: (age, argv) for _n, pid, age, argv in candidates}
-        killed: list[int] = []
+        signalled: list[tuple[str, int]] = []
         for name, pid, age, expected in candidates:
             if confirm is not None and not confirm(name):
                 continue        # it answers again: it is not an orphan any more
@@ -813,17 +831,24 @@ class OrphanSweeper:
                 continue        # exited, or the pid now belongs to something else
             try:
                 self._kill(pid, signal.SIGTERM)
-                killed.append(pid)
+                signalled.append((name, pid))
             except OSError:
                 continue
-        if not killed:
-            return killed
+        if not signalled:
+            return []
         time.sleep(self.TERM_GRACE_SECONDS)
-        for pid in killed:
+        for name, pid in signalled:
             try:
                 self._kill(pid, 0)
             except OSError:
                 continue            # gone: SIGTERM was enough
+            # BOTH checks again, not just identity. A server that ignored the
+            # SIGTERM and recreated its socket during the grace window — or while
+            # the other candidates were being probed — is serving panes again, and
+            # its pid and argv never changed, so identity alone waves it through
+            # to the one signal it cannot refuse.
+            if confirm is not None and not confirm(name):
+                continue
             age, expected = was[pid]
             if not self._unchanged(pid, age, expected):
                 continue            # different process, or unreadable — leave it
@@ -831,4 +856,4 @@ class OrphanSweeper:
                 self._kill(pid, signal.SIGKILL)
             except OSError:
                 continue
-        return killed
+        return [pid for _name, pid in signalled]

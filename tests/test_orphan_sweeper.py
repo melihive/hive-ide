@@ -1011,38 +1011,48 @@ def test_the_socket_root_reader_reads_THAT_processs_environment_not_ours(tmp_pat
         child.wait()
 
 
-@pytest.mark.skipif(not Path("/proc/self/environ").exists(),
-                    reason="no /proc: the reader answers unknown by design")
-def test_an_environ_we_cannot_actually_read_is_unknown_not_the_default(tmp_path):
+def test_an_environ_we_cannot_actually_read_is_unknown_not_the_default():
     """The hole the directory guard would otherwise have.
 
     `/proc/<pid>/environ` serves ZERO BYTES rather than failing when a process's
-    memory is not readable — including the entire window between fork and exec.
-    Finding no `TMUX_TMPDIR=` in that nothing once meant "unset", which resolves
-    to `/tmp` — the default, so it matched our own directory and cleared the
-    process to be killed on the strength of a read that saw nothing.
-
-    This window is reproducible: a freshly spawned child, read before it execs.
+    memory is not readable. Finding no `TMUX_TMPDIR=` in that nothing once meant
+    "unset", which resolves to `/tmp` — the default, so it matched our own
+    directory and cleared the process to be killed on the strength of a read that
+    saw nothing.
     """
-    caught = False
+    assert OrphanSweeper.root_from_environ(b"") is None
+    assert OrphanSweeper.root_from_environ(b"\0\0\0") is None
+
+
+def test_a_genuinely_unset_TMUX_TMPDIR_is_the_default_not_unknown():
+    """The other half: a real environment that simply does not set it. These two
+    must not collapse into one answer, or the guard either protects everything or
+    protects nothing."""
+    assert (OrphanSweeper.root_from_environ(b"PATH=/usr/bin\0HOME=/home/x\0")
+            == os.path.realpath("/tmp"))
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                    reason="no /proc: the reader answers unknown by design")
+def test_the_kernel_really_does_serve_an_empty_environ_before_exec():
+    """And the empty case is not hypothetical — this is where it comes from.
+
+    Observational on purpose: it reads the kernel ONCE per child and only records
+    what came back. Asserting the reader's answer here instead would read a second
+    time, by which point the child has exec'd and a different answer is correct.
+    """
+    empties = 0
     for _attempt in range(20):
-        child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
-        )
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
-            if Path(f"/proc/{child.pid}/environ").read_bytes().strip(b"\0"):
-                continue        # it exec'd before we looked; try again
-            caught = True
-            assert OrphanSweeper.socket_root_of(child.pid) is None, (
-                "an empty environ was reported as the default directory"
-            )
-            break
+            if not Path(f"/proc/{child.pid}/environ").read_bytes().strip(b"\0"):
+                empties += 1
         finally:
             child.kill()
             child.wait()
-    if not caught:
+    if not empties:
         pytest.skip("never observed the pre-exec window on this host")
+    assert empties, "the window the empty-environ rule exists for"
 
 
 # -- the ninth review round -----------------------------------------------------
@@ -1142,3 +1152,87 @@ def test_a_keep_alive_whose_socket_cannot_be_read_cleanly_is_left_alone():
     result, kills = sweep(rows)
     assert result["shells"] == []
     assert kills.sent == []
+
+
+# -- the tenth review round -----------------------------------------------------
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                    reason="no /proc: the reader answers unknown by design")
+def test_a_relative_TMUX_TMPDIR_is_unknown_not_resolved_against_our_cwd(tmp_path):
+    """`TMUX_TMPDIR=.` means "wherever THAT process was", and we are not there.
+
+    Resolving it here answers with a directory the server may never have seen —
+    and when the answer happens to land on ours, that reads as agreement and
+    clears a healthy server to be killed.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         f"import pathlib, time; pathlib.Path({str(tmp_path / 'up')!r}).write_text('x'); "
+         "time.sleep(60)"],
+        cwd=str(tmp_path),
+        env={**os.environ, "TMUX_TMPDIR": "."},
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not (tmp_path / "up").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (tmp_path / "up").exists(), "the child never got as far as running"
+
+        assert OrphanSweeper.socket_root_of(child.pid) is None, (
+            "a relative root was resolved against the reaper's own directory"
+        )
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_an_absolute_root_is_still_read():
+    """The falsifying half: the rule above must reject only what it cannot place."""
+    assert OrphanSweeper.resolve_root("/run/user/1000/tmux") == "/run/user/1000/tmux"
+
+
+def test_a_server_that_recovers_during_the_GRACE_window_is_not_sigkilled():
+    """SIGTERM is refusable; SIGKILL is not.
+
+    A server can ignore the SIGTERM, recreate its socket and start serving panes
+    again inside the grace window — with the same pid and the same argv, so the
+    identity check passes it straight through to the one signal it cannot
+    survive. Reachability has to be asked again here too, not only before the
+    first signal.
+    """
+    rows = [server(99, 86400 * 9)]
+    kills = _Kills(survive={99})
+    answered: list[int] = []
+
+    def answers(name: str) -> bool:
+        answered.append(1)
+        return False if len(answered) == 1 else True   # back up after the SIGTERM
+
+    sweeper = OrphanSweeper(
+        rows=rows, kill=kills, answers=answers,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+    sweeper.TERM_GRACE_SECONDS = 0.0
+
+    sweeper.reap_servers(unreachable={SOCKET}, apply=True)
+
+    assert (99, signal.SIGTERM) in kills.sent, "it was an orphan when we signalled"
+    assert (99, signal.SIGKILL) not in kills.sent, (
+        "SIGKILLed a server that was serving panes again by the end of the grace"
+    )
+
+
+def test_a_server_still_unreachable_after_the_grace_IS_sigkilled():
+    """And the falsifying half, or the recheck above would simply disable
+    escalation."""
+    rows = [server(99, 86400 * 9)]
+    kills = _Kills(survive={99})
+
+    sweeper = OrphanSweeper(
+        rows=rows, kill=kills, answers=lambda name: False,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+    sweeper.TERM_GRACE_SECONDS = 0.0
+
+    sweeper.reap_servers(unreachable={SOCKET}, apply=True)
+
+    assert (99, signal.SIGKILL) in kills.sent
