@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
+import time
 
 import pytest
 
@@ -705,3 +707,62 @@ def test_a_server_that_recovers_before_the_kill_is_spared():
     listed, _ = reap([server(99, 86400 * 9)], unreachable=[SOCKET],
                      answers=lambda name: True, apply=False)
     assert listed["servers"] == [99]
+
+
+# -- opening a frame must never kill anything -----------------------------------
+
+
+def test_opening_a_frame_sweeps_socket_FILES_and_signals_nothing(tmp_path, monkeypatch):
+    """The whole point of the correction.
+
+    An earlier version reaped keep-alive shells from inside `open`. That turned
+    opening a frame into a process killer running on a heuristic, which is a far
+    bigger thing than clearing junk and is not what the open path is for. Opening
+    a frame now removes dead socket FILES and stops; anything with a pid waits for
+    `hive-ide reap --apply` and a person.
+
+    Pinned by signalling, not by reading the source: `os.kill` is replaced, so any
+    route from `open` to a signal — now or added later — fails this.
+    """
+    from hive_ide import cli, socket_gc
+
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(socket_gc.os, "kill",
+                        lambda pid, sig: signalled.append((pid, sig)))
+
+    # A real orphan in the table, old enough and with no server, so the former
+    # automatic path would certainly have selected it.
+    rows = [shell(101, 86400)]
+    monkeypatch.setattr(OrphanSweeper, "_ps", staticmethod(lambda: list(rows)))
+    monkeypatch.setattr(OrphanSweeper, "server_answers", staticmethod(lambda name: False))
+
+    socket_dir = tmp_path / "tmux-test"
+    socket_dir.mkdir()
+    # A REAL AF_UNIX socket file with nothing listening — a regular file is not
+    # something the reaper can judge, so touching one would make the second
+    # assertion below vacuous.
+    stale = socket_dir / "hive-ide-stale"
+    dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dead.bind(str(stale))
+    dead.close()
+    # `SocketReaper.MIN_AGE_SECONDS` is an hour, so a socket created just now is
+    # correctly left alone; backdate it or the sweep half of this test asserts
+    # nothing.
+    old_enough = time.time() - 2 * 3600
+    os.utime(stale, (old_enough, old_enough))
+
+    class _Frame:
+        @staticmethod
+        def socket_path():
+            return str(socket_dir / "hive-ide-current")
+
+    cli._reap_dead_sockets(_Frame(), keep=set())
+
+    assert signalled == [], (
+        f"opening a frame signalled {signalled} — the open path must clear socket "
+        "files only, never processes"
+    )
+    # And it really did do its own job, so this is not passing by doing nothing.
+    assert not (socket_dir / "hive-ide-stale").exists(), (
+        "the dead socket FILE should still be swept on open"
+    )

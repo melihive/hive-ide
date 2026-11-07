@@ -235,18 +235,22 @@ class OrphanSweeper:
     such shells, about 60 wasted forks a second, invisible to every existing
     check.
 
-    Two populations, and only ONE of them is ever killed automatically, because
-    only one of them has self-contained evidence:
+    NOTHING here runs automatically. Opening a frame sweeps dead socket FILES and
+    stops; every method below is reached only from `hive-ide reap`, because
+    killing a process may take panes somebody is looking at, and that is a
+    person's decision rather than a side effect of opening a frame.
+
+    Two populations, judged differently, because the evidence differs:
 
     **A keep-alive shell whose server PROCESS is absent from the whole table** is
-    unambiguously dead — `sweep` reaps it. It has no pane to paint and no server
+    the unambiguous one — `sweep` selects it. It has no pane to paint and no server
     to ask; nothing it does can ever reach a screen again. The evidence needs no
     socket probe, so it cannot be confused by a socket directory we did not look
     in: if a server for that name existed anywhere, under any `TMUX_TMPDIR`, it
     would be in the same `ps` snapshot and the shell would be spared. Only a
     short age floor applies, so a frame starting up is never caught mid-launch.
 
-    **A server that is merely unreachable is NEVER killed automatically.** It
+    **A server that is merely unreachable is the dangerous one.** It
     still owns live panes, and a client that attached BEFORE its socket file was
     deleted keeps its open descriptor and stays connected — so an unreachable
     server can still be on someone's screen. Worse, "unreachable" is only ever
@@ -260,8 +264,7 @@ class OrphanSweeper:
     is three-state throughout — a probe that could not conclude protects the
     server, because the negative branch here is the one that destroys.
 
-    Bounded, fail-open, and every kill independent: this runs inside `open` and
-    must never make opening a frame slow, let alone fail it.
+    Bounded, fail-open, and every kill independent.
     """
 
     #: Never race a frame that is starting: its shells exist before its server
