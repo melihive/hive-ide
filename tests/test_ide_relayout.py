@@ -220,7 +220,7 @@ def test_resize_hook_snap_uses_latest_client_without_scanning_windows(tmp_path, 
     def fake_tmux(_socket, args):
         calls.append(args)
         if args[:2] == ["list-clients", "-F"]:
-            return "100\t254\t69"
+            return "100\t254\t69\tattached,focused"
         if args[:2] == ["show-options", "-gv"] and args[-1] == "status":
             return "off"
         if args[:2] == ["list-windows", "-a"]:
@@ -272,7 +272,7 @@ def test_manual_snap_without_hook_geometry_can_use_latest_client_geometry(tmp_pa
         if args[:2] == ["show-options", "-g"] and args[-1] == "status-format":
             return "status-format[0] default"
         if args[:2] == ["list-clients", "-F"]:
-            return "100\t220\t65"
+            return "100\t220\t65\tattached,focused"
         if args[:2] == ["list-windows", "-a"]:
             return "@0\t220\t65"
         if args[-1] == "#{window_width}\t#{window_height}":
@@ -322,12 +322,14 @@ def test_debug_trace_records_relayout_geometry_decision(tmp_path, monkeypatch):
 
     def fake_tmux(_socket, args):
         if args[:2] == ["list-clients", "-F"]:
-            if args[-1].endswith("#{client_session}"):
+            # Both client formats now end with `#{client_flags}`, so the tty is
+            # what tells the debug payload apart from the geometry lookup.
+            if "#{client_tty}" in args[-1]:
                 return (
-                    "100\t254\t67\t/dev/pts/1\thive-ide\n"
-                    "200\t58\t24\t/dev/pts/2\thive-ide"
+                    "100\t254\t67\t/dev/pts/1\thive-ide\tattached\n"
+                    "200\t58\t24\t/dev/pts/2\thive-ide\tattached"
                 )
-            return "100\t254\t67\n200\t58\t24"
+            return "100\t254\t67\tattached\n200\t58\t24\tattached"
         if args[:2] == ["list-panes", "-t"]:
             return "%1\t0\tsidebar\t24\t67\t0\t66\t1\tpython3"
         if args[:2] == ["list-windows", "-a"]:

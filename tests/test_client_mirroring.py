@@ -145,11 +145,27 @@ def test_a_second_open_mirrors_the_first_client_instead_of_detaching_it(tmp_path
             "a second attach left only one client: mirroring has regressed to the "
             "`-d` eviction it replaced"
         )
-        controllers = [c for c in rows if c["controller"]]
-        assert len(controllers) == 1, f"expected exactly one controller, got {rows}"
-        assert controllers[0]["size"] == "160x48", (
-            "the newest screen must control the frame"
+
+        # Converged, not instantaneous. The elections run from `run-shell -b`
+        # hooks, and between `open` demoting the incumbent and the new client
+        # attaching there is a moment when every attached client is a mirror --
+        # where the election correctly promotes the survivor, as it must after a
+        # detach. The new client's own election then settles it.
+        settled = _wait_for(
+            lambda: (
+                [c for c in frame.attached_clients() if c["controller"]]
+                if sum(1 for c in frame.attached_clients() if c["controller"]) == 1
+                else None
+            ),
+            timeout=20.0,
         )
+        assert settled, (
+            f"never settled on exactly one controller: {frame.attached_clients()!r}"
+        )
+        assert settled[0]["size"] == "160x48", (
+            f"the newest screen must control the frame: {frame.attached_clients()!r}"
+        )
+        assert len(frame.attached_clients()) == 2, "a client was dropped while settling"
     finally:
         _close(clients)
         frame.tmux(["kill-server"])
