@@ -744,13 +744,15 @@ class OrphanSweeper:
                     doomed.append((name, pid, age, argv))
 
         doomed = doomed[: self.MAX_KILLS]
-        killed = self._terminate(doomed, confirm=self._still_unreachable) if apply else []
+        killed, spared = (self._terminate(doomed, confirm=self._still_unreachable)
+                          if apply else ([], []))
         return {
             "servers": [],
             "shells": [pid for _n, pid, _age, _a in doomed],
             "sockets": sorted({name for name, _pid, _age, _a in doomed}),
             "applied": apply,
             "killed": killed,
+            "spared": spared,
         }
 
     @staticmethod
@@ -876,13 +878,15 @@ class OrphanSweeper:
         # is already stale by the time the signal goes out, and a server that came
         # back during a later candidate's probe still carries its original pid and
         # argv — so the identity check waves it straight through.
-        killed = self._terminate(found, confirm=self._still_unreachable) if apply else []
+        killed, spared = (self._terminate(found, confirm=self._still_unreachable)
+                          if apply else ([], []))
         return {
             "servers": [pid for _n, pid, _age, _a in found],
             "shells": [],
             "sockets": sorted({name for name, _p, _age, _a in found}),
             "applied": apply,
             "killed": killed,
+            "spared": spared,
         }
 
     # -- killing ----------------------------------------------------------------
@@ -919,6 +923,9 @@ class OrphanSweeper:
     ) -> list[int]:
         """SIGTERM, grace, then SIGKILL — re-checking the candidate before EACH signal.
 
+        Returns (killed, spared): the pids that are gone or were SIGKILLed, and
+        the pids that took a SIGTERM and were then deliberately left running.
+
         BOTH signals get both checks. Two things can change between choosing a
         candidate and signalling it, and the gap is not small: `confirm` runs a
         tmux probe per socket, each with its own ten-second timeout, and the grace
@@ -950,7 +957,8 @@ class OrphanSweeper:
             except OSError:
                 continue
         if not signalled:
-            return []
+            return [], []
+        spared: list[int] = []
         time.sleep(self.TERM_GRACE_SECONDS)
         for name, pid in signalled:
             try:
@@ -963,12 +971,19 @@ class OrphanSweeper:
             # its pid and argv never changed, so identity alone waves it through
             # to the one signal it cannot refuse.
             if confirm is not None and not confirm(name):
+                spared.append(pid)
                 continue
             age, expected = was[pid]
             if not self._unchanged(pid, age, expected):
+                spared.append(pid)
                 continue            # different process, or unreadable — leave it
             try:
                 self._kill(pid, signal.SIGKILL)
             except OSError:
+                spared.append(pid)
                 continue
-        return [pid for _name, pid in signalled]
+        # A process that ignored the SIGTERM and was then deliberately left alone
+        # is STILL RUNNING. Reporting it as killed tells a person the reaper did
+        # something it did not do — and the report is the only thing they have to
+        # judge it by, since they cannot see the signals.
+        return [pid for _name, pid in signalled if pid not in spared], spared

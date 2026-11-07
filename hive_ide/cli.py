@@ -1423,6 +1423,9 @@ def cmd_reap(args: argparse.Namespace) -> dict[str, Any]:
         "sockets": sorted(set(shells["sockets"]) | set(servers["sockets"])),
         "applied": apply,
         "killed": shells["killed"] + servers["killed"],
+        # Signalled and then deliberately left alone, because it answered again or
+        # was no longer the process we chose. Still running, and said so.
+        "spared": shells["spared"] + servers["spared"],
         "note": (
             "An attached client launched through $TMUX carries no socket in its "
             "argv, so it cannot be seen here. Confirm nobody is attached before "

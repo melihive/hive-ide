@@ -1447,3 +1447,41 @@ def test_the_cmdline_reader_keeps_an_argument_boundary_ps_would_lose(tmp_path):
                     reason="no /proc: the reader answers unknown by design")
 def test_the_cmdline_reader_answers_unknown_for_a_pid_it_cannot_read():
     assert OrphanSweeper.cmdline_of(2 ** 22 + 7) is None
+
+
+# -- the thirteenth review round ------------------------------------------------
+
+
+def test_a_server_spared_the_sigkill_is_not_reported_as_killed():
+    """The report is the only thing a person has to judge the reaper by — they
+    cannot see the signals. A process that ignored the SIGTERM and was then
+    deliberately left alone is still running, and saying "killed" about it is
+    telling them the reaper did something it did not do."""
+    rows = [server(99, 86400 * 9)]
+    kills = _Kills(survive={99})
+    answered: list[int] = []
+
+    def answers(name: str) -> bool:
+        answered.append(1)
+        return False if len(answered) == 1 else True
+
+    sweeper = OrphanSweeper(
+        rows=rows, kill=kills, answers=answers,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: rows[0][2].split())
+    sweeper.TERM_GRACE_SECONDS = 0.0
+
+    result = sweeper.reap_servers(unreachable={SOCKET}, apply=True)
+
+    assert (99, signal.SIGTERM) in kills.sent
+    assert (99, signal.SIGKILL) not in kills.sent
+    assert result["killed"] == [], "reported a surviving process as killed"
+    assert result["spared"] == [99], "and did not say it was left running"
+
+
+def test_a_server_that_actually_dies_IS_reported_as_killed():
+    """The falsifying half."""
+    result, kills = reap([server(99, 86400 * 9)], unreachable={SOCKET})
+
+    assert result["killed"] == [99]
+    assert result["spared"] == []
