@@ -14,7 +14,10 @@ from __future__ import annotations
 import os
 import signal
 import socket
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +84,11 @@ def _sweeper(rows, *, survive=None, answers=None, **kw):
     # `answers` defaults to "tmux says there is no server there", so the rows stay
     # the thing under test; without it every candidate would shell out to the real
     # tmux and the suite would depend on this machine's sockets.
+    # Injected pids have no `/proc` entry, so the real reader would answer "unknown"
+    # for every one of them and protect the whole population — the server tests
+    # would then pass while observing nothing. The default here says "its socket is
+    # where we looked"; the tests about a DIFFERENT directory override it.
+    kw.setdefault("socket_root", lambda pid: OrphanSweeper.our_socket_root())
     sweeper = OrphanSweeper(
         rows=rows if callable(rows) else list(rows), kill=kills,
         answers=answers if answers is not None else (lambda name: False), **kw)
@@ -290,7 +298,9 @@ def test_a_vanished_pid_does_not_abort_the_sweep():
 
     rows = [shell(101, 7200), shell(102, 7200)]
     kills = _Gone()
-    sweeper = OrphanSweeper(rows=rows, kill=kills, answers=lambda name: False)
+    sweeper = OrphanSweeper(
+        rows=rows, kill=kills, answers=lambda name: False,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root())
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     result = sweeper.sweep(apply=True)
@@ -454,8 +464,6 @@ def test_permission_denied_is_unknown_not_proof_of_no_server(monkeypatch):
 
 def test_an_unknown_probe_never_reaches_the_confirmed_unreachable_set(monkeypatch):
     """The three states end up as two outcomes, and only one of them can kill."""
-    from hive_ide import socket_gc
-
     answers = {"a": True, "b": False, "c": None}
     monkeypatch.setattr(OrphanSweeper, "server_answers",
                         staticmethod(lambda name: answers[name]))
@@ -475,7 +483,10 @@ def test_a_pid_reused_before_the_sigterm_is_never_signalled():
     snapshots = iter([rows, reused, reused, reused])
 
     kills = _Kills()
-    sweeper = OrphanSweeper(rows=lambda: next(snapshots, reused), kill=kills)
+    sweeper = OrphanSweeper(
+        rows=lambda: next(snapshots, reused), kill=kills,
+        answers=lambda name: False,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root())
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     result = sweeper.sweep(apply=True)
@@ -627,7 +638,10 @@ def test_incidental_attach_text_does_not_hide_an_orphan_server():
     assert clients == {}
     assert OrphanSweeper(rows=rows).server_names() == {SOCKET}
 
-    found = OrphanSweeper(rows=rows).orphan_servers(unreachable={SOCKET})
+    found = OrphanSweeper(
+        rows=rows,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+    ).orphan_servers(unreachable={SOCKET})
     assert [e["pid"] for e in found] == [99]
 
 
@@ -842,7 +856,9 @@ def test_a_server_that_recovers_during_another_candidates_probe_is_spared():
             return True
         return False
 
-    sweeper = OrphanSweeper(rows=rows, kill=kills, answers=answers)
+    sweeper = OrphanSweeper(
+        rows=rows, kill=kills, answers=answers,
+        socket_root=lambda pid: OrphanSweeper.our_socket_root())
     sweeper.TERM_GRACE_SECONDS = 0.0
     result = sweeper.reap_servers(unreachable={SOCKET, OTHER}, apply=True)
 
@@ -895,3 +911,130 @@ def test_a_one_second_age_wobble_does_not_spare_a_candidate():
     result, kills = sweep(lambda: next(snapshots, jittered))
 
     assert (101, signal.SIGTERM) in kills.sent
+
+
+# -- the eighth review round ----------------------------------------------------
+
+
+def test_a_server_under_a_different_TMUX_TMPDIR_is_never_a_candidate():
+    """The directory is nowhere in the argv, so the table cannot tell them apart.
+
+    `tmux -L <name>` resolves inside the CALLER's socket directory. A healthy
+    detached server started under another `TMUX_TMPDIR` answers nothing there and
+    is indistinguishable, in the process table, from a genuine orphan — same
+    argv, same name, same age. Only the process's own environment separates them,
+    and it has to be consulted BEFORE the report, not just before the kill.
+    """
+    rows = [server(99, 86400 * 9)]
+
+    result, kills = reap(
+        rows, unreachable={SOCKET},
+        socket_root=lambda pid: "/run/user/1000/somewhere-else",
+    )
+
+    assert result["servers"] == [], "reported a healthy server elsewhere as an orphan"
+    assert kills.sent == [], "SIGTERMed a healthy server in another socket directory"
+
+
+def test_a_server_whose_socket_directory_cannot_be_read_is_spared():
+    """The unknown arm. Without `/proc` the reader cannot answer, and an answer we
+    do not have is not evidence that the socket is where we looked."""
+    result, kills = reap(
+        [server(99, 86400 * 9)], unreachable={SOCKET},
+        socket_root=lambda pid: None,
+    )
+
+    assert result["servers"] == []
+    assert kills.sent == []
+
+
+def test_a_server_in_OUR_socket_directory_is_still_reaped():
+    """The falsifying half: the guard above must not simply switch the reaper off."""
+    result, kills = reap(
+        [server(99, 86400 * 9)], unreachable={SOCKET},
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+    )
+
+    assert result["servers"] == [99]
+    assert (99, signal.SIGTERM) in kills.sent
+
+
+def test_an_unset_and_an_empty_TMUX_TMPDIR_both_mean_tmp():
+    """tmux treats both as the default, so a server started with `TMUX_TMPDIR=`
+    must not read as living somewhere else."""
+    assert OrphanSweeper.resolve_root(None) == OrphanSweeper.resolve_root("")
+    assert OrphanSweeper.resolve_root(None) == os.path.realpath("/tmp")
+
+
+def test_the_socket_root_reader_answers_unknown_for_a_pid_it_cannot_read():
+    """A pid that does not exist has no environment to read, and the reader says so
+    rather than falling back to the default."""
+    assert OrphanSweeper.socket_root_of(2 ** 22 + 7) is None
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                    reason="no /proc: the reader answers unknown by design")
+def test_the_socket_root_reader_reads_THAT_processs_environment_not_ours(tmp_path):
+    """The readable case, and the whole point of reading per-process.
+
+    A child is started with a `TMUX_TMPDIR` we do not have. The reader must come
+    back with the CHILD's directory — if it ever answered with our own, the guard
+    would say "same directory" for every process on the machine and protect
+    nothing.
+
+    `/proc/<pid>/environ` is the environment the process was EXEC'd with, which is
+    exactly the one tmux read when it chose where to put the socket.
+    """
+    # The child announces that it has EXEC'd. Reading before that point is not a
+    # near-miss: `/proc/<pid>/environ` serves zero bytes for the whole fork-to-exec
+    # window, which is what `socket_root_of` must report as unknown.
+    marker = tmp_path / "exec'd"
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         f"import pathlib, time; pathlib.Path({str(marker)!r}).write_text('x'); "
+         "time.sleep(60)"],
+        env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists(), "the child never got as far as running"
+
+        theirs = OrphanSweeper.socket_root_of(child.pid)
+        assert theirs == os.path.realpath(str(tmp_path))
+        assert theirs != OrphanSweeper.our_socket_root(), (
+            "read our own environment instead of the child's"
+        )
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                    reason="no /proc: the reader answers unknown by design")
+def test_an_environ_we_cannot_actually_read_is_unknown_not_the_default(tmp_path):
+    """The hole the directory guard would otherwise have.
+
+    `/proc/<pid>/environ` serves ZERO BYTES rather than failing when a process's
+    memory is not readable — including the entire window between fork and exec.
+    Finding no `TMUX_TMPDIR=` in that nothing once meant "unset", which resolves
+    to `/tmp` — the default, so it matched our own directory and cleared the
+    process to be killed on the strength of a read that saw nothing.
+
+    This window is reproducible: a freshly spawned child, read before it execs.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
+    )
+    try:
+        raw = Path(f"/proc/{child.pid}/environ").read_bytes()
+        if raw.strip(b"\0"):
+            pytest.skip("the child exec'd before we could read it; nothing to pin")
+        assert OrphanSweeper.socket_root_of(child.pid) is None, (
+            "an empty environ was reported as the default directory"
+        )
+    finally:
+        child.kill()
+        child.wait()

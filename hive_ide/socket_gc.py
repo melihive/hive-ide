@@ -336,6 +336,7 @@ class OrphanSweeper:
              | None = None,
         kill: Callable[[int, int], None] | None = None,
         answers: Callable[[str], bool | None] | None = None,
+        socket_root: Callable[[int], str | None] | None = None,
         now: float | None = None,
     ):
         #: A list pins ONE snapshot; a CALLABLE is re-read on every access, which
@@ -348,6 +349,9 @@ class OrphanSweeper:
         #: candidate shells out to a real `tmux has-session`, which makes the
         #: tests depend on the machine's sockets rather than on their own rows.
         self._answers = answers or self.server_answers
+        #: Where a given process's sockets live. Not derivable from `rows` — it
+        #: comes from the process's own environment — so it is its own seam.
+        self._socket_root = socket_root or self.socket_root_of
         self.now = time.time() if now is None else now
 
     # -- process table ----------------------------------------------------------
@@ -395,6 +399,71 @@ class OrphanSweeper:
                 continue        # somebody else's process is never ours to signal
             rows.append((int(parts[0]), OrphanSweeper.etime_seconds(parts[2]), parts[3]))
         return rows
+
+    @staticmethod
+    def resolve_root(value: str | None) -> str:
+        """The directory tmux puts sockets in for a given `TMUX_TMPDIR` value.
+
+        Unset and empty both mean `/tmp`, and the path is resolved because one
+        side of the comparison may reach it through a symlink.
+        """
+        try:
+            return os.path.realpath(value or "/tmp")
+        except OSError:
+            return value or "/tmp"
+
+    @classmethod
+    def our_socket_root(cls) -> str:
+        """The directory OUR probes look in."""
+        return cls.resolve_root(os.environ.get("TMUX_TMPDIR"))
+
+    @staticmethod
+    def socket_root_of(pid: int) -> str | None:
+        """Where THIS process's sockets live, or None when that cannot be read.
+
+        Read from the process's own environment, because nothing in `ps` carries
+        it and a `-L` name says nothing about which directory it resolves in.
+        `/proc/<pid>/environ` is the environment the process was EXEC'd with —
+        which is the one tmux read when it chose where to put the socket, and
+        deliberately NOT this process's current `os.environ`.
+        Only `/proc` is consulted: it is the platform this was built for and the
+        one the 65-hour orphan was found on. Anywhere without it, this returns
+        None — which protects, and leaves the server reap inert rather than
+        guessing. The shell sweep is unaffected either way; see `sweep`.
+        """
+        try:
+            raw = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            return None
+        if not raw.strip(b"\0"):
+            # An EMPTY read is not "the variable is unset" — every process has
+            # some environment. It means we could not see this one's: the kernel
+            # serves zero bytes for a process whose memory is not readable, and
+            # for one that has been forked but has not exec'd yet (measured: 40
+            # reads in that window, 40 empty). Answering "/tmp" there would be a
+            # positive claim with nothing behind it, and since /tmp is the default
+            # it would read as AGREEMENT and clear the candidate to be killed.
+            return None
+        for item in raw.split(b"\0"):
+            if item.startswith(b"TMUX_TMPDIR="):
+                value = item[len(b"TMUX_TMPDIR="):].decode("utf-8", "replace")
+                return OrphanSweeper.resolve_root(value)
+        return OrphanSweeper.resolve_root(None)
+
+    def _probes_the_same_directory(self, pid: int) -> bool:
+        """Would our probe have looked where THIS process's socket actually is?
+
+        `server_answers` runs `tmux -L <name>`, which resolves inside the CALLER's
+        socket directory. A healthy detached server under a different
+        `TMUX_TMPDIR` answers nothing there and looks exactly like an orphan — and
+        the process table, which is what SELECTED it, cannot tell the two apart
+        because the directory is nowhere in its argv.
+
+        So before a server may be called abandoned, its own environment has to
+        agree it lives where we looked. Unreadable is not agreement.
+        """
+        theirs = self._socket_root(pid)
+        return theirs is not None and theirs == self.our_socket_root()
 
     @staticmethod
     def etime_seconds(etime: str) -> int:
@@ -490,7 +559,9 @@ class OrphanSweeper:
 
         A socket probe alone is not enough either. It answers for OUR namespace, so
         a server under a different `TMUX_TMPDIR` looks absent to it — while that
-        server is plainly there in the process table.
+        server is plainly there in the process table. This is why the shell path
+        needs no socket-directory evidence of its own, and the SERVER path does:
+        here the table is the protection, there the table is what selects.
 
         So a shell is reaped only where the table and tmux AGREE it has no server.
         Anything inconclusive on either side keeps it: failing to clean up costs a
@@ -602,6 +673,12 @@ class OrphanSweeper:
 
         The argv is the identity `_terminate` revalidates against, so it has to
         travel with the candidate rather than be re-derived later.
+
+        A server only reaches this list if our probe looked in the directory its
+        socket is actually in — see `_probes_the_same_directory`. That filter sits
+        here rather than at the kill so the REPORT is right too: calling a healthy
+        server an orphan in `verify` is its own kind of wrong, since a person then
+        runs `reap --apply` on our word.
         """
         protected = set(keep or ())
         rows = self._snapshot()
@@ -616,6 +693,8 @@ class OrphanSweeper:
             for pid, age, argv in entries:
                 if age < self.SERVER_MIN_AGE_SECONDS:
                     continue
+                if not self._probes_the_same_directory(pid):
+                    continue        # its socket is not where we looked
                 found.append((name, pid, age, argv))
         return found
 
