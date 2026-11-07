@@ -1203,16 +1203,14 @@ def _reap_dead_sockets(frame: Frame, *, keep: set[str]) -> None:
         # ask a server it cannot reach whether its window is visible. Found on
         # one machine in 2026-11: a server up 65 hours with 30 such shells.
         #
-        # Reachability is probed HERE and handed in, because it is the one
-        # expensive step and this already walks the directory for the file
-        # sweep. A name with no socket file is simply not reachable, which is
-        # exactly the case that matters.
-        reachable = {
-            entry.name
-            for entry in directory.iterdir()
-            if SocketReaper.is_listening(entry) is True
-        }
-        OrphanSweeper().sweep(reachable=reachable, keep=keep, apply=True)
+        # Shells only, and no reachability argument: a keep-alive shell whose
+        # server process is absent from the table can never reach a screen again,
+        # which is positive evidence needing no probe. Orphaned SERVERS are not
+        # touched here — they own live panes, an already-attached client can still
+        # be watching one through an open descriptor, and "unreachable" is only
+        # ever true of the socket directory we happened to probe. `verify` reports
+        # those; `reap --apply` kills them, and only because a human asked.
+        OrphanSweeper().sweep(keep=keep, apply=True)
     except Exception:
         pass
 
@@ -1407,6 +1405,21 @@ def _codex_isolation_findings(sessions: list[dict[str, Any]]) -> list[str]:
     return findings
 
 
+def cmd_reap(args: argparse.Namespace) -> dict[str, Any]:
+    """Kill orphaned tmux servers this package left behind. Dry run by default.
+
+    Deliberately NOT automatic. `open` reaps keep-alive shells whose server
+    process is gone — unambiguous, nothing to be attached to. A SERVER is the
+    opposite: it owns live panes, a client that attached before its socket file
+    was deleted keeps its descriptor and stays connected, and "unreachable" only
+    ever means unreachable from the socket directory we probed. So this exists as
+    a command a person runs after reading `verify`, not as a sweep on a timer.
+    """
+    sweeper = OrphanSweeper()
+    unreachable = sweeper.confirmed_unreachable(sweeper.server_names())
+    return sweeper.reap_servers(unreachable=unreachable, apply=bool(args.apply))
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
@@ -1530,6 +1543,24 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         f"{error['summary']}: {error['detail']} ({error['recovery']})"
         for error in open_errors
     ]
+    # Orphaned servers: REPORTED here, never killed here. A server owns live panes
+    # and a client that attached before its socket file was deleted is still
+    # watching one, so the kill is `reap --apply` and a person decides. Only names
+    # a probe POSITIVELY confirmed dead are candidates; unknown protects.
+    try:
+        sweeper = OrphanSweeper()
+        orphan_servers = sweeper.orphan_servers(
+            unreachable=sweeper.confirmed_unreachable(sweeper.server_names())
+        )
+    except Exception:
+        orphan_servers = []
+    orphan_findings = [
+        f"tmux server {entry['pid']} on socket {entry['socket']} has been up "
+        f"{entry['age_seconds'] // 3600}h and answers nothing — it still owns its "
+        f"panes and forks for every sidebar under it. Reap it with "
+        f"`hive-ide reap --apply` once you are sure nobody is attached to it."
+        for entry in orphan_servers
+    ]
     return {
         "ok": (
             shutil.which("tmux") is not None
@@ -1571,6 +1602,11 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "open_errors": open_errors,
         # Inventory only — see the comment where this is computed.
         "dead_sockets": dead_sockets,
+        # Also inventory-only, and deliberately NOT part of `ok`: an orphan is
+        # waste, not breakage, and failing `ok` would turn every ship's verify
+        # red on a machine that happens to have one.
+        "orphan_findings": orphan_findings,
+        "orphan_servers": orphan_servers,
         "codex_isolation_findings": codex_isolation_findings,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
@@ -1675,6 +1711,7 @@ def build_parser() -> argparse.ArgumentParser:
         "environment-setup": "Install stable/dev Python environments.",
         "hook-setup": "Install shell/agent hooks used by the IDE.",
         "verify": "Verify package, drivers, hooks, source, and frame health.",
+        "reap": "Kill orphaned tmux servers nothing can reach (dry run unless --apply).",
         "version": "Print package, protocol, schema, and interpreter versions.",
         "map": "Show local IDE workspaces and their sessions.",
         "monitor": "Show live Hive IDE agent/sidebar memory by session.",
@@ -1924,6 +1961,11 @@ def build_parser() -> argparse.ArgumentParser:
     hooks.add_argument("--home")
     hooks.add_argument("--stable-python")
     hooks.set_defaults(handler=cmd_hook_setup)
+
+    reap = command("reap")
+    reap.add_argument("--apply", action="store_true",
+                      help="actually signal the orphans; omit to preview them")
+    reap.set_defaults(handler=cmd_reap)
 
     verify = command("verify")
     verify.add_argument("--stable-python")

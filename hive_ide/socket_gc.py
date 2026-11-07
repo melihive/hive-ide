@@ -235,22 +235,30 @@ class OrphanSweeper:
     such shells, about 60 wasted forks a second, invisible to every existing
     check.
 
-    Two populations, judged differently, because the evidence differs:
+    Two populations, and only ONE of them is ever killed automatically, because
+    only one of them has self-contained evidence:
 
-    **A keep-alive shell whose server PROCESS is gone** is unambiguously dead. It
-    has no pane to paint and no server to ask; nothing it does can ever reach a
-    screen again. Only a short age floor applies, so a frame starting up is never
-    caught mid-launch.
+    **A keep-alive shell whose server PROCESS is absent from the whole table** is
+    unambiguously dead — `sweep` reaps it. It has no pane to paint and no server
+    to ask; nothing it does can ever reach a screen again. The evidence needs no
+    socket probe, so it cannot be confused by a socket directory we did not look
+    in: if a server for that name existed anywhere, under any `TMUX_TMPDIR`, it
+    would be in the same `ps` snapshot and the shell would be spared. Only a
+    short age floor applies, so a frame starting up is never caught mid-launch.
 
-    **A server that is merely unreachable** is judged much more slowly. It still
-    owns live panes, and — the part that makes haste dangerous — a client that
-    attached BEFORE its socket file was deleted keeps its open descriptor and
-    stays connected, so an unreachable server can still be on someone's screen.
-    It is reaped only when no client process references it at all and it has been
-    unreachable for a day.
+    **A server that is merely unreachable is NEVER killed automatically.** It
+    still owns live panes, and a client that attached BEFORE its socket file was
+    deleted keeps its open descriptor and stays connected — so an unreachable
+    server can still be on someone's screen. Worse, "unreachable" is only ever
+    unreachable *from the namespace we probed*: a server under a different
+    `TMUX_TMPDIR` is perfectly healthy and answers nothing here, and argv alone
+    cannot tell us which directory it used. So `orphan_servers` only REPORTS
+    them (for `verify`), and `reap_servers` kills them solely when a human asks.
 
     Reachability is never inferred from the socket file alone: the file can be
-    missing while the server runs, and present while the server is dead.
+    missing while the server runs, and present while the server is dead. And it
+    is three-state throughout — a probe that could not conclude protects the
+    server, because the negative branch here is the one that destroys.
 
     Bounded, fail-open, and every kill independent: this runs inside `open` and
     must never make opening a frame slow, let alone fail it.
@@ -259,23 +267,33 @@ class OrphanSweeper:
     #: Never race a frame that is starting: its shells exist before its server
     #: finishes binding.
     SHELL_MIN_AGE_SECONDS = 300
-    #: An unreachable server is only called abandoned after a day.
+    #: A server must have been up at least this long before `reap_servers` will
+    #: consider it. This is a floor on the server's OWN AGE, not on how long it
+    #: has been unreachable — nothing here persists across runs, so the duration
+    #: of unreachability is simply not knowable. It is therefore a weak guard,
+    #: which is exactly why the server path is human-driven rather than automatic.
     SERVER_MIN_AGE_SECONDS = 86400
     MAX_KILLS = 200
     TERM_GRACE_SECONDS = 2.0
 
     _SOCKET_FLAG = re.compile(r"-L\s+([A-Za-z0-9._-]+)")
     _TMUX_SOCKET_FLAG = re.compile(r"--tmux-socket\s+([A-Za-z0-9._-]+)")
+    #: `tmux -S <path> attach` names the socket by PATH and carries no `-L`, so a
+    #: client matched on `-L` alone is invisible and its server loses the one
+    #: protection that keeps a live screen alive. The basename IS the socket name.
+    _SOCKET_PATH_FLAG = re.compile(r"-S\s+(\S+)")
 
     def __init__(
         self,
         *,
         rows: list[tuple[int, int, str]] | None = None,
         kill: Callable[[int, int], None] | None = None,
+        argv_of: Callable[[int], str | None] | None = None,
         now: float | None = None,
     ):
         self._rows = rows
         self._kill = kill or os.kill
+        self._argv_reader = argv_of
         self.now = time.time() if now is None else now
 
     # -- process table ----------------------------------------------------------
@@ -351,9 +369,12 @@ class OrphanSweeper:
                     shells.setdefault(match.group(1), []).append((pid, age))
                 continue
             match = cls._SOCKET_FLAG.search(argv)
-            if not match or not SocketReaper.ours(match.group(1)):
+            name = match.group(1) if match else None
+            if name is None:
+                by_path = cls._SOCKET_PATH_FLAG.search(argv)
+                name = PurePosixPath(by_path.group(1)).name if by_path else None
+            if name is None or not SocketReaper.ours(name):
                 continue
-            name = match.group(1)
             # A client attaches. A server keeps its start argv, and the process
             # that merely STARTS one shares that argv but exits in milliseconds,
             # which the age floors exclude.
@@ -365,76 +386,187 @@ class OrphanSweeper:
 
     # -- sweep ------------------------------------------------------------------
 
-    def sweep(
-        self,
-        *,
-        reachable: set[str],
-        keep: set[str] | None = None,
-        apply: bool = False,
-    ) -> dict:
-        """Report, and optionally kill, the orphans.
+    def sweep(self, *, keep: set[str] | None = None, apply: bool = False) -> dict:
+        """Reap keep-alive shells whose server process is GONE. Servers: never.
 
-        `reachable` is the set of socket names whose server answered a connect —
-        the caller owns that probe, because it is the one expensive step and
-        `SocketReaper.is_listening` already does it per entry.
+        Takes no reachability argument on purpose. A shell is judged against the
+        same `ps` snapshot that found it: if no server process anywhere names its
+        socket, no server exists for it to reach, in any socket directory, and the
+        shell can never paint a pane again. That is positive evidence, not the
+        absence of a probe result — so there is no unknown state to mishandle and
+        no directory to be scoped wrongly.
         """
-        protected = set(keep or ()) | set(reachable)
+        protected = set(keep or ())
         rows = self._rows if self._rows is not None else self._ps()
         servers, clients, shells = self.classify(rows)
 
-        doomed_servers: list[tuple[str, int]] = []
-        kept_servers: set[str] = set()
-        for name, entries in sorted(servers.items()):
-            for pid, age in entries:
-                if (
-                    name not in protected
-                    and not clients.get(name)
-                    and age >= self.SERVER_MIN_AGE_SECONDS
-                ):
-                    doomed_servers.append((name, pid))
-                else:
-                    kept_servers.add(name)
-
-        doomed_shells: list[tuple[str, int]] = []
+        doomed: list[tuple[str, int]] = []
         for name, entries in sorted(shells.items()):
-            if name in protected or name in kept_servers:
-                # Either reachable, or its server survived a check above and may
-                # still be on a screen through an already-open descriptor.
+            if name in protected:
                 continue
-            if name in servers and name not in {n for n, _ in doomed_servers}:
+            if servers.get(name):
+                continue        # its server is alive somewhere — leave it alone
+            if clients.get(name):
+                # A client still names this socket. Its server is absent from the
+                # table, so this should be impossible; treat the contradiction as
+                # unknown and keep everything rather than act on a confused read.
                 continue
             for pid, age in entries:
                 if age >= self.SHELL_MIN_AGE_SECONDS:
-                    doomed_shells.append((name, pid))
+                    doomed.append((name, pid))
 
-        doomed = (doomed_servers + doomed_shells)[: self.MAX_KILLS]
+        doomed = doomed[: self.MAX_KILLS]
         result = {
-            "servers": [pid for _n, pid in doomed_servers],
-            "shells": [pid for _n, pid in doomed_shells],
+            "servers": [],
+            "shells": [pid for _n, pid in doomed],
             "sockets": sorted({name for name, _pid in doomed}),
             "applied": apply,
-            "killed": [],
+            "killed": self._terminate([pid for _n, pid in doomed], rows) if apply else [],
         }
-        if not apply:
-            return result
+        return result
 
+    @staticmethod
+    def server_answers(name: str) -> bool | None:
+        """Does a server answer on this socket NAME? True / False / None.
+
+        Three states on purpose. `True` and `None` both protect; only a positive
+        `False` — tmux telling us there is no server there — makes a name a
+        candidate. Probing by NAME rather than by socket file is what matters for
+        an orphan: its file is gone, so a directory listing can never see it,
+        while tmux resolves the name exactly as it did when the server started.
+        """
+        try:
+            probe = subprocess.run(["tmux", "-L", name, "has-session"],
+                                   capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if probe.returncode == 0:
+            return True
+        blob = ((probe.stderr or "") + (probe.stdout or "")).lower()
+        if "no server running" in blob or "error connecting" in blob:
+            return False
+        if "session not found" in blob or "can't find session" in blob:
+            return True        # the server answered; it just has no such session
+        return None
+
+    def confirmed_unreachable(self, names: set[str]) -> set[str]:
+        """The subset of `names` a probe POSITIVELY confirmed has no server."""
+        return {name for name in sorted(names) if self.server_answers(name) is False}
+
+    def server_names(self) -> set[str]:
+        """Socket names with a live server process, from the process table."""
+        rows = self._rows if self._rows is not None else self._ps()
+        servers, _clients, _shells = self.classify(rows)
+        return set(servers)
+
+    def orphan_servers(
+        self,
+        *,
+        unreachable: set[str],
+        keep: set[str] | None = None,
+    ) -> list[dict]:
+        """Servers that look abandoned — a REPORT, killing nothing.
+
+        `unreachable` holds only the socket names a probe POSITIVELY confirmed
+        dead. A name the caller could not conclude about is simply absent, so it
+        is never a candidate: unknown protects, by construction rather than by a
+        branch somebody has to remember to write.
+        """
+        protected = set(keep or ())
+        rows = self._rows if self._rows is not None else self._ps()
+        servers, clients, _shells = self.classify(rows)
+
+        found: list[dict] = []
+        for name, entries in sorted(servers.items()):
+            if name in protected or name not in unreachable:
+                continue
+            if clients.get(name):
+                continue        # a client holds it: it may still be on a screen
+            for pid, age in entries:
+                if age < self.SERVER_MIN_AGE_SECONDS:
+                    continue
+                found.append({"socket": name, "pid": pid, "age_seconds": age})
+        return found
+
+    def reap_servers(
+        self,
+        *,
+        unreachable: set[str],
+        keep: set[str] | None = None,
+        apply: bool = False,
+    ) -> dict:
+        """Kill the reported orphan servers. Only ever called because a human asked.
+
+        This is the destructive half, deliberately NOT wired into `open`: it can
+        take down live panes, and "unreachable" is only ever true of the namespace
+        we probed. A person reading `verify` decides; this carries it out.
+        """
+        found = self.orphan_servers(unreachable=unreachable, keep=keep)
+        pids = [entry["pid"] for entry in found][: self.MAX_KILLS]
+        rows = self._rows if self._rows is not None else self._ps()
+        return {
+            "servers": pids,
+            "shells": [],
+            "sockets": sorted({entry["socket"] for entry in found}),
+            "applied": apply,
+            "killed": self._terminate(pids, rows) if apply else [],
+        }
+
+    # -- killing ----------------------------------------------------------------
+
+    def _terminate(self, pids: list[int], rows: list[tuple[int, int, str]]) -> list[int]:
+        """SIGTERM, grace, then SIGKILL — re-checking IDENTITY before escalating.
+
+        `kill(pid, 0)` proves only that the NUMBER is live. Between the SIGTERM and
+        the escalation the process can exit and the kernel can hand its pid to
+        something new, so liveness alone would SIGKILL an innocent stranger. The
+        argv we matched IS the identity: a survivor is only escalated when its pid
+        still carries the same argv. An argv we cannot read is unknown, and unknown
+        does not authorise a SIGKILL.
+        """
+        was = {pid: argv for pid, _age, argv in rows}
         killed: list[int] = []
-        for _name, pid in doomed:
+        for pid in pids:
             try:
                 self._kill(pid, signal.SIGTERM)
                 killed.append(pid)
             except OSError:
                 continue
-        if killed:
-            time.sleep(self.TERM_GRACE_SECONDS)
-            for pid in killed:
-                try:
-                    self._kill(pid, 0)
-                except OSError:
-                    continue      # already gone: SIGTERM was enough
-                try:
-                    self._kill(pid, signal.SIGKILL)
-                except OSError:
-                    continue
-        result["killed"] = killed
-        return result
+        if not killed:
+            return killed
+        time.sleep(self.TERM_GRACE_SECONDS)
+        for pid in killed:
+            try:
+                self._kill(pid, 0)
+            except OSError:
+                continue            # gone: SIGTERM was enough
+            if self._argv_of(pid) != was.get(pid):
+                continue            # different process, or unreadable — leave it
+            try:
+                self._kill(pid, signal.SIGKILL)
+            except OSError:
+                continue
+        return killed
+
+    def _argv_of(self, pid: int) -> str | None:
+        """This pid's CURRENT argv, or None when it cannot be read."""
+        if self._argv_reader is not None:
+            return self._argv_reader(pid)
+        try:
+            probe = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                                   capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return probe.stdout.strip() or None
+        time.sleep(self.TERM_GRACE_SECONDS)
+        now = {pid: argv for pid, _age, argv in (self._rows if self._rows is not None else self._ps())}
+        for pid in killed:
+            if pid not in now:
+                continue            # gone: SIGTERM was enough
+            if now[pid] != was.get(pid):
+                continue            # pid reused by something else — not ours to kill
+            try:
+                self._kill(pid, signal.SIGKILL)
+            except OSError:
+                continue
+        return killed

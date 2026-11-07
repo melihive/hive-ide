@@ -65,11 +65,29 @@ class _Kills:
         self.sent.append((pid, sig))
 
 
-def sweep(rows, *, reachable=(), apply=True, survive=None, **kw):
+def _sweeper(rows, *, survive=None, argv_of=None, **kw):
     kills = _Kills(survive)
-    sweeper = OrphanSweeper(rows=list(rows), kill=kills, **kw)
+    # By default a survivor still carries the argv it was matched on, so the
+    # identity re-check passes and SIGKILL escalation is exercised. A test that
+    # cares about pid REUSE overrides `argv_of`.
+    table = {pid: argv for pid, _age, argv in rows}
+    sweeper = OrphanSweeper(
+        rows=list(rows), kill=kills,
+        argv_of=argv_of or (lambda pid: table.get(pid)), **kw)
     sweeper.TERM_GRACE_SECONDS = 0.0
-    result = sweeper.sweep(reachable=set(reachable), apply=apply)
+    return sweeper, kills
+
+
+def sweep(rows, *, apply=True, survive=None, argv_of=None, **kw):
+    """The AUTOMATIC path: shells only, no reachability argument."""
+    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, **kw)
+    return sweeper.sweep(apply=apply), kills
+
+
+def reap(rows, *, unreachable=(), apply=True, survive=None, argv_of=None, **kw):
+    """The HUMAN-DRIVEN path: servers, and only names positively confirmed dead."""
+    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, **kw)
+    result = sweeper.reap_servers(unreachable=set(unreachable), apply=apply)
     return result, kills
 
 
@@ -86,13 +104,13 @@ def test_a_shell_whose_server_is_gone_is_reaped():
 
 
 def test_a_live_frames_shells_are_never_touched():
-    """The reachable socket is the whole protection for a frame in use.
+    """A live frame is protected by its SERVER PROCESS being in the same snapshot.
 
-    An earlier version parsed the socket name as `\\S+` and captured the trailing
-    `;` from this very argv, so no live frame matched `reachable` and a dry run
-    proposed killing 77 shells including the running session's own.
+    No reachability argument is involved any more, which is the point: the shell
+    and the evidence that spares it come from one `ps` read, so there is no probe
+    to be inconclusive and no socket directory to be the wrong one.
     """
-    result, kills = sweep([shell(101, 7200), server(99, 7200)], reachable=[SOCKET])
+    result, kills = sweep([shell(101, 7200), server(99, 7200)])
 
     assert result["shells"] == []
     assert result["servers"] == []
@@ -110,12 +128,39 @@ def test_the_socket_name_is_parsed_without_shell_punctuation():
 # -- the server, judged slowly --------------------------------------------------
 
 
-def test_an_unreachable_server_with_no_client_is_reaped_after_a_day():
-    result, kills = sweep([server(99, 86400 + 1), shell(101, 86400)])
+def test_the_automatic_sweep_never_kills_a_server():
+    """The whole point of the split. A server owns live panes, an already-attached
+    client can still be watching one through an open descriptor, and
+    "unreachable" is only ever true of the namespace we probed — so `open` must
+    never take one down, however old and however unreachable it looks."""
+    result, kills = sweep([server(99, 86400 * 9), shell(101, 86400 * 9)])
+
+    assert result["servers"] == []
+    assert kills.sent == [], "the automatic path signalled a server"
+
+
+def test_the_explicit_reap_kills_an_unreachable_server_with_no_client():
+    """The human-driven path still works — that is what `reap --apply` is for."""
+    result, kills = reap([server(99, 86400 + 1)], unreachable=[SOCKET])
 
     assert result["servers"] == [99]
-    assert 101 in result["shells"]
     assert (99, signal.SIGTERM) in kills.sent
+
+
+def test_a_server_not_confirmed_unreachable_is_never_reaped():
+    """UNKNOWN PROTECTS. `unreachable` holds only names a probe positively
+    confirmed dead, so a timeout, a permission error or a directory we never
+    looked in leaves the name absent — and absent means keep.
+
+    The earlier shape asked for `reachable` and killed anything missing from it,
+    which made every inconclusive probe authorise a kill.
+    """
+    rows = [server(99, 86400 * 9)]
+
+    result, kills = reap(rows, unreachable=set())
+
+    assert result["servers"] == [], "an unconfirmed server was killed"
+    assert kills.sent == []
 
 
 def test_an_unreachable_server_is_kept_while_a_client_holds_it():
@@ -126,18 +171,28 @@ def test_an_unreachable_server_is_kept_while_a_client_holds_it():
     """
     rows = [server(99, 86400 * 9), client(500, 86400 * 9), shell(101, 86400 * 9)]
 
-    result, kills = sweep(rows)
+    result, kills = reap(rows, unreachable=[SOCKET])
 
     assert result["servers"] == [], "killed a server a client is still attached to"
-    assert result["shells"] == [], "killed the sidebars of an attached session"
+    assert kills.sent == []
+
+
+def test_a_client_attached_by_socket_PATH_still_protects_its_server():
+    """`tmux -S <path> attach` carries no `-L`, so a client matched on `-L` alone
+    is invisible and its server loses the one protection that keeps a live screen
+    alive. The basename of the path is the socket name."""
+    rows = [server(99, 86400 * 9), (500, 86400 * 9, f"tmux -S /tmp/tmux-1000/{SOCKET} attach")]
+
+    result, kills = reap(rows, unreachable=[SOCKET])
+
+    assert result["servers"] == [], "a -S client did not protect its server"
     assert kills.sent == []
 
 
 def test_an_unreachable_server_younger_than_a_day_is_kept():
-    result, _kills = sweep([server(99, 3600), shell(101, 3600)])
+    result, _kills = reap([server(99, 3600)], unreachable=[SOCKET])
 
     assert result["servers"] == []
-    assert result["shells"] == [], "reaped the shells of a server still on probation"
 
 
 def test_a_freshly_started_shell_is_kept():
@@ -187,7 +242,7 @@ def test_each_socket_is_judged_on_its_own_evidence():
     """A dead frame next to a live one must not take the live one with it."""
     rows = [shell(101, 7200), shell(201, 7200, OTHER), server(99, 7200, OTHER)]
 
-    result, _kills = sweep(rows, reachable=[OTHER])
+    result, _kills = sweep(rows)
 
     assert result["shells"] == [101]
     assert 201 not in result["shells"]
@@ -223,11 +278,13 @@ def test_a_vanished_pid_does_not_abort_the_sweep():
                 raise ProcessLookupError(pid)
             super().__call__(pid, sig)
 
+    rows = [shell(101, 7200), shell(102, 7200)]
     kills = _Gone()
-    sweeper = OrphanSweeper(rows=[shell(101, 7200), shell(102, 7200)], kill=kills)
+    table = {pid: argv for pid, _a, argv in rows}
+    sweeper = OrphanSweeper(rows=rows, kill=kills, argv_of=lambda pid: table.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
-    result = sweeper.sweep(reachable=set(), apply=True)
+    result = sweeper.sweep(apply=True)
 
     assert result["killed"] == [102]
     assert (102, signal.SIGTERM) in kills.sent
@@ -235,12 +292,10 @@ def test_a_vanished_pid_does_not_abort_the_sweep():
 
 def test_the_kill_count_is_bounded():
     rows = [shell(1000 + i, 7200) for i in range(50)]
-    kills = _Kills()
-    sweeper = OrphanSweeper(rows=rows, kill=kills)
-    sweeper.TERM_GRACE_SECONDS = 0.0
+    sweeper, kills = _sweeper(rows)
     sweeper.MAX_KILLS = 10
 
-    sweeper.sweep(reachable=set(), apply=True)
+    sweeper.sweep(apply=True)
 
     assert len([s for s in kills.sent if s[1] == signal.SIGTERM]) == 10
 
@@ -260,3 +315,31 @@ def test_the_sweeper_never_signals_itself():
 
     assert result["shells"] == [], "the sweeper put its own pid on the kill list"
     assert kills.sent == []
+
+
+def test_a_reused_pid_is_not_escalated_to_sigkill():
+    """`kill(pid, 0)` proves only that the NUMBER is live.
+
+    A process that survives SIGTERM, exits during the grace window, and has its
+    pid handed to something new would be SIGKILLed on liveness alone. Identity is
+    the argv we matched; here the pid comes back as something else entirely.
+    """
+    result, kills = sweep(
+        [shell(101, 7200)],
+        survive={101},
+        argv_of=lambda pid: "/usr/bin/some-innocent-stranger --unrelated",
+    )
+
+    assert (101, signal.SIGTERM) in kills.sent
+    assert (101, signal.SIGKILL) not in kills.sent, (
+        "SIGKILLed a pid that no longer carries the argv it was matched on"
+    )
+
+
+def test_an_unreadable_argv_is_not_escalated_either():
+    """The unknown arm of the same check: if the argv cannot be read, we do not
+    know whether this is still our process, and unknown does not authorise a
+    SIGKILL."""
+    result, kills = sweep([shell(101, 7200)], survive={101}, argv_of=lambda pid: None)
+
+    assert (101, signal.SIGKILL) not in kills.sent
