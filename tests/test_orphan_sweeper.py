@@ -1024,17 +1024,121 @@ def test_an_environ_we_cannot_actually_read_is_unknown_not_the_default(tmp_path)
 
     This window is reproducible: a freshly spawned child, read before it execs.
     """
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
-    )
-    try:
-        raw = Path(f"/proc/{child.pid}/environ").read_bytes()
-        if raw.strip(b"\0"):
-            pytest.skip("the child exec'd before we could read it; nothing to pin")
-        assert OrphanSweeper.socket_root_of(child.pid) is None, (
-            "an empty environ was reported as the default directory"
+    caught = False
+    for _attempt in range(20):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
         )
-    finally:
-        child.kill()
-        child.wait()
+        try:
+            if Path(f"/proc/{child.pid}/environ").read_bytes().strip(b"\0"):
+                continue        # it exec'd before we looked; try again
+            caught = True
+            assert OrphanSweeper.socket_root_of(child.pid) is None, (
+                "an empty environ was reported as the default directory"
+            )
+            break
+        finally:
+            child.kill()
+            child.wait()
+    if not caught:
+        pytest.skip("never observed the pre-exec window on this host")
+
+
+# -- the ninth review round -----------------------------------------------------
+
+
+def test_a_socket_name_is_never_truncated_into_a_different_socket():
+    """`-L hive-ide-project:dev` is not `-L hive-ide-project`.
+
+    Reading the name up to the first inconvenient character produced a name that
+    is in our family, is not this server's, and answers nothing when probed — so
+    a healthy server with live panes read as an orphan. The whole value is taken,
+    and a value we cannot vouch for forfeits candidacy instead of being trimmed
+    until it looks acceptable.
+    """
+    odd = "hive-ide-project:dev"
+    argv = f"tmux -L {odd} -f /state/ide.conf new-session -d -s x -n N -c /w"
+    rows = [(99, 86400 * 9, argv)]
+
+    servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert servers == {}, "an unprobeable name became a kill candidate"
+    assert clients == {odd: [99]}, "the name should be read whole, and protect"
+    assert "hive-ide-project" not in servers, "the name was truncated"
+
+    result, kills = reap(rows, unreachable={odd, "hive-ide-project"})
+    assert result["servers"] == []
+    assert kills.sent == []
+
+
+def test_a_grouped_short_flag_server_is_classified_so_it_protects_its_shells():
+    """`tmux -uLname` is the same flag as `tmux -L name`.
+
+    A server the classifier cannot see is absent from the table, which is the
+    FIRST of the two negatives the shell sweep needs — so an unparsed server
+    silently hands over half the protection its own sidebars depend on.
+    """
+    rows = [
+        (99, 7200, f"tmux -uL{SOCKET} -f /state/ide.conf new-session -d -s x -n N"),
+        shell(101, 7200),
+    ]
+
+    servers, _clients, _shells = OrphanSweeper.classify(rows)
+    assert list(servers) == [SOCKET], "a grouped -uLname server was invisible"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == [], "reaped a live frame's sidebars"
+    assert kills.sent == []
+
+
+def test_a_grouped_flag_server_in_ANOTHER_directory_still_protects_its_shells():
+    """The two gaps Codex combined: an unparsed server AND a probe that looks in
+    the wrong directory. Either alone is survivable — the table covers the probe
+    and the probe covers the table — but together both negatives agree wrongly and
+    the live frame's sidebars are killed. Parsing the flag is what keeps the table
+    honest here; the shell path has no socket-directory evidence of its own."""
+    rows = [
+        (99, 7200, f"tmux -uL{SOCKET} -f /state/ide.conf new-session -d -s x -n N"),
+        shell(101, 7200),
+    ]
+
+    # The probe answers for OUR directory, and this server is not in it.
+    result, kills = sweep(rows, answers=lambda name: False)
+
+    assert result["shells"] == [], "killed the sidebars of a live frame elsewhere"
+    assert kills.sent == []
+
+
+def test_a_dash_S_in_the_PANE_command_protects_rather_than_renames():
+    """A server's argv ends with the command its first pane was started with, so a
+    `-S` in it may be that command's flag, not tmux's. Letting it name the socket
+    would drop the server out of classification entirely — and its sidebars with
+    it. `-L` still names; the stray `-S` only forfeits candidacy."""
+    argv = (
+        f"tmux -L {SOCKET} -f /state/ide.conf new-session -d -s x -n N -c /w "
+        f"vim -S /home/someone/session.vim"
+    )
+    rows = [(99, 86400 * 9, argv), shell(101, 7200)]
+
+    servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert servers == {}, "a server with a stray -S must not be a candidate"
+    assert clients == {SOCKET: [99]}, "it must still be found under its REAL name"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == [], "the server was misnamed and its shells died"
+    assert kills.sent == []
+
+
+def test_a_keep_alive_whose_socket_cannot_be_read_cleanly_is_left_alone():
+    """The flag's value sits inside a shell loop, so it ends at `;`. A name that
+    runs into anything else is a name we did not read — and an unattributed shell
+    is left running, not assigned to whichever socket the prefix resembles."""
+    odd = SHELL_ARGV.format(socket="hive-ide-abc12345:extra")
+    rows = [(101, 7200, odd)]
+
+    _servers, _clients, shells = OrphanSweeper.classify(rows)
+    assert shells == {}, "a shell was attributed to a socket name it does not use"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == []
+    assert kills.sent == []

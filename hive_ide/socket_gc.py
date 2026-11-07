@@ -291,14 +291,30 @@ class OrphanSweeper:
     #: reaped — the asymmetry that makes a missed match expensive rather than
     #: merely untidy. Anchored at a token boundary so `-L` inside a path or a
     #: quoted string cannot masquerade as the flag.
-    _SOCKET_FLAG = re.compile(r"(?<!\S)-L\s*([A-Za-z0-9._-]+)")
-    _TMUX_SOCKET_FLAG = re.compile(r"(?<!\S)--tmux-socket[\s=]\s*([A-Za-z0-9._-]+)")
+    #: The value is taken WHOLE (`\S+`), never up to the first character we happen
+    #: to find convenient. Capturing `[A-Za-z0-9._-]+` truncated `-L a-name:with`
+    #: to `a-name`, which is a DIFFERENT socket — so both reachability checks
+    #: probed something else, found nothing, and condemned a healthy server.
+    #: Short options group, so `-uLname` is the same flag as `-L name`; a server
+    #: the classifier cannot see has no presence to protect its own sidebars.
+    _SOCKET_FLAG = re.compile(r"(?<!\S)-[A-Za-z0-9]*L\s*(\S+)")
+    #: The keep-alive embeds the flag INSIDE a shell loop, so its value is followed
+    #: by `;` with no space — `\S+` would swallow the punctuation. The value is
+    #: therefore read up to a shell boundary, and the boundary is REQUIRED: a name
+    #: holding anything else does not match at all, so the shell is left
+    #: unattributed and alive rather than attributed to a socket it is not on.
+    _TMUX_SOCKET_FLAG = re.compile(
+        r"(?<!\S)--tmux-socket[\s=]\s*([A-Za-z0-9._-]+)(?=[;\s]|$)")
+    #: What a name has to look like before anything may be probed or killed on the
+    #: strength of it. Everything else is a name we can recognise but not reason
+    #: about, which protects rather than condemns.
+    _SAFE_NAME = re.compile(r"\A[A-Za-z0-9._-]+\Z")
     #: `tmux -S <path>` names the socket by PATH and carries no `-L`, so a client
     #: matched on `-L` alone is invisible and its server loses the one protection
     #: that keeps a live screen alive. The basename identifies the FAMILY, which is
     #: enough to protect — but it is NOT a name anything here can probe, so a
     #: path-addressed process is never a candidate. See `classify`.
-    _SOCKET_PATH_FLAG = re.compile(r"(?<!\S)-S\s*(\S+)")
+    _SOCKET_PATH_FLAG = re.compile(r"(?<!\S)-[A-Za-z0-9]*S\s*(\S+)")
     #: A standalone `-d`: what makes a `new-session` a SERVER start rather than a
     #: client that attaches. `attach -d` is excluded before this is consulted.
     _DETACHED_FLAG = re.compile(r"(?<!\S)-d(?!\S)")
@@ -508,24 +524,32 @@ class OrphanSweeper:
                         or cls._KEEPALIVE_MODULE not in argv):
                     continue        # mentions the sidebar; is not the loop
                 match = cls._TMUX_SOCKET_FLAG.search(argv)
-                if match and SocketReaper.ours(match.group(1)):
+                if (match and cls._SAFE_NAME.match(match.group(1))
+                        and SocketReaper.ours(match.group(1))):
                     shells.setdefault(match.group(1), []).append((pid, age, argv))
                 continue
-            # `-S <path>` addresses the socket by PATH and OVERRIDES `-L`, so its
-            # presence decides which form we are looking at. The basename is enough
-            # to recognise the family and protect the name, but it is NOT a name we
-            # can probe: every reachability probe here runs `tmux -L <name>`, which
-            # resolves inside the CALLER's socket directory. A healthy detached
-            # server living at some other path answers nothing there and would read
-            # as an orphan. So a path-addressed process is only ever a protector.
+            # A server's argv ends with the command it was started with, so a `-S`
+            # anywhere in it may belong to the PANE's command rather than to tmux.
+            # `-L` is therefore still what NAMES the socket — getting the name
+            # wrong would drop the server out of classification entirely and strip
+            # its sidebars of the one thing protecting them.
             by_path = cls._SOCKET_PATH_FLAG.search(argv)
-            if by_path is not None:
+            match = cls._SOCKET_FLAG.search(argv)
+            if match is not None:
+                name = match.group(1)
+            elif by_path is not None:
                 name = PurePosixPath(by_path.group(1)).name
             else:
-                match = cls._SOCKET_FLAG.search(argv)
-                name = match.group(1) if match else None
+                name = None
             if name is None or not SocketReaper.ours(name):
                 continue
+            # But a `-S` anywhere still forfeits CANDIDACY, and so does a name we
+            # cannot vouch for. Every reachability probe runs `tmux -L <name>`,
+            # which resolves inside the CALLER's socket directory: a healthy
+            # detached server whose socket is somewhere else answers nothing there
+            # and reads exactly like an orphan. Neither case can be probed, so
+            # neither may be killed — both still protect their own name.
+            probeable = by_path is None and cls._SAFE_NAME.match(name) is not None
             # Only a DETACHED `new-session -d` is a server. `tmux -L X new-session
             # -A -s work` is a client that happens not to say "attach", and calling
             # it a server let `reap` kill a live client and its panes. Everything
@@ -535,7 +559,7 @@ class OrphanSweeper:
             # A server retains the argv of whatever client first started it, so if
             # that was an attaching form the server reads as a client too — again
             # erring toward keeping it.
-            if by_path is not None or cls._ATTACH_WORD.search(argv):
+            if not probeable or cls._ATTACH_WORD.search(argv):
                 clients.setdefault(name, []).append(pid)
             elif cls._NEW_SESSION_WORD.search(argv) and cls._DETACHED_FLAG.search(argv):
                 servers.setdefault(name, []).append((pid, age, argv))
