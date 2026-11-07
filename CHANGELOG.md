@@ -4,9 +4,30 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
-## [1.0.114] - 2026-11-06
+## [1.0.114] - 2026-11-07
 
 ### Changed
+
+- Several screens can share one frame again. `open` no longer attaches with
+  `-d`, which detached whoever was already there (1.0.94). Every client now stays
+  attached and exactly one of them — the most recently created — sizes the frame;
+  the rest are flagged `ignore-size` mirrors, rendering the same windows live,
+  truncated to their own terminal and pannable with `refresh-client -U/-D/-L/-R`.
+  This keeps what `-d` was defending rather than giving it up: the pane-reflow
+  people reported as the frame freezing came from two clients of different sizes
+  both voting on geometry under `window-size latest`, and a client with no vote
+  cannot flip anything, so a stale 126x33 beside a live 203x70 is now inert
+  instead of destructive. `relayout` ignores mirrors when it chooses the
+  canonical geometry, or it would have resized the frame to a mirror itself,
+  bypassing tmux. The controller is elected from client CREATION order, never
+  activity: `client_activity` is whole seconds, so a second screen ties with the
+  first, and the tie handed control to the older, smaller screen. Elections run
+  from the `client-attached` and `client-detached` hooks, ahead of relayout in
+  both, and hold the workspace lock so two overlapping elections cannot leave two
+  controllers. `open` demotes nobody before attaching — `execvp` replaces the
+  process, so a demotion made there could not be undone if the attach then
+  failed. `verify` reports a frame with no controller or more than one, instead of
+  reporting a second client as a defect.
 
 - `open` no longer starts every session's agent in the same second. The window it
   selects launches immediately; every other driver it would start waits a
@@ -29,6 +50,26 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
+- Stepping between sessions no longer shows the previous order for a moment.
+  Only the displayed window runs a sidebar process, and the list is ordered by
+  activity, so a backgrounded pane held the frame it painted when you last left
+  it — stale on essentially every switch. The `session-window-changed` hook
+  already repainted, but a hook necessarily fires AFTER the switch and pays a
+  cold interpreter start, so the wrong order stayed on screen for that whole
+  window (61ms measured idle, and longer on a loaded frame). `nav` now paints the
+  destination before selecting it, from the process it is already running in, so
+  the switch reveals a pane that is already correct. That repaint is bounded at
+  200ms and abandoned if it overruns: the frame carries checkout decorations and
+  `git_status` allows 2s per git call with no cache, so a stalled worktree must
+  never hang a keypress. Over budget, the hook repaints exactly as before.
+- The window-switch sidebar test identifies a running sidebar by PROCESS, not by
+  a string in a command line. `pgrep -P <pane> -f hive_ide.sidebar` also matched
+  the keep-alive's own forked subshells, which inherit the parent's entire argv —
+  including the sidebar command it would run — so the check reported a sidebar
+  that did not exist whenever one of the visibility probe's short-lived forks
+  happened to be alive at that instant. Load-dependent: it passed alone, passed
+  as its own file, and passed across the full suite by hand, while failing twice
+  inside the release harness and blocking the 1.0.114 release.
 - macOS pane ownership checks now read native process environments and direct
   children, so healthy panes are observable by repair and lease restoration.
   Arguments that look like environment assignments cannot supply pane identity.
