@@ -89,6 +89,16 @@ def _sweeper(rows, *, survive=None, answers=None, **kw):
     # would then pass while observing nothing. The default here says "its socket is
     # where we looked"; the tests about a DIFFERENT directory override it.
     kw.setdefault("socket_root", lambda pid: OrphanSweeper.our_socket_root())
+    # Injected pids have no `/proc` entry either. The default is the fixture argv
+    # split on whitespace — i.e. "the real argv says exactly what `ps` rendered",
+    # which is true of every fixture that contains no quoting. The tests about a
+    # DISAGREEMENT between the two pass their own. (A callable `rows` belongs to a
+    # shell test, and the shell path never consults this.)
+    if not callable(rows):
+        tokens = {pid: argv.split() for pid, _age, argv in rows}
+        kw.setdefault("cmdline", lambda pid: tokens.get(pid))
+    else:
+        kw.setdefault("cmdline", lambda pid: None)
     sweeper = OrphanSweeper(
         rows=rows if callable(rows) else list(rows), kill=kills,
         answers=answers if answers is not None else (lambda name: False), **kw)
@@ -300,7 +310,8 @@ def test_a_vanished_pid_does_not_abort_the_sweep():
     kills = _Gone()
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=lambda name: False,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     result = sweeper.sweep(apply=True)
@@ -486,7 +497,8 @@ def test_a_pid_reused_before_the_sigterm_is_never_signalled():
     sweeper = OrphanSweeper(
         rows=lambda: next(snapshots, reused), kill=kills,
         answers=lambda name: False,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     result = sweeper.sweep(apply=True)
@@ -641,6 +653,7 @@ def test_incidental_attach_text_does_not_hide_an_orphan_server():
     found = OrphanSweeper(
         rows=rows,
         socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: rows[0][2].split(),
     ).orphan_servers(unreachable={SOCKET})
     assert [e["pid"] for e in found] == [99]
 
@@ -858,7 +871,8 @@ def test_a_server_that_recovers_during_another_candidates_probe_is_spared():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=answers,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
     result = sweeper.reap_servers(unreachable={SOCKET, OTHER}, apply=True)
 
@@ -1214,7 +1228,8 @@ def test_a_server_that_recovers_during_the_GRACE_window_is_not_sigkilled():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=answers,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     sweeper.reap_servers(unreachable={SOCKET}, apply=True)
@@ -1233,7 +1248,8 @@ def test_a_server_still_unreachable_after_the_grace_IS_sigkilled():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=lambda name: False,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root())
+        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     sweeper.reap_servers(unreachable={SOCKET}, apply=True)
@@ -1282,3 +1298,152 @@ def test_different_L_and_S_values_protect_BOTH_names():
     result, kills = sweep(rows)
     assert result["shells"] == [], "killed the sidebars of a live frame"
     assert kills.sent == []
+
+
+# -- the twelfth review round ---------------------------------------------------
+
+
+def test_the_token_parser_reads_a_joined_value():
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-Lhive-ide-a", "new-session"]) == ("hive-ide-a", None)
+
+
+def test_the_token_parser_reads_a_grouped_flag():
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-uLhive-ide-a", "new-session"]) == ("hive-ide-a", None)
+
+
+def test_the_token_parser_reads_a_separated_value():
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-L", "hive-ide-a", "new-session"]) == ("hive-ide-a", None)
+
+
+def test_the_token_parser_takes_the_LAST_socket_flag_as_tmux_does():
+    """`.search()` took the first. tmux takes the last, so `-L A -L B` is a server
+    on B — and probing the absent A was a positive verdict that B is dead."""
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-L", "hive-ide-a", "-L", "hive-ide-b", "new-session"]
+    ) == ("hive-ide-b", None)
+
+
+def test_the_token_parser_lets_a_later_S_clear_an_earlier_L():
+    """They set the same thing, so the later one wins outright rather than both
+    being reported."""
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-L", "hive-ide-a", "-S", "/x/hive-ide-b", "new-session"]
+    ) == (None, "/x/hive-ide-b")
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-S", "/x/hive-ide-b", "-L", "hive-ide-a", "new-session"]
+    ) == ("hive-ide-a", None)
+
+
+def test_the_token_parser_does_not_let_another_options_value_be_the_socket():
+    """`-f` consumes the next token. Reading it as a bare flag would make the
+    config file the socket name."""
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-f", "/state/ide.conf", "-L", "hive-ide-a", "new-session"]
+    ) == ("hive-ide-a", None)
+
+
+def test_the_token_parser_stops_at_the_tmux_command():
+    """Everything after the command belongs to the command. A pane running
+    `vim -S session.vim` must not rename the socket."""
+    assert OrphanSweeper.socket_from_tokens(
+        ["tmux", "-L", "hive-ide-a", "new-session", "-d", "vim", "-S", "/s.vim"]
+    ) == ("hive-ide-a", None)
+
+
+def test_a_socket_name_holding_a_space_is_not_a_candidate():
+    """`ps` joins the arguments and drops the quoting, so `-L 'hive-ide-a b'`
+    comes back already truncated to `hive-ide-a` — a name in our family that is
+    not this server's and answers nothing. The real argv disagrees, and
+    disagreement forfeits candidacy."""
+    spaced = "hive-ide-project dev"
+    rows = [(99, 86400 * 9,
+             f"tmux -L {spaced} -f /state/ide.conf new-session -d -s x -n N")]
+
+    result, kills = reap(
+        rows, unreachable={"hive-ide-project"},
+        cmdline=lambda pid: ["tmux", "-L", spaced, "-f", "/state/ide.conf",
+                             "new-session", "-d", "-s", "x", "-n", "N"],
+    )
+
+    assert result["servers"] == [], "killed a healthy server on a spaced name"
+    assert kills.sent == []
+
+
+def test_a_repeated_socket_flag_is_not_a_candidate_under_the_first_name():
+    rows = [(99, 86400 * 9,
+             f"tmux -L {SOCKET} -L {OTHER} new-session -d -s x -n N")]
+
+    result, kills = reap(
+        rows, unreachable={SOCKET},
+        cmdline=lambda pid: ["tmux", "-L", SOCKET, "-L", OTHER,
+                             "new-session", "-d", "-s", "x", "-n", "N"],
+    )
+
+    assert result["servers"] == [], "probed the first -L and killed the server"
+    assert kills.sent == []
+
+
+def test_a_server_whose_real_argv_cannot_be_read_is_spared():
+    """The unknown arm: no lossless source, no kill."""
+    result, kills = reap(
+        [server(99, 86400 * 9)], unreachable={SOCKET}, cmdline=lambda pid: None)
+
+    assert result["servers"] == []
+    assert kills.sent == []
+
+
+def test_a_joined_flag_client_still_protects_its_server():
+    """The token scan sees whole tokens, and `-Lhive-ide-a` is ONE token whose
+    basename is the whole thing — so the parsed name has to join the protection
+    set, or a client written that way protects nothing at all."""
+    rows = [server(99, 86400 * 9), (150, 600, f"tmux -L{SOCKET} attach")]
+
+    _servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert clients.get(SOCKET) == [150], "a joined-flag client was invisible"
+
+    result, kills = reap(rows, unreachable={SOCKET})
+    assert result["servers"] == [], "reaped a server with a client attached"
+    assert kills.sent == []
+
+
+def test_a_grouped_flag_client_still_protects_its_server():
+    rows = [server(99, 86400 * 9), (150, 600, f"tmux -uL{SOCKET} attach")]
+
+    _servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert clients.get(SOCKET) == [150], "a grouped-flag client was invisible"
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").exists(),
+                    reason="no /proc: the reader answers unknown by design")
+def test_the_cmdline_reader_keeps_an_argument_boundary_ps_would_lose(tmp_path):
+    """The whole reason for reading it. An argument containing a space survives
+    as ONE token here; `ps` would render it as two with nothing to tell them
+    apart."""
+    spaced = "a value with spaces"
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         f"import pathlib, sys, time; "
+         f"pathlib.Path({str(tmp_path / 'up')!r}).write_text('x'); time.sleep(60)",
+         spaced],
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not (tmp_path / "up").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (tmp_path / "up").exists(), "the child never got as far as running"
+
+        tokens = OrphanSweeper.cmdline_of(child.pid)
+        assert tokens is not None
+        assert tokens[-1] == spaced, "the argument boundary was lost"
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").exists(),
+                    reason="no /proc: the reader answers unknown by design")
+def test_the_cmdline_reader_answers_unknown_for_a_pid_it_cannot_read():
+    assert OrphanSweeper.cmdline_of(2 ** 22 + 7) is None

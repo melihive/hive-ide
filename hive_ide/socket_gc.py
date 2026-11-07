@@ -353,6 +353,7 @@ class OrphanSweeper:
         kill: Callable[[int, int], None] | None = None,
         answers: Callable[[str], bool | None] | None = None,
         socket_root: Callable[[int], str | None] | None = None,
+        cmdline: Callable[[int], list[str] | None] | None = None,
         now: float | None = None,
     ):
         #: A list pins ONE snapshot; a CALLABLE is re-read on every access, which
@@ -368,6 +369,9 @@ class OrphanSweeper:
         #: Where a given process's sockets live. Not derivable from `rows` — it
         #: comes from the process's own environment — so it is its own seam.
         self._socket_root = socket_root or self.socket_root_of
+        #: The lossless argv, for the same reason: it is read per process and is
+        #: not derivable from the `ps` rows that `rows` injects.
+        self._cmdline = cmdline or self.cmdline_of
         self.now = time.time() if now is None else now
 
     # -- process table ----------------------------------------------------------
@@ -415,6 +419,74 @@ class OrphanSweeper:
                 continue        # somebody else's process is never ours to signal
             rows.append((int(parts[0]), OrphanSweeper.etime_seconds(parts[2]), parts[3]))
         return rows
+
+    #: tmux's own global options that CONSUME the next value. Everything else in
+    #: a short-option group is a flag. Getting this list wrong makes `-f /x` eat
+    #: the socket name or the reverse.
+    _VALUE_OPTIONS = frozenset("LSfcT")
+
+    @staticmethod
+    def cmdline_of(pid: int) -> list[str] | None:
+        """This process's REAL argv vector, or None when it cannot be read.
+
+        `ps` renders a command line by joining the arguments with spaces and
+        dropping the quoting, so a socket name or path containing a space comes
+        back indistinguishable from two arguments — and no regex can recover the
+        boundary that was thrown away. `/proc/<pid>/cmdline` is NUL-separated and
+        keeps every boundary exactly.
+
+        `ps` is still what ENUMERATES processes, because it is one call for the
+        whole table and it is portable. This is consulted only where a wrong
+        answer costs something irreversible.
+        """
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        if not raw.strip(b"\0"):
+            return None             # a kernel thread, or a process we cannot read
+        return [token.decode("utf-8", "replace")
+                for token in raw.rstrip(b"\0").split(b"\0")]
+
+    @classmethod
+    def socket_from_tokens(cls, tokens: list[str]) -> tuple[str | None, str | None]:
+        """(socket name, socket path) as TMUX would read this command line.
+
+        Parsed rather than matched, because the three things a regex kept getting
+        wrong are all structural: a value may be joined to its flag (`-Lname`),
+        short flags group (`-uLname`), and when a flag is REPEATED tmux takes the
+        last one while a search takes the first. `-S` and `-L` set the same thing,
+        so whichever comes last wins and clears the other.
+
+        Only the global options are read — the scan stops at the tmux command,
+        because everything after it belongs to the command, not to tmux.
+        """
+        name = path = None
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if not token.startswith("-") or token in ("-", "--"):
+                break               # the command word: the global options end here
+            if token.startswith("--"):
+                break
+            body = token[1:]
+            position = 0
+            while position < len(body):
+                letter = body[position]
+                if letter not in cls._VALUE_OPTIONS:
+                    position += 1
+                    continue        # a grouped flag such as the `u` in `-uLname`
+                value = body[position + 1:]
+                if not value:
+                    index += 1
+                    value = tokens[index] if index < len(tokens) else ""
+                if letter == "L":
+                    name, path = value, None
+                elif letter == "S":
+                    path, name = value, None
+                break               # the rest of this token was the value
+            index += 1
+        return name, path
 
     @staticmethod
     def resolve_root(value: str | None) -> str:
@@ -497,6 +569,24 @@ class OrphanSweeper:
         """
         theirs = self._socket_root(pid)
         return theirs is not None and theirs == self.our_socket_root()
+
+    def _really_names_this_socket(self, pid: int, name: str) -> bool:
+        """Does this process's REAL argv say it is on exactly this socket?
+
+        The process table is a rendering: `ps` joins the arguments and drops the
+        quoting, so a name holding a space arrives already truncated, and a
+        repeated `-L` is resolved the opposite way round from how tmux resolves
+        it. Both produce a name that is in our family, belongs to a different
+        socket, and answers nothing when probed — which is the exact shape of an
+        orphan. So before anything is killed, the lossless source has to agree.
+
+        Unreadable is not agreement.
+        """
+        tokens = self._cmdline(pid)
+        if tokens is None:
+            return False
+        parsed_name, parsed_path = self.socket_from_tokens(tokens)
+        return parsed_path is None and parsed_name == name
 
     @staticmethod
     def etime_seconds(etime: str) -> int:
@@ -594,6 +684,12 @@ class OrphanSweeper:
                 and cls._NEW_SESSION_WORD.search(argv) is not None
                 and cls._DETACHED_FLAG.search(argv) is not None
             )
+            if name is not None and cls._SAFE_NAME.match(name) and SocketReaper.ours(name):
+                # The token scan cannot see a JOINED value: `-Lhive-ide-A` is one
+                # token and its basename is the whole thing. The parsed name has
+                # to join the protection set or an attached client written that
+                # way contributes none at all.
+                protects.add(name)
             if is_server:
                 servers.setdefault(name, []).append((pid, age, argv))
                 protects.discard(name)      # it does not protect itself
@@ -751,6 +847,8 @@ class OrphanSweeper:
             for pid, age, argv in entries:
                 if age < self.SERVER_MIN_AGE_SECONDS:
                     continue
+                if not self._really_names_this_socket(pid, name):
+                    continue        # the real argv does not say what `ps` said
                 if not self._probes_the_same_directory(pid):
                     continue        # its socket is not where we looked
                 found.append((name, pid, age, argv))
