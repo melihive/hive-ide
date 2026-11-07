@@ -72,32 +72,31 @@ class _Kills:
         self.sent.append((pid, sig))
 
 
-def _sweeper(rows, *, survive=None, argv_of=None, answers=None, **kw):
+def _sweeper(rows, *, survive=None, answers=None, **kw):
     kills = _Kills(survive)
-    # By default a survivor still carries the argv it was matched on, so the
-    # identity re-check passes and SIGKILL escalation is exercised. A test that
-    # cares about pid REUSE overrides `argv_of`.
-    table = {pid: argv for pid, _age, argv in rows}
+    # `rows` is the ONLY identity source: the re-check before each signal re-reads
+    # the process table, so a static list means "nothing changed" and SIGKILL
+    # escalation is exercised. A test about pid REUSE passes a CALLABLE instead,
+    # which is re-read on every access and can return a different table.
     # `answers` defaults to "tmux says there is no server there", so the rows stay
     # the thing under test; without it every candidate would shell out to the real
     # tmux and the suite would depend on this machine's sockets.
     sweeper = OrphanSweeper(
-        rows=list(rows), kill=kills,
-        argv_of=argv_of or (lambda pid: table.get(pid)),
+        rows=rows if callable(rows) else list(rows), kill=kills,
         answers=answers if answers is not None else (lambda name: False), **kw)
     sweeper.TERM_GRACE_SECONDS = 0.0
     return sweeper, kills
 
 
-def sweep(rows, *, apply=True, survive=None, argv_of=None, answers=None, **kw):
+def sweep(rows, *, apply=True, survive=None, answers=None, **kw):
     """The AUTOMATIC path: shells only, no reachability argument."""
-    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, answers=answers, **kw)
+    sweeper, kills = _sweeper(rows, survive=survive, answers=answers, **kw)
     return sweeper.sweep(apply=apply), kills
 
 
-def reap(rows, *, unreachable=(), apply=True, survive=None, argv_of=None, answers=None, **kw):
+def reap(rows, *, unreachable=(), apply=True, survive=None, answers=None, **kw):
     """The HUMAN-DRIVEN path: servers, and only names positively confirmed dead."""
-    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, answers=answers, **kw)
+    sweeper, kills = _sweeper(rows, survive=survive, answers=answers, **kw)
     result = sweeper.reap_servers(unreachable=set(unreachable), apply=apply)
     return result, kills
 
@@ -291,8 +290,7 @@ def test_a_vanished_pid_does_not_abort_the_sweep():
 
     rows = [shell(101, 7200), shell(102, 7200)]
     kills = _Gone()
-    table = {pid: argv for pid, _a, argv in rows}
-    sweeper = OrphanSweeper(rows=rows, kill=kills, argv_of=lambda pid: table.get(pid))
+    sweeper = OrphanSweeper(rows=rows, kill=kills, answers=lambda name: False)
     sweeper.TERM_GRACE_SECONDS = 0.0
 
     result = sweeper.sweep(apply=True)
@@ -335,10 +333,13 @@ def test_a_reused_pid_is_not_escalated_to_sigkill():
     pid handed to something new would be SIGKILLed on liveness alone. Identity is
     the argv we matched; here the pid comes back as something else entirely.
     """
+    rows = [shell(101, 7200)]
+    stranger = [(101, 5, "/usr/bin/some-innocent-stranger --unrelated")]
+    # select, then re-check before the SIGTERM — then the pid becomes someone else
+    snapshots = iter([rows, rows])
     result, kills = sweep(
-        [shell(101, 7200)],
+        lambda: next(snapshots, stranger),
         survive={101},
-        argv_of=lambda pid: "/usr/bin/some-innocent-stranger --unrelated",
     )
 
     assert (101, signal.SIGTERM) in kills.sent
@@ -347,12 +348,19 @@ def test_a_reused_pid_is_not_escalated_to_sigkill():
     )
 
 
-def test_an_unreadable_argv_is_not_escalated_either():
-    """The unknown arm of the same check: if the argv cannot be read, we do not
-    know whether this is still our process, and unknown does not authorise a
-    SIGKILL."""
-    result, kills = sweep([shell(101, 7200)], survive={101}, argv_of=lambda pid: None)
+def test_an_unreadable_process_table_is_not_escalated_either():
+    """The unknown arm of the same check.
 
+    `_ps` returns an EMPTY list when it cannot run at all, which is indistinguish-
+    able from "every candidate exited". Either way we no longer know that this pid
+    is our process, and unknown does not authorise a SIGKILL — even though
+    `kill(pid, 0)` says the number is very much alive.
+    """
+    rows = [shell(101, 7200)]
+    snapshots = iter([rows, rows])
+    result, kills = sweep(lambda: next(snapshots, []), survive={101})
+
+    assert (101, signal.SIGTERM) in kills.sent, "the candidate was selected"
     assert (101, signal.SIGKILL) not in kills.sent
 
 
@@ -699,14 +707,19 @@ def test_a_server_that_recovers_before_the_kill_is_spared():
         answers=lambda name: True,
     )
 
-    assert result["servers"] == [], "killed a server that had come back"
-    assert kills.sent == []
+    assert kills.sent == [], "signalled a server that had come back"
+    assert result["killed"] == []
+    # `servers` is the candidate list — what the reaper FOUND — and `killed` is
+    # what it actually signalled. Both halves report that way, so a spare shows up
+    # as the gap between them rather than by vanishing from the output entirely.
+    assert result["servers"] == [99]
 
-    # The dry run still REPORTS it, because reporting is what `verify` wants and
-    # nothing is destroyed by saying so.
+    # The dry run REPORTS the same candidate, because reporting is what `verify`
+    # wants and nothing is destroyed by saying so.
     listed, _ = reap([server(99, 86400 * 9)], unreachable=[SOCKET],
                      answers=lambda name: True, apply=False)
     assert listed["servers"] == [99]
+    assert listed["killed"] == []
 
 
 # -- opening a frame must never kill anything -----------------------------------
@@ -766,3 +779,119 @@ def test_opening_a_frame_sweeps_socket_FILES_and_signals_nothing(tmp_path, monke
     assert not (socket_dir / "hive-ide-stale").exists(), (
         "the dead socket FILE should still be swept on open"
     )
+
+
+# -- the seventh review round ---------------------------------------------------
+
+
+def test_a_server_addressed_by_socket_PATH_is_never_a_reap_candidate():
+    """`-S /path` is not a name anything here can probe.
+
+    Every reachability probe runs `tmux -L <name>`, which resolves inside the
+    CALLER's socket directory. A healthy, detached server whose socket lives at
+    some other path answers nothing there, so judging it by its basename reports a
+    live server as an orphan and SIGTERMs it. The basename is good enough to
+    recognise the family and protect the name; it is not good enough to kill on.
+    """
+    path_argv = (
+        f"tmux -S /run/user/1000/other/{SOCKET} -f /state/ide.conf "
+        f"new-session -d -s x -n N -c /w"
+    )
+    rows = [(99, 200000, path_argv)]
+
+    servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert servers == {}, "a path-addressed server became a kill candidate"
+    assert clients == {SOCKET: [99]}, "it should still protect its own name"
+
+    result, kills = reap(rows, unreachable={SOCKET})
+    assert result["servers"] == []
+    assert kills.sent == [], "SIGTERMed a healthy server in another socket directory"
+
+
+def test_a_path_addressed_server_is_not_rescued_by_a_trailing_L_flag():
+    """`-S` OVERRIDES `-L`, so the presence of `-S` decides — not which matched
+    first. Reading the `-L` name here would probe one socket and signal a process
+    attached to a different one."""
+    argv = (
+        f"tmux -L {SOCKET} -S /run/user/1000/other/{SOCKET} "
+        f"new-session -d -s x -n N -c /w"
+    )
+    servers, clients, _shells = OrphanSweeper.classify([(99, 200000, argv)])
+
+    assert servers == {}, "-L won over -S and made a path-addressed server killable"
+    assert clients == {SOCKET: [99]}
+
+
+def test_a_server_that_recovers_during_another_candidates_probe_is_spared():
+    """The probes are not instantaneous and the list is not re-asked as a batch.
+
+    Each `confirm` call can block for its own ten-second timeout, so by the time
+    the LAST candidate is signalled the FIRST one's answer is tens of seconds old —
+    and a tmux server recreates its socket on SIGUSR1. Its pid and argv never
+    change, so the identity check cannot catch this; only re-asking tmux in the
+    instant before each signal can.
+    """
+    rows = [server(901, 200000, SOCKET), server(902, 200000, OTHER)]
+    kills = _Kills()
+
+    def answers(name: str) -> bool:
+        # OTHER is dead while the list is built and comes back to life during the
+        # walk — specifically, while the FIRST candidate is being dealt with. A
+        # single batch probe ahead of the loop asks before that happens.
+        if name == OTHER and kills.sent:
+            return True
+        return False
+
+    sweeper = OrphanSweeper(rows=rows, kill=kills, answers=answers)
+    sweeper.TERM_GRACE_SECONDS = 0.0
+    result = sweeper.reap_servers(unreachable={SOCKET, OTHER}, apply=True)
+
+    assert (901, signal.SIGTERM) in kills.sent, "the genuine orphan was not reaped"
+    assert (902, signal.SIGTERM) not in kills.sent, (
+        "SIGTERMed a server that was answering again by the time its turn came"
+    )
+    assert result["killed"] == [901]
+
+
+def test_a_pid_reused_by_an_IDENTICAL_command_line_is_still_not_signalled():
+    """argv is not identity for a process spawned from a fixed command line.
+
+    The keep-alive loop is built by one code path, so a fresh one wears a dead
+    one's argv byte for byte. An argv-only check waves the replacement through and
+    kills a shell that has been running for five seconds on behalf of a LIVE frame.
+    Elapsed time is what separates them.
+    """
+    rows = [shell(101, 7200)]
+    recycled = [shell(101, 1)]          # same pid, same argv, one second old
+    snapshots = iter([rows])
+
+    result, kills = sweep(lambda: next(snapshots, recycled))
+
+    assert result["shells"] == [101], "the original candidate was still selected"
+    assert kills.sent == [], (
+        "signalled a one-second-old process that merely inherited the pid and argv"
+    )
+
+
+def test_the_same_process_a_little_older_is_still_signalled():
+    """The falsifying half: age going UP must not spare anything, or the guard
+    above would simply switch the reaper off."""
+    rows = [shell(101, 7200)]
+    older = [shell(101, 7260)]          # same process, one minute later
+    snapshots = iter([rows])
+
+    result, kills = sweep(lambda: next(snapshots, older))
+
+    assert (101, signal.SIGTERM) in kills.sent
+
+
+def test_a_one_second_age_wobble_does_not_spare_a_candidate():
+    """`etime` has one-second granularity and the two reads are a moment apart, so
+    an age a hair lower is sampling noise, not a new process."""
+    rows = [shell(101, 7200)]
+    jittered = [shell(101, 7199)]
+    snapshots = iter([rows])
+
+    result, kills = sweep(lambda: next(snapshots, jittered))
+
+    assert (101, signal.SIGTERM) in kills.sent

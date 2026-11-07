@@ -278,6 +278,12 @@ class OrphanSweeper:
     SERVER_MIN_AGE_SECONDS = 86400
     MAX_KILLS = 200
     TERM_GRACE_SECONDS = 2.0
+    #: `etime` has one-second granularity and the two reads of it are a moment
+    #: apart, so an age that comes back a hair below the recorded one is sampling,
+    #: not a different process. A RECYCLED pid comes back seconds old against a
+    #: candidate that had to be at least SHELL_MIN_AGE_SECONDS to be chosen at all,
+    #: so the real case is never near this margin.
+    AGE_REGRESSION_TOLERANCE = 2
 
     #: tmux accepts the value joined to the flag (`-Lname`), so the separator is
     #: OPTIONAL. Requiring whitespace made such a server invisible to `classify`,
@@ -287,9 +293,11 @@ class OrphanSweeper:
     #: quoted string cannot masquerade as the flag.
     _SOCKET_FLAG = re.compile(r"(?<!\S)-L\s*([A-Za-z0-9._-]+)")
     _TMUX_SOCKET_FLAG = re.compile(r"(?<!\S)--tmux-socket[\s=]\s*([A-Za-z0-9._-]+)")
-    #: `tmux -S <path> attach` names the socket by PATH and carries no `-L`, so a
-    #: client matched on `-L` alone is invisible and its server loses the one
-    #: protection that keeps a live screen alive. The basename IS the socket name.
+    #: `tmux -S <path>` names the socket by PATH and carries no `-L`, so a client
+    #: matched on `-L` alone is invisible and its server loses the one protection
+    #: that keeps a live screen alive. The basename identifies the FAMILY, which is
+    #: enough to protect — but it is NOT a name anything here can probe, so a
+    #: path-addressed process is never a candidate. See `classify`.
     _SOCKET_PATH_FLAG = re.compile(r"(?<!\S)-S\s*(\S+)")
     #: A standalone `-d`: what makes a `new-session` a SERVER start rather than a
     #: client that attaches. `attach -d` is excluded before this is consulted.
@@ -327,7 +335,6 @@ class OrphanSweeper:
              | Callable[[], list[tuple[int, int, str]]]
              | None = None,
         kill: Callable[[int, int], None] | None = None,
-        argv_of: Callable[[int], str | None] | None = None,
         answers: Callable[[str], bool | None] | None = None,
         now: float | None = None,
     ):
@@ -337,7 +344,6 @@ class OrphanSweeper:
         #: neither and gets `_ps`.
         self._rows = rows
         self._kill = kill or os.kill
-        self._argv_reader = argv_of
         #: Injectable so the unit suite stays hermetic: without it every shell
         #: candidate shells out to a real `tmux has-session`, which makes the
         #: tests depend on the machine's sockets rather than on their own rows.
@@ -436,11 +442,19 @@ class OrphanSweeper:
                 if match and SocketReaper.ours(match.group(1)):
                     shells.setdefault(match.group(1), []).append((pid, age, argv))
                 continue
-            match = cls._SOCKET_FLAG.search(argv)
-            name = match.group(1) if match else None
-            if name is None:
-                by_path = cls._SOCKET_PATH_FLAG.search(argv)
-                name = PurePosixPath(by_path.group(1)).name if by_path else None
+            # `-S <path>` addresses the socket by PATH and OVERRIDES `-L`, so its
+            # presence decides which form we are looking at. The basename is enough
+            # to recognise the family and protect the name, but it is NOT a name we
+            # can probe: every reachability probe here runs `tmux -L <name>`, which
+            # resolves inside the CALLER's socket directory. A healthy detached
+            # server living at some other path answers nothing there and would read
+            # as an orphan. So a path-addressed process is only ever a protector.
+            by_path = cls._SOCKET_PATH_FLAG.search(argv)
+            if by_path is not None:
+                name = PurePosixPath(by_path.group(1)).name
+            else:
+                match = cls._SOCKET_FLAG.search(argv)
+                name = match.group(1) if match else None
             if name is None or not SocketReaper.ours(name):
                 continue
             # Only a DETACHED `new-session -d` is a server. `tmux -L X new-session
@@ -452,7 +466,7 @@ class OrphanSweeper:
             # A server retains the argv of whatever client first started it, so if
             # that was an attaching form the server reads as a client too — again
             # erring toward keeping it.
-            if cls._ATTACH_WORD.search(argv):
+            if by_path is not None or cls._ATTACH_WORD.search(argv):
                 clients.setdefault(name, []).append(pid)
             elif cls._NEW_SESSION_WORD.search(argv) and cls._DETACHED_FLAG.search(argv):
                 servers.setdefault(name, []).append((pid, age, argv))
@@ -486,7 +500,7 @@ class OrphanSweeper:
         rows = self._snapshot()
         servers, clients, shells = self.classify(rows)
 
-        doomed: list[tuple[str, int, str]] = []
+        doomed: list[tuple[str, int, int, str]] = []
         for name, entries in sorted(shells.items()):
             if name in protected:
                 continue
@@ -502,17 +516,17 @@ class OrphanSweeper:
                 continue
             for pid, age, argv in entries:
                 if age >= self.SHELL_MIN_AGE_SECONDS:
-                    doomed.append((name, pid, argv))
+                    doomed.append((name, pid, age, argv))
 
         doomed = doomed[: self.MAX_KILLS]
-        result = {
+        killed = self._terminate(doomed, confirm=self._still_unreachable) if apply else []
+        return {
             "servers": [],
-            "shells": [pid for _n, pid, _a in doomed],
-            "sockets": sorted({name for name, _pid, _a in doomed}),
+            "shells": [pid for _n, pid, _age, _a in doomed],
+            "sockets": sorted({name for name, _pid, _age, _a in doomed}),
             "applied": apply,
-            "killed": self._terminate([(pid, argv) for _n, pid, argv in doomed]) if apply else [],
+            "killed": killed,
         }
-        return result
 
     @staticmethod
     def server_answers(name: str) -> bool | None:
@@ -572,10 +586,6 @@ class OrphanSweeper:
         is never a candidate: unknown protects, by construction rather than by a
         branch somebody has to remember to write.
         """
-        protected = set(keep or ())
-        rows = self._snapshot()
-        servers, clients, _shells = self.classify(rows)
-
         return [
             {"socket": name, "pid": pid, "age_seconds": age}
             for name, pid, age, _argv in self._orphan_server_rows(
@@ -623,45 +633,80 @@ class OrphanSweeper:
         we probed. A person reading `verify` decides; this carries it out.
         """
         found = self._orphan_server_rows(unreachable=unreachable, keep=keep)[: self.MAX_KILLS]
-        if apply:
-            # Re-probe immediately before signalling. `unreachable` was collected
-            # before a probe-per-socket walk whose calls can take ten seconds each,
-            # and a tmux server recreates its socket on SIGUSR1 — so one of these
-            # may have recovered since. Its pid and argv are unchanged, so the
-            # identity check further down would pass it straight through.
-            found = [row for row in found if self._answers(row[0]) is False]
+        # `_terminate` re-probes each candidate in the instant before it signals it.
+        # It cannot be done in a batch here: `unreachable` was collected by a walk
+        # that probes one socket at a time, each call with its own ten-second
+        # timeout, and a tmux server recreates its socket on SIGUSR1. Filtering the
+        # whole list up front leaves every entry but the last holding an answer that
+        # is already stale by the time the signal goes out, and a server that came
+        # back during a later candidate's probe still carries its original pid and
+        # argv — so the identity check waves it straight through.
+        killed = self._terminate(found, confirm=self._still_unreachable) if apply else []
         return {
             "servers": [pid for _n, pid, _age, _a in found],
             "shells": [],
             "sockets": sorted({name for name, _p, _age, _a in found}),
             "applied": apply,
-            "killed": self._terminate([(pid, argv) for _n, pid, _age, argv in found]) if apply else [],
+            "killed": killed,
         }
 
     # -- killing ----------------------------------------------------------------
 
-    def _terminate(self, candidates: list[tuple[int, str]]) -> list[int]:
-        """SIGTERM, grace, then SIGKILL — re-checking IDENTITY before BOTH signals.
+    def _still_unreachable(self, name: str) -> bool:
+        """Does tmux STILL positively say there is no server on this socket?"""
+        return self._answers(name) is False
 
-        `kill(pid, 0)` proves only that the NUMBER is live. A pid can be recycled
-        at two different moments, and both needed closing:
+    def _unchanged(self, pid: int, age: int, argv: str) -> bool:
+        """Is this pid STILL the process that was selected? Unknown answers no.
 
-        Before the SIGTERM, because the gap between selecting a candidate and
-        signalling it is not small on the server path — `confirmed_unreachable`
-        runs a tmux probe per name, each with its own timeout, all inside that
-        window. So the table is re-read here and a pid whose argv has changed is
-        dropped rather than signalled.
+        A pid proves nothing by itself — it is recycled, and on a busy machine it
+        is recycled quickly. argv barely helps on its own either: the keep-alive is
+        spawned from one fixed command line, so a FRESH one wears a dead one's argv
+        byte for byte and walks straight through an argv-only comparison.
 
-        Before the SIGKILL, because the grace window is another such gap.
-
-        The argv we matched IS the identity. An argv we cannot read is unknown, and
-        unknown authorises no signal at all.
+        Age closes it. Elapsed time only ever grows for one process, while a
+        replacement starts at zero — and a candidate had to be five minutes (a
+        shell) or a day (a server) old to be chosen, so the two are never close.
         """
-        was = dict(candidates)
-        fresh = {pid: argv for pid, _age, argv in self._snapshot()}
+        for other, other_age, other_argv in self._snapshot():
+            if other != pid:
+                continue
+            if other_argv != argv:
+                return False
+            return other_age + self.AGE_REGRESSION_TOLERANCE >= age
+        return False        # absent from the table, or the table could not be read
+
+    def _terminate(
+        self,
+        candidates: list[tuple[str, int, int, str]],
+        *,
+        confirm: Callable[[str], bool] | None = None,
+    ) -> list[int]:
+        """SIGTERM, grace, then SIGKILL — re-checking the candidate before EACH signal.
+
+        Two things can change between choosing a candidate and signalling it, and
+        the gap is not small: `confirm` runs a tmux probe per socket, each with its
+        own ten-second timeout, and the grace window is another such gap.
+
+        The SOCKET can come back. A tmux server recreates its file on SIGUSR1, so a
+        name that answered "no server" when the list was built may be serving panes
+        by the time its turn arrives. `confirm` is therefore asked HERE, one
+        candidate at a time — never once over the whole list, which would leave
+        every entry but the last acting on a stale answer.
+
+        The PROCESS can be a different one. `kill(pid, 0)` proves only that the
+        number is live, and argv alone is not identity for a keep-alive spawned
+        from a fixed command line — see `_unchanged`, which judges on both.
+
+        Each check is made as late as it can be: the probe first, then the cheaper
+        process-table read, then the signal on the very next line.
+        """
+        was = {pid: (age, argv) for _n, pid, age, argv in candidates}
         killed: list[int] = []
-        for pid, expected in candidates:
-            if fresh.get(pid) != expected:
+        for name, pid, age, expected in candidates:
+            if confirm is not None and not confirm(name):
+                continue        # it answers again: it is not an orphan any more
+            if not self._unchanged(pid, age, expected):
                 continue        # exited, or the pid now belongs to something else
             try:
                 self._kill(pid, signal.SIGTERM)
@@ -676,21 +721,11 @@ class OrphanSweeper:
                 self._kill(pid, 0)
             except OSError:
                 continue            # gone: SIGTERM was enough
-            if self._argv_of(pid) != was.get(pid):
+            age, expected = was[pid]
+            if not self._unchanged(pid, age, expected):
                 continue            # different process, or unreadable — leave it
             try:
                 self._kill(pid, signal.SIGKILL)
             except OSError:
                 continue
         return killed
-
-    def _argv_of(self, pid: int) -> str | None:
-        """This pid's CURRENT argv, or None when it cannot be read."""
-        if self._argv_reader is not None:
-            return self._argv_reader(pid)
-        try:
-            probe = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
-                                   capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return probe.stdout.strip() or None
