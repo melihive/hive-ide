@@ -32,7 +32,7 @@ from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
 from .relayout import IdeRelayout
 from .source import inspect_interpreter, resolve_source
-from .socket_gc import SocketReaper
+from .socket_gc import OrphanSweeper, SocketReaper
 from .store import StateStore, utc_now
 from .workspace_map import WorkspaceMap
 
@@ -1195,7 +1195,19 @@ def _reap_dead_sockets(frame: Frame, *, keep: set[str]) -> None:
     """
     try:
         directory = Path(frame.socket_path()).parent
-        SocketReaper(directory).sweep(keep=keep, apply=True)
+        reaper = SocketReaper(directory)
+        reaper.sweep(keep=keep, apply=True)
+        # Dead socket FILES are clutter; the processes behind them are not. A
+        # server whose socket has gone keeps running with every pane it owned,
+        # and each sidebar keep-alive under it forks twice a second forever to
+        # ask a server it cannot reach whether its window is visible. Found on
+        # one machine in 2026-11: a server up 65 hours with 30 such shells.
+        #
+        # NOTHING is killed here. `open` sweeps dead socket FILES and stops; that
+        # is the junk cleanup this path is for. Leftover PROCESSES are reported by
+        # `verify` and removed by `hive-ide reap --apply`, because a process may
+        # own live panes and someone may still be attached to them — a decision
+        # that belongs to a person, not to a side effect of opening a frame.
     except Exception:
         pass
 
@@ -1390,6 +1402,38 @@ def _codex_isolation_findings(sessions: list[dict[str, Any]]) -> list[str]:
     return findings
 
 
+def cmd_reap(args: argparse.Namespace) -> dict[str, Any]:
+    """Kill the leftover processes a dead frame left behind. Dry run by default.
+
+    Deliberately NOT automatic, for either population. Opening a frame cleans up
+    dead socket FILES and nothing else; killing a process is a separate decision
+    with a person behind it, because a process may own live panes and someone may
+    still be looking at them.
+    """
+    apply = bool(args.apply)
+    sweeper = OrphanSweeper()
+    shells = sweeper.sweep(apply=apply)
+    servers = sweeper.reap_servers(
+        unreachable=sweeper.confirmed_unreachable(sweeper.server_names()),
+        apply=apply,
+    )
+    return {
+        "shells": shells["shells"],
+        "servers": servers["servers"],
+        "sockets": sorted(set(shells["sockets"]) | set(servers["sockets"])),
+        "applied": apply,
+        "killed": shells["killed"] + servers["killed"],
+        # Signalled and then deliberately left alone, because it answered again or
+        # was no longer the process we chose. Still running, and said so.
+        "spared": shells["spared"] + servers["spared"],
+        "note": (
+            "An attached client launched through $TMUX carries no socket in its "
+            "argv, so it cannot be seen here. Confirm nobody is attached before "
+            "--apply."
+        ),
+    }
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
@@ -1513,6 +1557,30 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         f"{error['summary']}: {error['detail']} ({error['recovery']})"
         for error in open_errors
     ]
+    # Orphaned servers: REPORTED here, never killed here. A server owns live panes
+    # and a client that attached before its socket file was deleted is still
+    # watching one, so the kill is `reap --apply` and a person decides. Only names
+    # a probe POSITIVELY confirmed dead are candidates; unknown protects.
+    try:
+        sweeper = OrphanSweeper()
+        orphan_servers = sweeper.orphan_servers(
+            unreachable=sweeper.confirmed_unreachable(sweeper.server_names())
+        )
+        orphan_shells = sweeper.sweep(apply=False)["shells"]
+    except Exception:
+        orphan_servers, orphan_shells = [], []
+    orphan_findings = [
+        f"tmux server {entry['pid']} on socket {entry['socket']} has been up "
+        f"{entry['age_seconds'] // 3600}h and answers nothing — it still owns its "
+        f"panes and forks for every sidebar under it. Reap it with "
+        f"`hive-ide reap --apply` once you are sure nobody is attached to it."
+        for entry in orphan_servers
+    ]
+    if orphan_shells:
+        orphan_findings.append(
+            f"{len(orphan_shells)} sidebar keep-alive shell(s) whose server is gone "
+            "are still forking twice a second. Clear them with `hive-ide reap --apply`."
+        )
     return {
         "ok": (
             shutil.which("tmux") is not None
@@ -1554,6 +1622,12 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "open_errors": open_errors,
         # Inventory only — see the comment where this is computed.
         "dead_sockets": dead_sockets,
+        # Also inventory-only, and deliberately NOT part of `ok`: an orphan is
+        # waste, not breakage, and failing `ok` would turn every ship's verify
+        # red on a machine that happens to have one.
+        "orphan_findings": orphan_findings,
+        "orphan_servers": orphan_servers,
+        "orphan_shells": orphan_shells,
         "codex_isolation_findings": codex_isolation_findings,
         "drivers": {
             driver_id: registry.get(driver_id).detect().__dict__
@@ -1658,6 +1732,7 @@ def build_parser() -> argparse.ArgumentParser:
         "environment-setup": "Install stable/dev Python environments.",
         "hook-setup": "Install shell/agent hooks used by the IDE.",
         "verify": "Verify package, drivers, hooks, source, and frame health.",
+        "reap": "Kill leftover frame processes nothing can reach (dry run unless --apply).",
         "version": "Print package, protocol, schema, and interpreter versions.",
         "map": "Show local IDE workspaces and their sessions.",
         "monitor": "Show live Hive IDE agent/sidebar memory by session.",
@@ -1907,6 +1982,11 @@ def build_parser() -> argparse.ArgumentParser:
     hooks.add_argument("--home")
     hooks.add_argument("--stable-python")
     hooks.set_defaults(handler=cmd_hook_setup)
+
+    reap = command("reap")
+    reap.add_argument("--apply", action="store_true",
+                      help="actually signal the orphans; omit to preview them")
+    reap.set_defaults(handler=cmd_reap)
 
     verify = command("verify")
     verify.add_argument("--stable-python")
