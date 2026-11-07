@@ -44,7 +44,14 @@ def _source() -> dict:
     return {"kind": "stable", "interpreter": sys.executable, "version": __version__}
 
 
-def _frame(tmp_path: Path) -> tuple[Frame, dict]:
+def _frame(tmp_path: Path, monkeypatch) -> tuple[Frame, dict]:
+    # The frame's hooks run `<python> -m hive_ide.<module>` as tmux-server
+    # children, and a bare interpreter resolves the INSTALLED hive-ide, not this
+    # working tree. Without this the `client-attached` election cannot import
+    # and never runs, so the frame never elects a controller — which passes
+    # under a venv holding an editable install and fails under the bare
+    # interpreter the ship gate uses (`env PYTHONPATH=. python3 -m pytest`).
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parent.parent))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
@@ -140,9 +147,9 @@ def _settled_controllers(frame: Frame):
     )
 
 
-def test_a_second_attach_mirrors_the_first_client_instead_of_detaching_it(tmp_path):
+def test_a_second_attach_mirrors_the_first_client_instead_of_detaching_it(tmp_path, monkeypatch):
     """The regression that matters: the first screen stays attached."""
-    frame, _record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path, monkeypatch)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
@@ -168,9 +175,9 @@ def test_a_second_attach_mirrors_the_first_client_instead_of_detaching_it(tmp_pa
         frame.tmux(["kill-server"])
 
 
-def test_election_promotes_the_survivor_when_the_controller_leaves(tmp_path):
+def test_election_promotes_the_survivor_when_the_controller_leaves(tmp_path, monkeypatch):
     """Otherwise the last screen standing is stuck at the departed one's size."""
-    frame, _record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path, monkeypatch)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
@@ -202,14 +209,14 @@ def test_election_promotes_the_survivor_when_the_controller_leaves(tmp_path):
         frame.tmux(["kill-server"])
 
 
-def test_a_mirror_resizing_itself_does_not_move_the_frame(tmp_path):
+def test_a_mirror_resizing_itself_does_not_move_the_frame(tmp_path, monkeypatch):
     """The freeze cause, pinned.
 
     A mirror changing its own terminal size must not reflow the frame. Before
     this, `window-size latest` handed the window to whichever client moved most
     recently, so the stale screen won simply by existing.
     """
-    frame, record = _frame(tmp_path)
+    frame, record = _frame(tmp_path, monkeypatch)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
@@ -263,13 +270,13 @@ def test_a_mirror_resizing_itself_does_not_move_the_frame(tmp_path):
         frame.tmux(["kill-server"])
 
 
-def test_the_frame_still_sizes_to_the_latest_client(tmp_path):
+def test_the_frame_still_sizes_to_the_latest_client(tmp_path, monkeypatch):
     """Mirroring's premise: tmux is still asked to follow the active client.
 
     If this option ever changes, `ignore-size` stops being the thing that
     decides geometry and the tests above would pass for the wrong reason.
     """
-    frame, _record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path, monkeypatch)
     try:
         frame.open(no_attach=True)
         result = frame.tmux(["show-options", "-g", "window-size"])
@@ -279,14 +286,14 @@ def test_the_frame_still_sizes_to_the_latest_client(tmp_path):
         frame.tmux(["kill-server"])
 
 
-def test_activity_ties_so_creation_order_decides(tmp_path):
+def test_activity_ties_so_creation_order_decides(tmp_path, monkeypatch):
     """`client_activity` is whole seconds: a second screen TIES with the first.
 
     Ranking by activity therefore could not express "the newest screen" at all,
     and picked an arbitrary winner -- in practice the older, smaller client,
     pulling the frame back to its geometry.
     """
-    frame, _record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path, monkeypatch)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
@@ -317,14 +324,14 @@ def test_activity_ties_so_creation_order_decides(tmp_path):
         frame.tmux(["kill-server"])
 
 
-def test_repeated_elections_cannot_move_control(tmp_path):
+def test_repeated_elections_cannot_move_control(tmp_path, monkeypatch):
     """Concurrent hooks must agree.
 
     `client-attached` and `client-detached` both run `run-shell -b`, so several
     elections can overlap. Each decides from the client set alone, so running it
     again -- as a late hook does -- must change nothing.
     """
-    frame, _record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path, monkeypatch)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
