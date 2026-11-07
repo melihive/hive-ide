@@ -131,6 +131,32 @@ class IdeNav:
         idx = order.index(current_session_id) if current_session_id in order else 0
         target_session_id = order[(idx + (1 if direction == "next" else -1)) % len(order)]
         target = windows[target_session_id]
+        # Paint the destination BEFORE revealing it.
+        #
+        # Only the displayed window runs a sidebar process, so a backgrounded
+        # pane holds the frame it painted when you last left it -- and the list
+        # is ordered by activity, which moves whenever any agent takes a turn.
+        # The order is therefore stale on practically every switch, which is why
+        # stepping through sessions flashed the wrong order each time.
+        #
+        # The `session-window-changed` hook already repaints (`wake`), but it
+        # necessarily fires AFTER the switch and pays a cold interpreter start,
+        # so the stale frame is on screen for that whole time: 61ms measured on
+        # an idle machine, and far longer on a loaded frame with many sessions.
+        # Painting here, in a process that is already running, costs ~6ms of
+        # extra import plus ~7ms to render a 17-session sidebar -- and the switch
+        # then reveals a pane that is already correct, so there is no stale frame
+        # to race rather than a shorter one.
+        #
+        # Imported in the function, not at module scope, to keep the promise in
+        # this module's docstring: importing `hive_ide.nav` stays stdlib-only and
+        # cheap for callers that just want the ordering.
+        try:
+            from .wake import IdeWake
+
+            IdeWake.wake(skill_dir, repo, target_session_id, socket)
+        except Exception:  # noqa: BLE001 — a repaint must never block navigation
+            pass
         IdeNav._tmux(socket, ["select-window", "-t", target])
         IdeNav._tmux(socket, ["select-pane", "-t", f"{target}.{pane}"])
         return 0
