@@ -26,16 +26,30 @@ from __future__ import annotations
 
 import errno
 import os
+import re
+import signal
 import socket
 import stat
+import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Callable
 
 
 class SocketReaper:
     """Sweep dead tmux sockets this package left behind."""
 
     PREFIX = "hive-ide-"
+    #: The socket-name families this package hands out — an allowlist, so a
+    #: plain `default` belonging to somebody else is never touched.
+    #:
+    #: Deliberately NOT widened. One machine in 2026-11 held 190 dead sockets
+    #: under other `ide-`-ish names, and it is tempting to sweep those too — but
+    #: they are created by a HOST integration that embeds this package, not by
+    #: the package itself. A shipped package deleting another codebase's sockets
+    #: is exactly what the foreign-name test in `test_socket_gc.py` exists to
+    #: prevent. Their cleanup belongs to whoever creates them.
+    PREFIXES = ("hive-ide-",)
     MIN_AGE_SECONDS = 3600
     MAX_REMOVALS = 500
     CONNECT_TIMEOUT = 0.25
@@ -48,6 +62,11 @@ class SocketReaper:
     ):
         self.directory = Path(directory) if directory else self.default_directory()
         self.now = now if now is not None else time.time()
+
+    @classmethod
+    def ours(cls, name: str) -> bool:
+        """Is this a socket name this package hands out?"""
+        return any(name.startswith(prefix) for prefix in cls.PREFIXES)
 
     @staticmethod
     def default_directory() -> Path:
@@ -98,7 +117,7 @@ class SocketReaper:
 
     def _is_reapable(self, entry: Path, keep: set[str]) -> tuple[int, int, float] | None:
         """The identity we judged, or None when the entry must be kept."""
-        if not entry.name.startswith(self.PREFIX) or entry.name in keep:
+        if not self.ours(entry.name) or entry.name in keep:
             return None
         try:
             info = entry.lstat()
@@ -202,3 +221,220 @@ class SocketReaper:
             "removed": removed,
             "applied": apply,
         }
+
+
+class OrphanSweeper:
+    """Kill this package's processes that nothing can reach any more.
+
+    `SocketReaper` removes dead socket FILES. It never removes processes, so the
+    expensive leftovers survived every sweep: a tmux server whose socket file has
+    gone keeps running with every pane it owned, and each sidebar keep-alive shell
+    under it keeps forking twice a second — a `tmux display-message` and a guard
+    subshell — to ask a server it can no longer reach whether its window is
+    visible. Measured on one machine in 2026-11: a server up 65 hours with 30
+    such shells, about 60 wasted forks a second, invisible to every existing
+    check.
+
+    Two populations, judged differently, because the evidence differs:
+
+    **A keep-alive shell whose server PROCESS is gone** is unambiguously dead. It
+    has no pane to paint and no server to ask; nothing it does can ever reach a
+    screen again. Only a short age floor applies, so a frame starting up is never
+    caught mid-launch.
+
+    **A server that is merely unreachable** is judged much more slowly. It still
+    owns live panes, and — the part that makes haste dangerous — a client that
+    attached BEFORE its socket file was deleted keeps its open descriptor and
+    stays connected, so an unreachable server can still be on someone's screen.
+    It is reaped only when no client process references it at all and it has been
+    unreachable for a day.
+
+    Reachability is never inferred from the socket file alone: the file can be
+    missing while the server runs, and present while the server is dead.
+
+    Bounded, fail-open, and every kill independent: this runs inside `open` and
+    must never make opening a frame slow, let alone fail it.
+    """
+
+    #: Never race a frame that is starting: its shells exist before its server
+    #: finishes binding.
+    SHELL_MIN_AGE_SECONDS = 300
+    #: An unreachable server is only called abandoned after a day.
+    SERVER_MIN_AGE_SECONDS = 86400
+    MAX_KILLS = 200
+    TERM_GRACE_SECONDS = 2.0
+
+    _SOCKET_FLAG = re.compile(r"-L\s+([A-Za-z0-9._-]+)")
+    _TMUX_SOCKET_FLAG = re.compile(r"--tmux-socket\s+([A-Za-z0-9._-]+)")
+
+    def __init__(
+        self,
+        *,
+        rows: list[tuple[int, int, str]] | None = None,
+        kill: Callable[[int, int], None] | None = None,
+        now: float | None = None,
+    ):
+        self._rows = rows
+        self._kill = kill or os.kill
+        self.now = time.time() if now is None else now
+
+    # -- process table ----------------------------------------------------------
+
+    @staticmethod
+    def _ps() -> list[tuple[int, int, str]]:
+        """(pid, age_seconds, argv) for this user's processes.
+
+        `ps -axww -o pid=,etime=,args=` and nothing else: `-o comm=` prints
+        "tmux: server" WITH A SPACE, so a whitespace field split silently moves
+        "server ..." into the argv column and the server stops being recognised
+        at all. On macOS `pgrep -a` means "include ancestors" and prints no
+        command line, so pgrep is not an option either.
+        """
+        try:
+            result = subprocess.run(
+                ["ps", "-axww", "-o", "pid=,etime=,args="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return []
+        rows: list[tuple[int, int, str]] = []
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) != 3 or not parts[0].isdigit():
+                continue
+            rows.append((int(parts[0]), OrphanSweeper.etime_seconds(parts[1]), parts[2]))
+        return rows
+
+    @staticmethod
+    def etime_seconds(etime: str) -> int:
+        """`ps` elapsed time to seconds: `[[dd-]hh:]mm:ss`."""
+        days, _, rest = etime.partition("-")
+        if not rest:
+            rest, days = days, "0"
+        try:
+            bits = [int(b) for b in rest.split(":")]
+        except ValueError:
+            return 0
+        while len(bits) < 3:
+            bits.insert(0, 0)
+        return int(days) * 86400 + bits[0] * 3600 + bits[1] * 60 + bits[2]
+
+    # -- classification ---------------------------------------------------------
+
+    @classmethod
+    def classify(
+        cls, rows: list[tuple[int, int, str]]
+    ) -> tuple[dict[str, list[tuple[int, int]]], dict[str, list[int]], dict[str, list[tuple[int, int]]]]:
+        """(servers, clients, shells) keyed by socket name.
+
+        Decided from the EXECUTABLE first. A tmux server keeps the whole argv it
+        was started with, and for a frame that argv contains the pane command —
+        including `sh -c '... hive_ide.sidebar ...'`. Matching the sidebar string
+        first therefore classifies the server as one of its own keep-alive
+        shells, and the server then hides among them.
+        """
+        servers: dict[str, list[tuple[int, int]]] = {}
+        clients: dict[str, list[int]] = {}
+        shells: dict[str, list[tuple[int, int]]] = {}
+        mine = os.getpid()
+        for pid, age, argv in rows:
+            if pid == mine or not argv:
+                continue
+            executable = PurePosixPath(argv.split(None, 1)[0]).name
+            if executable != "tmux":
+                if "hive_ide.sidebar" not in argv:
+                    continue
+                match = cls._TMUX_SOCKET_FLAG.search(argv)
+                if match and SocketReaper.ours(match.group(1)):
+                    shells.setdefault(match.group(1), []).append((pid, age))
+                continue
+            match = cls._SOCKET_FLAG.search(argv)
+            if not match or not SocketReaper.ours(match.group(1)):
+                continue
+            name = match.group(1)
+            # A client attaches. A server keeps its start argv, and the process
+            # that merely STARTS one shares that argv but exits in milliseconds,
+            # which the age floors exclude.
+            if "attach" in argv:
+                clients.setdefault(name, []).append(pid)
+            else:
+                servers.setdefault(name, []).append((pid, age))
+        return servers, clients, shells
+
+    # -- sweep ------------------------------------------------------------------
+
+    def sweep(
+        self,
+        *,
+        reachable: set[str],
+        keep: set[str] | None = None,
+        apply: bool = False,
+    ) -> dict:
+        """Report, and optionally kill, the orphans.
+
+        `reachable` is the set of socket names whose server answered a connect —
+        the caller owns that probe, because it is the one expensive step and
+        `SocketReaper.is_listening` already does it per entry.
+        """
+        protected = set(keep or ()) | set(reachable)
+        rows = self._rows if self._rows is not None else self._ps()
+        servers, clients, shells = self.classify(rows)
+
+        doomed_servers: list[tuple[str, int]] = []
+        kept_servers: set[str] = set()
+        for name, entries in sorted(servers.items()):
+            for pid, age in entries:
+                if (
+                    name not in protected
+                    and not clients.get(name)
+                    and age >= self.SERVER_MIN_AGE_SECONDS
+                ):
+                    doomed_servers.append((name, pid))
+                else:
+                    kept_servers.add(name)
+
+        doomed_shells: list[tuple[str, int]] = []
+        for name, entries in sorted(shells.items()):
+            if name in protected or name in kept_servers:
+                # Either reachable, or its server survived a check above and may
+                # still be on a screen through an already-open descriptor.
+                continue
+            if name in servers and name not in {n for n, _ in doomed_servers}:
+                continue
+            for pid, age in entries:
+                if age >= self.SHELL_MIN_AGE_SECONDS:
+                    doomed_shells.append((name, pid))
+
+        doomed = (doomed_servers + doomed_shells)[: self.MAX_KILLS]
+        result = {
+            "servers": [pid for _n, pid in doomed_servers],
+            "shells": [pid for _n, pid in doomed_shells],
+            "sockets": sorted({name for name, _pid in doomed}),
+            "applied": apply,
+            "killed": [],
+        }
+        if not apply:
+            return result
+
+        killed: list[int] = []
+        for _name, pid in doomed:
+            try:
+                self._kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except OSError:
+                continue
+        if killed:
+            time.sleep(self.TERM_GRACE_SECONDS)
+            for pid in killed:
+                try:
+                    self._kill(pid, 0)
+                except OSError:
+                    continue      # already gone: SIGTERM was enough
+                try:
+                    self._kill(pid, signal.SIGKILL)
+                except OSError:
+                    continue
+        result["killed"] = killed
+        return result

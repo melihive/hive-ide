@@ -32,7 +32,7 @@ from .paths import config_path, state_home, workspace_key
 from .repair import SessionRepair
 from .relayout import IdeRelayout
 from .source import inspect_interpreter, resolve_source
-from .socket_gc import SocketReaper
+from .socket_gc import OrphanSweeper, SocketReaper
 from .store import StateStore, utc_now
 from .workspace_map import WorkspaceMap
 
@@ -1195,7 +1195,24 @@ def _reap_dead_sockets(frame: Frame, *, keep: set[str]) -> None:
     """
     try:
         directory = Path(frame.socket_path()).parent
-        SocketReaper(directory).sweep(keep=keep, apply=True)
+        reaper = SocketReaper(directory)
+        reaper.sweep(keep=keep, apply=True)
+        # Dead socket FILES are clutter; the processes behind them are not. A
+        # server whose socket has gone keeps running with every pane it owned,
+        # and each sidebar keep-alive under it forks twice a second forever to
+        # ask a server it cannot reach whether its window is visible. Found on
+        # one machine in 2026-11: a server up 65 hours with 30 such shells.
+        #
+        # Reachability is probed HERE and handed in, because it is the one
+        # expensive step and this already walks the directory for the file
+        # sweep. A name with no socket file is simply not reachable, which is
+        # exactly the case that matters.
+        reachable = {
+            entry.name
+            for entry in directory.iterdir()
+            if SocketReaper.is_listening(entry) is True
+        }
+        OrphanSweeper().sweep(reachable=reachable, keep=keep, apply=True)
     except Exception:
         pass
 
