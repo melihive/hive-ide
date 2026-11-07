@@ -23,10 +23,15 @@ SOCKET = "hive-ide-abc12345"
 OTHER = "hive-ide-def67890"
 
 # The real shapes matter: each of these argvs broke an earlier version.
+# Production's literal shape, probe text included — the classifier now requires
+# the probe verbatim, so a simplified copy here would not be the thing under test.
 SHELL_ARGV = (
     'sh -c unset NO_COLOR; while :; do if out=$(tmux display-message -p -t '
-    '"$TMUX_PANE" "#{{window_active}}" 2>/dev/null & pid=$!; (sleep 0.25; kill '
-    '"$pid") & guard=$!; wait "$pid"; exit "$rc") && [ "$out" = 1 ]; then '
+    '"$TMUX_PANE" "#{{window_active}}" 2>/dev/null & pid=$!; '
+    '(sleep 0.25; kill "$pid" 2>/dev/null) & guard=$!; '
+    'wait "$pid" 2>/dev/null; rc=$?; '
+    'kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; '
+    'exit "$rc") && [ "$out" = 1 ]; then '
     "/usr/bin/python3 -m hive_ide.sidebar --state-home /s --workspace-key /w "
     "--session-id sid --tmux-socket {socket}; sleep 1; else sleep 1; fi; done"
 )
@@ -550,3 +555,93 @@ def test_the_real_keep_alive_is_still_recognised():
     _servers, _clients, shells = OrphanSweeper.classify([shell(101, 7200)])
 
     assert list(shells) == [SOCKET]
+
+
+# -- the fifth review round -----------------------------------------------------
+
+
+def test_the_keepalive_signature_still_matches_what_frame_builds():
+    """The coupling guard. `socket_gc` cannot import `frame` (frame imports
+    socket_gc), so the signature is a copy — and a copy drifts silently.
+
+    If this goes red, the classifier has stopped recognising the real keep-alive,
+    which does not kill anything wrongly but does mean no shell is ever reaped
+    again. Re-sync the constant with the builder.
+    """
+    from hive_ide.frame import Frame
+
+    probe = Frame._sidebar_visible_probe()
+    assert OrphanSweeper._KEEPALIVE_SIGNATURE in probe, (
+        "the keep-alive signature no longer appears in what frame.py builds"
+    )
+
+
+def test_the_test_fixture_matches_the_real_probe_too():
+    """And the fixture is held to the same standard, so these tests cannot pass
+    against a shape production never emits."""
+    from hive_ide.frame import Frame
+
+    assert Frame._sidebar_visible_probe() in SHELL_ARGV.format(socket=SOCKET), (
+        "SHELL_ARGV has drifted from the probe frame.py actually emits"
+    )
+
+
+def test_a_grep_carrying_every_marker_is_still_not_a_keep_alive():
+    """Three loose substrings were defeatable: a shell running `grep -F` with a
+    pattern containing all of them was selected and signalled. The signature has
+    to appear as the probe itself."""
+    rows = [(705, 7200, "bash -c tail -F /var/log/x | grep -F 'while window_active "
+                        f"hive_ide.sidebar --tmux-socket {SOCKET}'")]
+
+    _servers, _clients, shells = OrphanSweeper.classify(rows)
+    assert shells == {}, "a grep carrying the markers was taken for the keep-alive"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == [] and kills.sent == []
+
+
+def test_incidental_attach_text_does_not_hide_an_orphan_server():
+    """A server whose working directory is `/work/attachments` read as a CLIENT,
+    so it vanished from the inventory and no orphan was ever reported. `attach`
+    counts only as a command token."""
+    rows = [(99, 86400 * 9,
+             f"tmux -L {SOCKET} -f /state/ide.conf new-session -d -s proj -c /work/attachments")]
+
+    servers, clients, _shells = OrphanSweeper.classify(rows)
+
+    assert list(servers) == [SOCKET], "incidental 'attach' text hid a real server"
+    assert clients == {}
+    assert OrphanSweeper(rows=rows).server_names() == {SOCKET}
+
+    found = OrphanSweeper(rows=rows).orphan_servers(unreachable={SOCKET})
+    assert [e["pid"] for e in found] == [99]
+
+
+def test_a_real_attach_is_still_a_client():
+    """The other direction."""
+    _servers, clients, _shells = OrphanSweeper.classify([client(500, 7200)])
+
+    assert list(clients) == [SOCKET]
+
+
+def test_another_users_process_is_never_a_candidate(monkeypatch):
+    """`ps -axww` lists every user. Unfiltered, a privileged run could reap
+    somebody else's healthy server: their socket is in their own directory, so it
+    answers nothing when we probe ours and looks abandoned."""
+    from hive_ide import socket_gc
+
+    mine, theirs = os.getuid(), os.getuid() + 1
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = (
+            f"  101 {theirs}  02:00:00 {SHELL_ARGV.format(socket=SOCKET)}\n"
+            f"  102 {mine}  02:00:00 {SHELL_ARGV.format(socket=OTHER)}\n"
+        )
+
+    monkeypatch.setattr(socket_gc.subprocess, "run", lambda *a, **k: _Result())
+    rows = OrphanSweeper._ps()
+    pids = [pid for pid, _age, _argv in rows]
+
+    assert pids == [102], f"kept another user's process: {pids}"

@@ -291,15 +291,31 @@ class OrphanSweeper:
     #: A standalone `-d`: what makes a `new-session` a SERVER start rather than a
     #: client that attaches. `attach -d` is excluded before this is consulted.
     _DETACHED_FLAG = re.compile(r"(?<!\S)-d(?!\S)")
+    #: As TOKENS. Searching the whole command line for "attach" matched a server
+    #: whose working directory was `/work/attachments`, which read as a client and
+    #: hid a genuine orphan from both `server_names()` and the inventory. A
+    #: session name or a pane command can do the same.
+    _ATTACH_WORD = re.compile(r"(?<!\S)attach(-session)?(?!\S)")
+    _NEW_SESSION_WORD = re.compile(r"(?<!\S)new-session(?!\S)")
     #: The keep-alive is a SHELL running a specific loop. Matching merely on the
     #: strings `hive_ide.sidebar` + `--tmux-socket` condemned anything that
     #: mentioned them — a diagnostic `grep`, or an agent process investigating
     #: this very code — so the executable and the loop's own shape both have to
     #: agree before anything is signalled.
     _SHELL_COMMANDS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
-    #: Markers of the real loop: the visibility guard it polls, and the `while`
-    #: that makes it a loop rather than a one-shot mention.
-    _KEEPALIVE_MARKERS = ("window_active", "hive_ide.sidebar", "while")
+    #: The keep-alive's own SIGNATURE, as one ordered string rather than a few
+    #: loose words. Three substrings "somewhere in argv" matched a `grep` whose
+    #: pattern happened to contain all three; this is the literal shape
+    #: `Frame._sidebar_visible_probe` emits, so a false positive has to reproduce
+    #: the probe verbatim. Kept in sync by
+    #: `test_the_keepalive_signature_still_matches_what_frame_builds`, which
+    #: compares it against the real builder — socket_gc cannot import frame,
+    #: because frame imports socket_gc.
+    _KEEPALIVE_SIGNATURE = (
+        'out=$(tmux display-message -p -t "$TMUX_PANE" "#{window_active}"'
+    )
+    #: And it must actually RUN the sidebar, as a module.
+    _KEEPALIVE_MODULE = "-m hive_ide.sidebar"
 
     def __init__(
         self,
@@ -332,29 +348,38 @@ class OrphanSweeper:
 
     @staticmethod
     def _ps() -> list[tuple[int, int, str]]:
-        """(pid, age_seconds, argv) for this user's processes.
+        """(pid, age_seconds, argv) for THIS USER's processes only.
 
-        `ps -axww -o pid=,etime=,args=` and nothing else: `-o comm=` prints
-        "tmux: server" WITH A SPACE, so a whitespace field split silently moves
-        "server ..." into the argv column and the server stops being recognised
-        at all. On macOS `pgrep -a` means "include ancestors" and prints no
-        command line, so pgrep is not an option either.
+        `-a` means every user, so the uid is read and filtered here rather than
+        trusted. Without that, a machine where this runs with elevated privileges
+        could reap another user's healthy server: their socket lives in their own
+        directory, so it answers nothing when we probe ours and looks abandoned.
+        Running unprivileged it would merely fail with EPERM — which is luck, not
+        a guard.
+
+        `-o comm=` is avoided because it prints "tmux: server" WITH A SPACE, so a
+        whitespace field split silently moves "server ..." into the argv column
+        and the server stops being recognised at all. On macOS `pgrep -a` means
+        "include ancestors" and prints no command line, so pgrep is out too.
         """
         try:
             result = subprocess.run(
-                ["ps", "-axww", "-o", "pid=,etime=,args="],
+                ["ps", "-axww", "-o", "pid=,uid=,etime=,args="],
                 capture_output=True,
                 text=True,
                 check=False,
             )
         except OSError:
             return []
+        mine = os.getuid()
         rows: list[tuple[int, int, str]] = []
         for line in result.stdout.splitlines():
-            parts = line.strip().split(None, 2)
-            if len(parts) != 3 or not parts[0].isdigit():
+            parts = line.strip().split(None, 3)
+            if len(parts) != 4 or not parts[0].isdigit() or not parts[1].isdigit():
                 continue
-            rows.append((int(parts[0]), OrphanSweeper.etime_seconds(parts[1]), parts[2]))
+            if int(parts[1]) != mine:
+                continue        # somebody else's process is never ours to signal
+            rows.append((int(parts[0]), OrphanSweeper.etime_seconds(parts[2]), parts[3]))
         return rows
 
     @staticmethod
@@ -396,7 +421,8 @@ class OrphanSweeper:
             if executable != "tmux":
                 if executable not in cls._SHELL_COMMANDS:
                     continue        # not a shell: cannot be the keep-alive loop
-                if not all(marker in argv for marker in cls._KEEPALIVE_MARKERS):
+                if (cls._KEEPALIVE_SIGNATURE not in argv
+                        or cls._KEEPALIVE_MODULE not in argv):
                     continue        # mentions the sidebar; is not the loop
                 match = cls._TMUX_SOCKET_FLAG.search(argv)
                 if match and SocketReaper.ours(match.group(1)):
@@ -418,9 +444,9 @@ class OrphanSweeper:
             # A server retains the argv of whatever client first started it, so if
             # that was an attaching form the server reads as a client too — again
             # erring toward keeping it.
-            if "attach" in argv:
+            if cls._ATTACH_WORD.search(argv):
                 clients.setdefault(name, []).append(pid)
-            elif "new-session" in argv and cls._DETACHED_FLAG.search(argv):
+            elif cls._NEW_SESSION_WORD.search(argv) and cls._DETACHED_FLAG.search(argv):
                 servers.setdefault(name, []).append((pid, age, argv))
             else:
                 clients.setdefault(name, []).append(pid)
