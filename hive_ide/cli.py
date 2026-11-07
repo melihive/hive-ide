@@ -1409,19 +1409,22 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             source_errors.append(f"{session['name']}: {exc}")
     frame = Frame(store)
     config_findings = frame.verify_user_config()
-    # A second attached client is invisible today and degrades the frame for
-    # everyone on it: the window sizes to whichever client was active last, so a
-    # stale one at a different size reflows every pane when focus moves.
+    # Several clients is normal: MIRRORING keeps every screen attached, one
+    # controlling the frame's geometry and the rest watching it (see
+    # `Frame.elect_controller`). What IS wrong is no controller or several —
+    # then the window is frozen at a departed screen's size, or two screens of
+    # different sizes are reflowing every pane between them, which is the
+    # condition people reported as the frame freezing.
     clients = frame.attached_clients()
+    controllers = [c for c in clients if c["controller"]]
     client_findings = (
         [
-            f"{len(clients)} clients attached to this frame "
-            f"({', '.join(c['size'] for c in clients)}); only the most recent is in "
-            "use. Re-run `hive-ide open` to take sole ownership, or detach the "
-            "others with `tmux -L "
-            f"{frame.socket} detach-client -t <client>`."
+            f"{len(clients)} client(s) attached "
+            f"({', '.join(c['size'] for c in clients)}) but "
+            f"{len(controllers)} of them size the frame; exactly one should. "
+            "Re-run `hive-ide open` from the screen you want in control."
         ]
-        if len(clients) > 1
+        if clients and len(controllers) != 1
         else []
     )
     # Two conditions that were completely invisible when they caused a visible
