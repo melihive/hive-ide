@@ -599,23 +599,81 @@ def test_open_isolates_and_reports_a_missing_session_directory(tmp_path, monkeyp
         frame.tmux(["kill-server"])
 
 
+_SHELL_COMMANDS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
+
+
 def _sidebar_running(pane_pid: str) -> bool | None:
-    """Is a `hive_ide.sidebar` process running under this keep-alive shell?
+    """Is a real `hive_ide.sidebar` process running under this keep-alive shell?
+
+    `pgrep -P <pid> -f hive_ide.sidebar` CANNOT answer this, and answered it
+    wrongly here until 2026-11-07. The keep-alive is a single `sh -c '<script>'`
+    whose script text contains the sidebar command, and every subshell it forks
+    inherits that argv verbatim -- so the visibility probe's own
+    `(sleep 0.25; kill ...)` guard matches the pattern while no sidebar exists at
+    all. That fork lives up to 250ms, once a second, so a bare pattern match is a
+    coin toss weighted by machine load: it went red twice inside the release
+    harness and never once in the same 922 tests run by hand.
+
+    Three independent discriminators, any one of which would do; all three
+    because this is the assertion standing between a sidebar-respawn regression
+    and the fleet, and a false green here is how the blank-pane bug shipped once
+    already:
+
+      - the executable is an interpreter, not a shell;
+      - the argv does not carry the visibility probe's `window_active`, which
+        only the keep-alive script contains;
+      - the argv still names the sidebar module.
+
+    `Frame._sidebar_wrapper_is_stale` draws the same `window_active` distinction
+    against the same confusion, which is the precedent for it.
+
+    Reads argv through `ps`, not `/proc`: this suite runs on macOS too. `-ww` is
+    load-bearing -- `ps` truncates to the terminal width, and under pytest
+    `COLUMNS` is 80, which cut this very argv off mid-path before the module name
+    appeared and made the positive case read as "no sidebar". `conftest.py` takes
+    the same precaution for the same reason.
 
     None when the process table cannot be read: unknown, not "no".
     """
     try:
-        result = subprocess.run(
-            ["pgrep", "-P", pane_pid, "-f", "hive_ide.sidebar"],
+        children = subprocess.run(
+            ["pgrep", "-P", pane_pid],
             capture_output=True,
             text=True,
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode not in (0, 1):
+    if children.returncode not in (0, 1):
         return None
-    return result.returncode == 0
+    pids = [p for p in children.stdout.split() if p.isdigit()]
+    if not pids:
+        return False
+    try:
+        listing = subprocess.run(
+            ["ps", "-ww", "-p", ",".join(pids), "-o", "pid=,comm=,args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode not in (0, 1):
+        return None
+    for line in listing.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3:
+            continue
+        _pid, comm, args = fields
+        if "hive_ide.sidebar" not in args:
+            continue
+        # The keep-alive script, or any subshell that inherited its argv.
+        if "window_active" in args:
+            continue
+        if Path(comm).name in _SHELL_COMMANDS:
+            continue
+        return True
+    return False
 
 
 def _until(predicate, *, timeout: float, interval: float = 0.02):
@@ -850,3 +908,105 @@ def test_a_driver_launch_finds_a_per_user_driver_from_a_minimal_path_client(
         assert launched() == ["built", "respawned"]
     finally:
         frame.tmux(["kill-server"])
+
+
+def _sh_loop_holding_a_child(script_body: str) -> subprocess.Popen:
+    """A `sh -c` script that keeps one forked subshell alive, like the keep-alive.
+
+    Two details make the child a shell that CARRIES the argv rather than one that
+    replaced it:
+
+      - `(sleep 30; :)` holds two commands. A subshell wrapping a single simple
+        command is exec-optimized away, and the child becomes `sleep` with its
+        own short argv -- which no longer reproduces anything. The real probe's
+        guard is `(sleep 0.25; kill ...)`, also two commands, and that is exactly
+        why it keeps the script's argv.
+      - 30s rather than 0.25s, so the check is deterministic. The real guard is a
+        race, and a regression test that only sometimes observes the thing it
+        guards is the bug it is testing.
+    """
+    return subprocess.Popen(
+        ["/bin/sh", "-c", f"{script_body} (sleep 30; :) & wait"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def test_sidebar_running_rejects_a_subshell_carrying_the_probe():
+    """The exact false positive that turned this file red in the release harness.
+
+    A subshell forked by the keep-alive inherits the parent's whole argv, which
+    contains BOTH the sidebar command and the visibility probe. `pgrep -f
+    hive_ide.sidebar` matches it; nothing is running.
+    """
+    body = 'if false; then python3 -m hive_ide.sidebar "#{window_active}"; fi;'
+    proc = _sh_loop_holding_a_child(body)
+    try:
+        assert _until(
+            lambda: _sidebar_running(str(proc.pid)) is not None, timeout=5.0
+        ), "the process table never became readable"
+        # The naive check this replaced: it must genuinely match, or this test
+        # proves nothing and the bug it guards could return unnoticed.
+        naive = subprocess.run(
+            ["pgrep", "-P", str(proc.pid), "-f", "hive_ide.sidebar"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert naive.returncode == 0, (
+            "the subshell no longer matches a bare pattern search, so this test "
+            "has stopped observing the false positive it exists for"
+        )
+        assert _sidebar_running(str(proc.pid)) is False
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_sidebar_running_rejects_a_shell_even_without_the_probe():
+    """The interpreter check stands alone.
+
+    Without `window_active` in the argv, only "the executable is a shell, not an
+    interpreter" can reject this. Pinned separately so neither discriminator can
+    rot behind the other.
+    """
+    body = "if false; then python3 -m hive_ide.sidebar; fi;"
+    proc = _sh_loop_holding_a_child(body)
+    try:
+        assert _until(
+            lambda: _sidebar_running(str(proc.pid)) is not None, timeout=5.0
+        ), "the process table never became readable"
+        assert _sidebar_running(str(proc.pid)) is False
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_sidebar_running_still_sees_a_real_sidebar():
+    """The positive arm.
+
+    A helper that answered "no" to everything would make the assertion it serves
+    vacuous, and this file has shipped a vacuously-green sidebar test before.
+
+    The trailing `; true` keeps the interpreter a DIRECT child: a shell given one
+    simple command execs it in place, and `cmd & wait` buries it a generation
+    deeper than `pgrep -P` looks. The keep-alive runs the sidebar in the
+    foreground of its loop, so a direct child is the shape being pinned.
+    """
+    proc = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            f'{shlex.quote(sys.executable)} -c "import time; time.sleep(30)" '
+            "hive_ide.sidebar; true",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _until(
+            lambda: _sidebar_running(str(proc.pid)) is True, timeout=10.0
+        ), "a real interpreter running hive_ide.sidebar was not detected"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
