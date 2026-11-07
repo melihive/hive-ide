@@ -545,11 +545,24 @@ class OrphanSweeper:
                         and SocketReaper.ours(match.group(1))):
                     shells.setdefault(match.group(1), []).append((pid, age, argv))
                 continue
+            # EVERY token whose basename names one of our sockets makes this
+            # process a protector of that socket. `ps` prints a command line with
+            # the quoting removed, so `-S "/some dir/hive-ide-X" attach` arrives
+            # as two tokens and the flag parse keeps only `/some` — the attached
+            # client then vanished from classification entirely and its server,
+            # whose socket file had been deleted, was reapable with a human still
+            # looking at its panes. Scanning the tokens finds the name anyway. It
+            # also settles `-L A -S /other/B`, where tmux uses B and we named A:
+            # both are protected, so neither is reaped on the strength of a guess
+            # about which flag won.
+            protects = {
+                candidate
+                for candidate in (PurePosixPath(t).name for t in argv.split())
+                if cls._SAFE_NAME.match(candidate) and SocketReaper.ours(candidate)
+            }
             # A server's argv ends with the command it was started with, so a `-S`
             # anywhere in it may belong to the PANE's command rather than to tmux.
-            # `-L` is therefore still what NAMES the socket — getting the name
-            # wrong would drop the server out of classification entirely and strip
-            # its sidebars of the one thing protecting them.
+            # `-L` is therefore still what NAMES the socket.
             by_path = cls._SOCKET_PATH_FLAG.search(argv)
             match = cls._SOCKET_FLAG.search(argv)
             if match is not None:
@@ -558,30 +571,34 @@ class OrphanSweeper:
                 name = PurePosixPath(by_path.group(1)).name
             else:
                 name = None
-            if name is None or not SocketReaper.ours(name):
-                continue
-            # But a `-S` anywhere still forfeits CANDIDACY, and so does a name we
-            # cannot vouch for. Every reachability probe runs `tmux -L <name>`,
-            # which resolves inside the CALLER's socket directory: a healthy
-            # detached server whose socket is somewhere else answers nothing there
-            # and reads exactly like an orphan. Neither case can be probed, so
-            # neither may be killed — both still protect their own name.
-            probeable = by_path is None and cls._SAFE_NAME.match(name) is not None
-            # Only a DETACHED `new-session -d` is a server. `tmux -L X new-session
-            # -A -s work` is a client that happens not to say "attach", and calling
-            # it a server let `reap` kill a live client and its panes. Everything
-            # unrecognised falls to `clients`, which is the protective side: a
-            # misread client spares a server, a misread server kills one.
+            # A `-S` anywhere forfeits CANDIDACY, and so does a name we cannot
+            # vouch for. Every reachability probe runs `tmux -L <name>`, which
+            # resolves inside the CALLER's socket directory: a healthy detached
+            # server whose socket is somewhere else answers nothing there and
+            # reads exactly like an orphan. Neither can be probed, so neither may
+            # be killed.
             #
-            # A server retains the argv of whatever client first started it, so if
-            # that was an attaching form the server reads as a client too — again
-            # erring toward keeping it.
-            if not probeable or cls._ATTACH_WORD.search(argv):
-                clients.setdefault(name, []).append(pid)
-            elif cls._NEW_SESSION_WORD.search(argv) and cls._DETACHED_FLAG.search(argv):
+            # And only a DETACHED `new-session -d` is a server at all. `tmux -L X
+            # new-session -A -s work` is a client that happens not to say
+            # "attach", and calling it a server let `reap` kill a live client and
+            # its panes. A server also retains the argv of whatever client first
+            # started it, so an attaching form reads as a client — erring toward
+            # keeping it. Everything unrecognised stays a protector, which is the
+            # side that costs forks rather than somebody's screen.
+            is_server = (
+                name is not None
+                and SocketReaper.ours(name)
+                and by_path is None
+                and cls._SAFE_NAME.match(name) is not None
+                and not cls._ATTACH_WORD.search(argv)
+                and cls._NEW_SESSION_WORD.search(argv) is not None
+                and cls._DETACHED_FLAG.search(argv) is not None
+            )
+            if is_server:
                 servers.setdefault(name, []).append((pid, age, argv))
-            else:
-                clients.setdefault(name, []).append(pid)
+                protects.discard(name)      # it does not protect itself
+            for other in sorted(protects):
+                clients.setdefault(other, []).append(pid)
         return servers, clients, shells
 
     # -- sweep ------------------------------------------------------------------

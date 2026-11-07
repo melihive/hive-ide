@@ -1073,8 +1073,11 @@ def test_a_socket_name_is_never_truncated_into_a_different_socket():
 
     servers, clients, _shells = OrphanSweeper.classify(rows)
     assert servers == {}, "an unprobeable name became a kill candidate"
-    assert clients == {odd: [99]}, "the name should be read whole, and protect"
     assert "hive-ide-project" not in servers, "the name was truncated"
+    assert "hive-ide-project" not in clients, "the name was truncated"
+    # It protects nothing either, and does not need to: a name nothing can be a
+    # candidate UNDER has nothing to protect.
+    assert clients == {}
 
     result, kills = reap(rows, unreachable={odd, "hive-ide-project"})
     assert result["servers"] == []
@@ -1236,3 +1239,46 @@ def test_a_server_still_unreachable_after_the_grace_IS_sigkilled():
     sweeper.reap_servers(unreachable={SOCKET}, apply=True)
 
     assert (99, signal.SIGKILL) in kills.sent
+
+
+# -- the eleventh review round --------------------------------------------------
+
+
+def test_a_client_whose_socket_path_holds_a_space_still_protects_its_server():
+    """`ps` prints a command line with the quoting stripped off.
+
+    `tmux -S "/some dir/tmux-1000/<socket>" attach` therefore arrives as two
+    tokens, and a flag parse keeps `/some`. The attached client vanished from
+    classification entirely — and with it the one guard that stops `reap` taking
+    down a server somebody is still looking at, because a deleted socket file
+    means tmux cannot be asked who is attached.
+    """
+    rows = [
+        server(99, 86400 * 9),
+        (150, 600, f"tmux -S /some dir/tmux-1000/{SOCKET} attach"),
+    ]
+
+    _servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert clients.get(SOCKET) == [150], "the attached client was invisible"
+
+    result, kills = reap(rows, unreachable={SOCKET})
+    assert result["servers"] == [], "reaped a server with a client still attached"
+    assert kills.sent == []
+
+
+def test_different_L_and_S_values_protect_BOTH_names():
+    """tmux gives `-S` precedence over `-L`, so `-L A -S /other/B` is on B while
+    we read A. Rather than guess which flag won, both names are protected — the
+    cost is a few unreaped forks, and the alternative is killing B's live
+    sidebars."""
+    other = "hive-ide-beefcafe"
+    argv = f"tmux -L {SOCKET} -S /other/{other} new-session -d -s x -n N"
+    rows = [(99, 7200, argv), shell(101, 7200), shell(102, 7200, other)]
+
+    servers, clients, _shells = OrphanSweeper.classify(rows)
+    assert servers == {}, "a server we cannot place became a candidate"
+    assert sorted(clients) == sorted([SOCKET, other]), "only one name was protected"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == [], "killed the sidebars of a live frame"
+    assert kills.sent == []
