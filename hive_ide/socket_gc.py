@@ -278,12 +278,10 @@ class OrphanSweeper:
     SERVER_MIN_AGE_SECONDS = 86400
     MAX_KILLS = 200
     TERM_GRACE_SECONDS = 2.0
-    #: `etime` has one-second granularity and the two reads of it are a moment
-    #: apart, so an age that comes back a hair below the recorded one is sampling,
-    #: not a different process. A RECYCLED pid comes back seconds old against a
-    #: candidate that had to be at least SHELL_MIN_AGE_SECONDS to be chosen at all,
-    #: so the real case is never near this margin.
-    AGE_REGRESSION_TOLERANCE = 2
+    #: `etime` has one-second granularity and the reads are not simultaneous, so
+    #: the two ages differ by a second or so even for one unchanging process.
+    #: Everything beyond that is a different process.
+    AGE_DRIFT_TOLERANCE = 3
 
     #: tmux accepts the value joined to the flag (`-Lname`), so the separator is
     #: OPTIONAL. Requiring whitespace made such a server invisible to `classify`,
@@ -384,11 +382,15 @@ class OrphanSweeper:
         #: not derivable from the `ps` rows that `rows` injects.
         self._cmdline = cmdline or self.cmdline_of
         self.now = time.time() if now is None else now
+        #: When the most recent process-table read happened, so the ages it
+        #: returned can be aged forward rather than merely compared.
+        self._selected_at: float | None = None
 
     # -- process table ----------------------------------------------------------
 
     def _snapshot(self) -> list[tuple[int, int, str]]:
         """A fresh read of the process table, honouring an injected source."""
+        self._selected_at = time.monotonic()
         if self._rows is None:
             return self._ps()
         if callable(self._rows):
@@ -949,7 +951,7 @@ class OrphanSweeper:
         """Does tmux STILL positively say there is no server on this socket?"""
         return self._answers(name) is False
 
-    def _unchanged(self, pid: int, age: int, argv: str) -> bool:
+    def _unchanged(self, pid: int, age: int, argv: str, since: float) -> bool:
         """Is this pid STILL the process that was selected? Unknown answers no.
 
         A pid proves nothing by itself — it is recycled, and on a busy machine it
@@ -957,16 +959,25 @@ class OrphanSweeper:
         spawned from one fixed command line, so a FRESH one wears a dead one's argv
         byte for byte and walks straight through an argv-only comparison.
 
-        Age closes it. Elapsed time only ever grows for one process, while a
-        replacement starts at zero — and a candidate had to be five minutes (a
-        shell) or a day (a server) old to be chosen, so the two are never close.
+        What separates them is WHEN each started, and that is not the same thing as
+        "is it older than the one I picked". Requiring only that the age had not
+        gone backwards let a replacement through whenever enough time passed: pick
+        a five-minute-old shell, spend ten minutes probing sockets one at a time,
+        and a replacement spawned a minute later now reports eight minutes — older
+        than the five we recorded, and wearing the same command line, so it was
+        signalled while its own live frame was still running.
+
+        So the age is checked against what it SHOULD be by now: the age at
+        selection plus the time actually spent since. One process tracks that
+        exactly; anything that started at a different moment does not.
         """
+        expected = age + (time.monotonic() - since)
         for other, other_age, other_argv in self._snapshot():
             if other != pid:
                 continue
             if other_argv != argv:
                 return False
-            return other_age + self.AGE_REGRESSION_TOLERANCE >= age
+            return abs(other_age - expected) <= self.AGE_DRIFT_TOLERANCE
         return False        # absent from the table, or the table could not be read
 
     def _terminate(
@@ -999,11 +1010,14 @@ class OrphanSweeper:
         process-table read, then the signal on the very next line.
         """
         was = {pid: (age, argv) for _n, pid, age, argv in candidates}
+        #: When the ages in `candidates` were read. Every later check measures
+        #: against this, so a long walk cannot make a replacement look old enough.
+        since = self._selected_at if self._selected_at is not None else time.monotonic()
         signalled: list[tuple[str, int]] = []
         for name, pid, age, expected in candidates:
             if confirm is not None and not confirm(name):
                 continue        # it answers again: it is not an orphan any more
-            if not self._unchanged(pid, age, expected):
+            if not self._unchanged(pid, age, expected, since):
                 continue        # exited, or the pid now belongs to something else
             try:
                 self._kill(pid, signal.SIGTERM)
@@ -1028,7 +1042,7 @@ class OrphanSweeper:
                 spared.append(pid)
                 continue
             age, expected = was[pid]
-            if not self._unchanged(pid, age, expected):
+            if not self._unchanged(pid, age, expected, since):
                 spared.append(pid)
                 continue            # different process, or unreadable — leave it
             try:

@@ -88,7 +88,12 @@ def _sweeper(rows, *, survive=None, answers=None, **kw):
     # for every one of them and protect the whole population — the server tests
     # would then pass while observing nothing. The default here says "its socket is
     # where we looked"; the tests about a DIFFERENT directory override it.
-    kw.setdefault("socket_root", lambda pid: OrphanSweeper.our_socket_root())
+    # A synthetic pair, matched on BOTH sides. Deriving the injected value from
+    # the real procfs reader made the whole suite pass by protecting everything on
+    # a host with no `/proc` — ten server tests that observe nothing rather than
+    # ten failures, which is the worse of the two.
+    kw.setdefault("socket_root", lambda pid: "mnt:test\0/tmp/test-sockets")
+    kw.setdefault("our_root", lambda: "mnt:test\0/tmp/test-sockets")
     # Injected pids have no `/proc` entry either. The default is the fixture argv
     # split on whitespace — i.e. "the real argv says exactly what `ps` rendered",
     # which is true of every fixture that contains no quoting. The tests about a
@@ -310,7 +315,8 @@ def test_a_vanished_pid_does_not_abort_the_sweep():
     kills = _Gone()
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=lambda name: False,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
@@ -497,7 +503,8 @@ def test_a_pid_reused_before_the_sigterm_is_never_signalled():
     sweeper = OrphanSweeper(
         rows=lambda: next(snapshots, reused), kill=kills,
         answers=lambda name: False,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
@@ -652,7 +659,8 @@ def test_incidental_attach_text_does_not_hide_an_orphan_server():
 
     found = OrphanSweeper(
         rows=rows,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: rows[0][2].split(),
     ).orphan_servers(unreachable={SOCKET})
     assert [e["pid"] for e in found] == [99]
@@ -871,7 +879,8 @@ def test_a_server_that_recovers_during_another_candidates_probe_is_spared():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=answers,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
     result = sweeper.reap_servers(unreachable={SOCKET, OTHER}, apply=True)
@@ -903,14 +912,15 @@ def test_a_pid_reused_by_an_IDENTICAL_command_line_is_still_not_signalled():
     )
 
 
-def test_the_same_process_a_little_older_is_still_signalled():
-    """The falsifying half: age going UP must not spare anything, or the guard
-    above would simply switch the reaper off."""
+def test_the_same_process_is_still_signalled():
+    """The falsifying half, or the guard above would switch the reaper off.
+
+    The age it reports a moment later is the age it was picked at plus the moment
+    — which for an unchanged process and a fast walk is the same number."""
     rows = [shell(101, 7200)]
-    older = [shell(101, 7260)]          # same process, one minute later
     snapshots = iter([rows])
 
-    result, kills = sweep(lambda: next(snapshots, older))
+    result, kills = sweep(lambda: next(snapshots, [shell(101, 7201)]))
 
     assert (101, signal.SIGTERM) in kills.sent
 
@@ -966,7 +976,8 @@ def test_a_server_in_OUR_socket_directory_is_still_reaped():
     """The falsifying half: the guard above must not simply switch the reaper off."""
     result, kills = reap(
         [server(99, 86400 * 9)], unreachable={SOCKET},
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
     )
 
     assert result["servers"] == [99]
@@ -1231,7 +1242,8 @@ def test_a_server_that_recovers_during_the_GRACE_window_is_not_sigkilled():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=answers,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
@@ -1251,7 +1263,8 @@ def test_a_server_still_unreachable_after_the_grace_IS_sigkilled():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=lambda name: False,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: {p: a.split() for p, _g, a in rows}.get(pid))
     sweeper.TERM_GRACE_SECONDS = 0.0
 
@@ -1470,7 +1483,8 @@ def test_a_server_spared_the_sigkill_is_not_reported_as_killed():
 
     sweeper = OrphanSweeper(
         rows=rows, kill=kills, answers=answers,
-        socket_root=lambda pid: OrphanSweeper.our_socket_root(),
+        socket_root=lambda pid: "mnt:test\0/tmp/test-sockets",
+        our_root=lambda: "mnt:test\0/tmp/test-sockets",
         cmdline=lambda pid: rows[0][2].split())
     sweeper.TERM_GRACE_SECONDS = 0.0
 
@@ -1597,11 +1611,9 @@ def test_the_same_path_in_a_different_mount_namespace_is_a_different_directory()
     Comparing the strings says "we looked where its socket is" about a directory
     that is not the one we probed.
     """
-    ours = OrphanSweeper.our_socket_root()
     rows = [server(99, 86400 * 9)]
-
-    elsewhere = f"mnt:999999999\0{OrphanSweeper.resolve_root(None)}"
-    assert elsewhere != ours, "the fixture must differ from our own namespace"
+    # Same directory STRING as the suite's own, different filesystem.
+    elsewhere = "mnt:999999999\0/tmp/test-sockets"
 
     result, kills = reap(rows, unreachable={SOCKET},
                          socket_root=lambda pid: elsewhere)
@@ -1644,4 +1656,73 @@ def test_the_real_keep_alive_still_matches_the_required_shape():
         "else sleep 1; fi; done")
     assert OrphanSweeper._KEEPALIVE_SHAPE.match(built) is not None, (
         "the shape check no longer matches what Frame builds"
+    )
+
+
+# -- the sixteenth review round -------------------------------------------------
+
+
+def test_a_replacement_that_has_had_time_to_AGE_is_still_not_signalled():
+    """"Older than the one I picked" is not identity.
+
+    Pick a five-minute-old shell, then spend ten minutes probing sockets one at a
+    time. A replacement spawned a minute after the original exited now reports
+    nine minutes — older than the five that were recorded, wearing the same
+    command line, and it was signalled while its own live frame was running.
+
+    What has to match is WHEN it started: the age it reports must be the age at
+    selection plus the time actually spent since, and almost no time has passed
+    here.
+    """
+    rows = [shell(101, 300)]
+    replacement = [shell(101, 540)]     # same pid and argv, started elsewhere
+    snapshots = iter([rows])
+
+    result, kills = sweep(lambda: next(snapshots, replacement))
+
+    assert result["shells"] == [101], "the original candidate was still selected"
+    assert kills.sent == [], (
+        "signalled a process that merely out-aged the one that was picked"
+    )
+
+
+def test_the_suites_injected_roots_do_not_depend_on_this_host():
+    """The harness injects BOTH sides of the directory comparison with the same
+    synthetic value. Deriving them from the real procfs reader made every server
+    test pass by protecting everything on a host without `/proc` — which is ten
+    tests that observe nothing, not ten tests that pass."""
+    sweeper, _kills = _sweeper([server(99, 86400 * 9)])
+
+    assert sweeper._our_root() is not None
+    assert sweeper._socket_root(99) == sweeper._our_root()
+
+
+def test_a_long_walk_does_not_spare_the_process_it_selected():
+    """The other side of aging the recorded ages forward.
+
+    Comparing against the age as recorded works only while the walk is instant.
+    Probing sockets one at a time is not instant — each call has its own
+    ten-second timeout — so a real, unchanged process reports an age that has
+    grown by however long the walk took. Treating that growth as "a different
+    process" would spare every candidate on exactly the slow runs the reaper
+    exists for.
+
+    This one genuinely spends a few seconds, because that is the thing under
+    test; nothing else here does.
+    """
+    drift = OrphanSweeper.AGE_DRIFT_TOLERANCE + 1
+    started = time.monotonic()
+
+    def rows():
+        # The same process, reporting its real age each time it is read.
+        return [shell(101, 300 + int(time.monotonic() - started))]
+
+    def answers(name):
+        time.sleep(drift)       # a socket probe that takes its time
+        return False
+
+    result, kills = sweep(rows, answers=answers)
+
+    assert (101, signal.SIGTERM) in kills.sent, (
+        "a slow walk made an unchanged process look like a replacement"
     )
