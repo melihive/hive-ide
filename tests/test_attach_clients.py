@@ -29,11 +29,14 @@ class _Result:
         self.stderr = ""
 
 
-def test_attach_keeps_the_existing_client_and_demotes_it_first(tmp_path, monkeypatch):
-    """No `-d`, and the incumbents are demoted BEFORE the exec.
+def test_attach_neither_detaches_nor_demotes_anyone(tmp_path, monkeypatch):
+    """No `-d`, and no demotion either.
 
-    Order matters and cannot be fixed afterwards: `execvp` replaces this
-    process, so there is no "after the attach" in which to run an election.
+    `execvp` replaces this process, so a demotion made here cannot be undone if
+    the attach then fails — tmux never fires `client-attached`, no election runs,
+    and every client is left a mirror with the window frozen at a departed
+    screen's size. It is also unnecessary: the client this attach creates is the
+    newest, and the election picks the newest.
     """
     from hive_ide.store import StateStore
 
@@ -42,37 +45,89 @@ def test_attach_keeps_the_existing_client_and_demotes_it_first(tmp_path, monkeyp
     store = StateStore(tmp_path / "state", workspace)
     frame = Frame(store, socket="hive-ide-test-attach")
 
-    events: list[str] = []
+    execed: list[list[str]] = []
+    tmux_calls: list[list[str]] = []
     monkeypatch.setattr(
         "hive_ide.frame.os.execvp",
-        lambda file, argv: events.append(f"exec:{' '.join(argv)}"),
-    )
-    monkeypatch.setattr(
-        Frame,
-        "demote_clients_to_mirrors",
-        lambda self: events.append("demote") or [],
+        lambda file, argv: execed.append(list(argv)),
     )
     monkeypatch.setattr(Frame, "require_tmux", lambda self: None)
     monkeypatch.setattr(Frame, "exists", lambda self: True)
     monkeypatch.setattr(Frame, "ensure", lambda self, record, **_kw: False)
     monkeypatch.setattr(Frame, "bind_keys", lambda self: None)
     monkeypatch.setattr(Frame, "windows", lambda self: {"s1": "@1"})
-    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Result("@1"))
+    monkeypatch.setattr(
+        Frame,
+        "tmux",
+        lambda self, args, **kw: (tmux_calls.append(list(args)), _Result("@1"))[1],
+    )
     monkeypatch.setattr(
         store, "list", lambda collection: [{"id": "s1", "name": "ONE"}]
     )
 
     frame.open()
 
-    assert events, "open() never attached"
-    assert events[0] == "demote", (
-        "the incumbents were not demoted before the exec, so whichever screen "
-        "was already here keeps a vote on the frame's geometry"
-    )
-    attach = next(e for e in events if e.startswith("exec:"))
-    assert "attach" in attach
-    assert " -d" not in attach, (
+    assert execed, "open() never attached"
+    argv = execed[0]
+    assert "attach" in argv
+    assert "-d" not in argv, (
         "attach still passes -d, which throws the other screen off the session"
+    )
+    demotions = [
+        c for c in tmux_calls if c[:1] == ["refresh-client"] and "ignore-size" in c
+    ]
+    assert demotions == [], (
+        f"open demoted a client before exec'ing, which cannot be undone if the "
+        f"attach fails: {demotions}"
+    )
+
+
+def test_a_stale_election_corrects_itself(frame, monkeypatch):
+    """Codex review finding, 2026-11-07.
+
+    Elections run from asynchronous hooks, so one can hold a client list from
+    before the newest client existed. Writing that answer promotes the older
+    screen and leaves TWO controllers — competing geometry votes, which is the
+    freeze. Read-then-write cannot be atomic here, so the election verifies its
+    own work and retries.
+
+    First read sees only the old client; every later read sees the new one.
+    """
+    flags = {"/dev/old": True}
+    created = {"/dev/old": 100, "/dev/new": 200}
+    reads = {"count": 0}
+
+    def fake_attached_clients(_self):
+        reads["count"] += 1
+        names = ["/dev/old"] if reads["count"] == 1 else ["/dev/new", "/dev/old"]
+        return [
+            {
+                "client": name,
+                "size": "80x24",
+                "last_active_epoch": 1,
+                "created_epoch": created[name],
+                "pid": created[name],
+                "controller": flags.get(name, True),
+            }
+            for name in names
+        ]
+
+    def fake_tmux(_self, args, **_kw):
+        if args[:1] == ["refresh-client"]:
+            target = args[args.index("-t") + 1]
+            flags[target] = args[-1] != "ignore-size"
+        return _Result()
+
+    monkeypatch.setattr(Frame, "attached_clients", fake_attached_clients)
+    monkeypatch.setattr(Frame, "tmux", fake_tmux)
+
+    elected = frame.elect_controller()
+
+    assert elected == "/dev/new", (
+        "the stale snapshot won: the older screen was promoted and never corrected"
+    )
+    assert flags == {"/dev/new": True, "/dev/old": False}, (
+        f"did not end with exactly one controller: {flags}"
     )
 
 

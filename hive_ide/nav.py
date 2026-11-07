@@ -27,6 +27,11 @@ class IdeNav:
     # refreshes once the burst lapses or the set of open windows changes.
     BURST_SECONDS = 8
 
+    #: Ceiling on the pre-switch sidebar repaint. Generous next to the ~40ms a
+    #: 17-session frame measures across real git checkouts, and far below the
+    #: seconds a stalled `git status` could otherwise cost a keypress.
+    PREPAINT_BUDGET_SECONDS = 0.2
+
     @staticmethod
     def _tmux(socket: str, args: list[str]) -> str:
         r = subprocess.run(["tmux", "-L", socket, *args], capture_output=True, text=True)
@@ -151,10 +156,35 @@ class IdeNav:
         # Imported in the function, not at module scope, to keep the promise in
         # this module's docstring: importing `hive_ide.nav` stays stdlib-only and
         # cheap for callers that just want the ordering.
+        #
+        # BUDGETED, because rendering is not reliably fast. The frame carries
+        # checkout decorations, and `git_status` shells out to git with a 2s
+        # timeout per call and keeps no cache, so a handful of slow or contended
+        # worktrees could stall a keypress for seconds. Measured here: ~40ms cold
+        # across five real checkouts, which is fine — it is the tail that is not,
+        # and navigation must never feel stuck. Over budget we simply abandon the
+        # repaint and switch; the `session-window-changed` hook still repaints
+        # exactly as it did before, so the worst case is the old behaviour.
+        #
+        # The whole frame is one `os.write` at the very end and the git probes
+        # dominate the time before it, so the timer lands in the probes. If it
+        # ever landed in the write, `paint_fd` reports the short write and the
+        # hook's repaint lands immediately after.
         try:
+            import signal
+
             from .wake import IdeWake
 
-            IdeWake.wake(skill_dir, repo, target_session_id, socket)
+            def _over_budget(_signum, _stack):
+                raise TimeoutError("sidebar prepaint over budget")
+
+            previous = signal.signal(signal.SIGALRM, _over_budget)
+            signal.setitimer(signal.ITIMER_REAL, IdeNav.PREPAINT_BUDGET_SECONDS)
+            try:
+                IdeWake.wake(skill_dir, repo, target_session_id, socket)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous)
         except Exception:  # noqa: BLE001 — a repaint must never block navigation
             pass
         IdeNav._tmux(socket, ["select-window", "-t", target])

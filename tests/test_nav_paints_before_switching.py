@@ -121,3 +121,65 @@ def test_a_failed_repaint_still_switches(monkeypatch):
         == 0
     )
     assert "select-window" in events, "a failed repaint blocked the switch"
+
+
+def test_a_slow_repaint_does_not_delay_the_switch(monkeypatch):
+    """The budget, pinned.
+
+    The frame carries checkout decorations, and `git_status` shells out to git
+    with a 2s timeout per call and no cache, so several slow worktrees could
+    stall a keypress for seconds. Navigation has to stay responsive: over budget
+    the repaint is abandoned and the switch happens anyway, which is exactly the
+    behaviour that shipped before the repaint existed.
+    """
+    import time
+
+    events: list[str] = []
+
+    def fake_tmux(_socket, args):
+        if args[:2] == ["list-windows", "-a"]:
+            return "@1\tsid-alpha\n@2\tsid-bravo"
+        if args[:1] == ["select-window"]:
+            events.append("select-window")
+            return ""
+        if "#{pane_index}" in args:
+            return "0"
+        return ""
+
+    monkeypatch.setattr(IdeNav, "_tmux", staticmethod(fake_tmux))
+    monkeypatch.setattr(
+        IdeNav, "_order", staticmethod(lambda *a, **k: ["sid-alpha", "sid-bravo"])
+    )
+    monkeypatch.setattr(IdeNav, "PREPAINT_BUDGET_SECONDS", 0.05)
+
+    def slow(*_a, **_k):
+        time.sleep(5)  # a wedged `git status`, in effect
+
+    import hive_ide.wake as wake_module
+
+    monkeypatch.setattr(wake_module.IdeWake, "wake", staticmethod(slow))
+
+    started = time.monotonic()
+    rc = IdeNav.main(
+        [
+            "nav",
+            "--state-home",
+            "/tmp/state",
+            "--workspace-key",
+            "/tmp/ws",
+            "--session-id",
+            "sid-alpha",
+            "--tmux-socket",
+            "sock",
+            "--direction",
+            "next",
+        ]
+    )
+    elapsed = time.monotonic() - started
+
+    assert rc == 0
+    assert "select-window" in events, "the budget stopped the switch entirely"
+    assert elapsed < 2.0, (
+        f"navigation waited {elapsed:.1f}s on the repaint; the budget is not "
+        "bounding it and a stalled checkout will hang a keypress"
+    )

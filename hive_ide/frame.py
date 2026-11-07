@@ -3046,15 +3046,6 @@ class Frame:
                 f"run-shell -b {shlex.quote(relayout_window)}",
             ]
         )
-        self.tmux(
-            [
-                "set-hook",
-                "-t",
-                self.target,
-                "client-attached",
-                f"run-shell -b {shlex.quote(relayout_window)}",
-            ]
-        )
         # Mirroring: re-elect the controller whenever the set of clients changes.
         # Hooked rather than decided once in `open`, because a client can arrive
         # by a plain `tmux attach` and leave by its terminal closing, and neither
@@ -3072,14 +3063,17 @@ class Frame:
                 self.socket,
             ],
         )
+        # ONE hook, ordered: elect, THEN relayout. As two independent hooks,
+        # relayout could read the departing client's 100x30 before the election
+        # demoted it, resize the panes to that, and leave a layout nothing
+        # afterwards corrects.
         self.tmux(
             [
                 "set-hook",
-                "-a",
                 "-t",
                 self.target,
                 "client-attached",
-                f"run-shell -b {shlex.quote(elect)}",
+                f"run-shell -b {shlex.quote(elect + '; ' + relayout_window)}",
             ]
         )
         self.tmux(
@@ -3233,8 +3227,28 @@ class Frame:
         )
         return clients
 
+    #: A stale election re-reads and corrects itself rather than locking. Three
+    #: attempts: concurrent elections agree on the answer (see
+    #: `_intended_controller`), so this only has to outlast clients arriving
+    #: mid-election, never a disagreement.
+    ELECTION_ATTEMPTS = 3
+
+    @staticmethod
+    def _intended_controller(clients: list[dict[str, Any]]) -> str | None:
+        """Who should be sizing the frame, given this client list.
+
+        The most recently created client, full stop — `attached_clients` is
+        ordered for exactly this. PURE, and that is the point: every concurrent
+        election derives the same answer from the same facts, so two overlapping
+        elections cannot disagree, only arrive at the same place twice.
+
+        It is also an invariant that can be CHECKED without trusting the flags,
+        which is what lets an election verify its own work below.
+        """
+        return clients[0]["client"] if clients else None
+
     def elect_controller(self) -> str | None:
-        """Give the most recently active client sole say over the frame's geometry.
+        """Give the newest screen sole say over the frame's geometry.
 
         MIRRORING. One controller, N mirrors: every other client is flagged
         `ignore-size`, so tmux stops counting it when it sizes the window. A
@@ -3252,64 +3266,36 @@ class Frame:
         and the second screen no longer has to be thrown off to keep the first
         one stable.
 
-        The winner is the most recently CREATED client that has not been demoted,
-        and the most recently created client of all when every one of them has.
-        Deciding it from the client set alone -- never from which hook happens to
-        be running -- is what makes this safe to call from an asynchronous
-        `run-shell -b` hook: every concurrent election computes the same answer,
-        so they cannot fight. Two earlier attempts could:
-
-          - ranking by `client_activity` tied (whole seconds) and arbitrarily
-            handed a new frame to the stale 100x30 screen over the live 160x48;
-          - honouring "the client that just attached" let a slow hook land after
-            `open` had demoted its client and re-promote it, so the winner was
-            whichever hook finished last rather than whichever screen arrived
-            last. That was flaky in CI 2 runs in 3.
-
-        Demotion is therefore meaningful: `open` demotes the incumbents, and the
-        client it then attaches is the only claimant, which is how the screen you
-        just opened from takes control no matter what else is watching.
+        Elections run from asynchronous `run-shell -b` hooks, so several can
+        overlap, and an earlier one can hold a client list from before the newest
+        client existed. Writing that stale answer would leave TWO controllers and
+        restore the competing votes -- so the election re-reads afterwards and
+        retries until what it sees is what `_intended_controller` would choose.
+        Read-then-write cannot be made atomic here, but it can be made
+        self-correcting, which needs no lock and cannot deadlock a frame.
 
         Returns the elected client, or None when nothing is attached.
         """
-        clients = self.attached_clients()
-        if not clients:
-            return None
-        claimable = [c for c in clients if c["controller"]]
-        controller = (claimable or clients)[0]["client"]
-        names = [c["client"] for c in clients]
-        # Demote first: promoting first would briefly leave two voters, which is
-        # the exact condition this exists to prevent.
-        for name in names:
-            if name == controller:
-                continue
-            self.tmux(["refresh-client", "-t", name, "-f", "ignore-size"])
-        # A leading `!` clears a flag on an already-attached client. Re-asserted
-        # every election because the controller may be a mirror being promoted
-        # after the previous controller detached.
-        self.tmux(["refresh-client", "-t", controller, "-f", "!ignore-size"])
+        controller: str | None = None
+        for _ in range(self.ELECTION_ATTEMPTS):
+            clients = self.attached_clients()
+            if not clients:
+                return None
+            controller = self._intended_controller(clients)
+            for client in clients:
+                if client["client"] == controller:
+                    continue
+                self.tmux(["refresh-client", "-t", client["client"], "-f", "ignore-size"])
+            # A leading `!` clears a flag on an already-attached client.
+            self.tmux(["refresh-client", "-t", controller, "-f", "!ignore-size"])
+
+            after = self.attached_clients()
+            if not after:
+                return None
+            holding = [c["client"] for c in after if c["controller"]]
+            if holding == [self._intended_controller(after)]:
+                return holding[0]
         return controller
-
-    def demote_clients_to_mirrors(self) -> list[str]:
-        """Flag every attached client `ignore-size`, naming those that took it.
-
-        Called immediately before this process execs into `tmux attach`. The
-        incoming client attaches WITHOUT the flag and is therefore the only one
-        with a vote -- the newest screen controls the frame, which is the
-        behaviour `window-size latest` always promised and could not deliver
-        while stale clients kept voting.
-
-        Done before the exec because there is no "after": `execvp` replaces this
-        process, so a post-attach election would never run.
-        """
-        demoted: list[str] = []
-        for client in self.attached_clients():
-            result = self.tmux(
-                ["refresh-client", "-t", client["client"], "-f", "ignore-size"]
-            )
-            if result.returncode == 0:
-                demoted.append(client["client"])
-        return demoted
 
     def plan_launch_stagger(
         self, sessions: list[dict[str, Any]] | None = None
@@ -3463,12 +3449,18 @@ class Frame:
             # whoever was already here (2026-10-13): two clients of different
             # sizes made `window-size latest` flip the window's geometry between
             # them and reflow every pane, which is what people reported as the
-            # frame freezing. But the damage came from the extra VOTE, not the
-            # extra client — so demote the incumbents to `ignore-size` mirrors
-            # and let them keep watching. They still render the same frame live,
-            # truncated to their own terminal; this client, attached without the
-            # flag and therefore the only voter, sizes it.
-            self.demote_clients_to_mirrors()
+            # frame freezing. The damage came from the extra VOTE, not the extra
+            # client, so the incumbents stay attached as `ignore-size` mirrors
+            # and keep watching — same frame, live, truncated to their terminal.
+            #
+            # Nothing is demoted HERE, deliberately. `execvp` replaces this
+            # process, so a demotion made now cannot be undone if the attach
+            # then fails (no terminal, for instance): tmux never fires
+            # `client-attached`, no election runs, and every client is left a
+            # mirror with the window frozen at a departed screen's size. It is
+            # also unnecessary — the client this attach creates is the newest,
+            # and `_intended_controller` picks the newest, so it takes control
+            # through the ordinary `client-attached` election.
             os.execvp("tmux", ["tmux", "-L", self.socket, "attach", "-t", self.target])
         return {
             "tmux_socket": self.socket,

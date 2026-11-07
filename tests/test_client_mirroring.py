@@ -125,40 +125,37 @@ def _window_size(frame: Frame, window: str) -> str:
     return result.stdout.strip()
 
 
-def test_a_second_open_mirrors_the_first_client_instead_of_detaching_it(tmp_path):
+def _settled_controllers(frame: Frame):
+    """Wait until exactly one client is sizing the frame, then return it.
+
+    Converged, not instantaneous: the elections run from `run-shell -b` hooks.
+    """
+    return _wait_for(
+        lambda: (
+            [c for c in frame.attached_clients() if c["controller"]]
+            if sum(1 for c in frame.attached_clients() if c["controller"]) == 1
+            else None
+        ),
+        timeout=20.0,
+    )
+
+
+def test_a_second_attach_mirrors_the_first_client_instead_of_detaching_it(tmp_path):
     """The regression that matters: the first screen stays attached."""
-    frame, record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
         clients.append(_attach_client(frame.socket, frame.target, cols=100, rows=30))
         assert _clients_numbering(frame, 1), "the first client never attached"
-
-        # Exactly what `open` does in the breath before it execs `tmux attach`.
-        assert frame.demote_clients_to_mirrors() == [
-            frame.attached_clients()[0]["client"]
-        ]
         clients.append(_attach_client(frame.socket, frame.target, cols=160, rows=48))
-
         rows = _clients_numbering(frame, 2)
         assert rows, (
             "a second attach left only one client: mirroring has regressed to the "
             "`-d` eviction it replaced"
         )
 
-        # Converged, not instantaneous. The elections run from `run-shell -b`
-        # hooks, and between `open` demoting the incumbent and the new client
-        # attaching there is a moment when every attached client is a mirror --
-        # where the election correctly promotes the survivor, as it must after a
-        # detach. The new client's own election then settles it.
-        settled = _wait_for(
-            lambda: (
-                [c for c in frame.attached_clients() if c["controller"]]
-                if sum(1 for c in frame.attached_clients() if c["controller"]) == 1
-                else None
-            ),
-            timeout=20.0,
-        )
+        settled = _settled_controllers(frame)
         assert settled, (
             f"never settled on exactly one controller: {frame.attached_clients()!r}"
         )
@@ -173,21 +170,20 @@ def test_a_second_open_mirrors_the_first_client_instead_of_detaching_it(tmp_path
 
 def test_election_promotes_the_survivor_when_the_controller_leaves(tmp_path):
     """Otherwise the last screen standing is stuck at the departed one's size."""
-    frame, record = _frame(tmp_path)
+    frame, _record = _frame(tmp_path)
     clients: list[tuple[subprocess.Popen, int]] = []
     try:
         frame.open(no_attach=True)
         first = _attach_client(frame.socket, frame.target, cols=100, rows=30)
         clients.append(first)
         assert _clients_numbering(frame, 1), "the first client never attached"
-        frame.demote_clients_to_mirrors()
         second = _attach_client(frame.socket, frame.target, cols=160, rows=48)
         clients.append(second)
         assert _clients_numbering(frame, 2), "the second client never attached"
         assert frame.elect_controller() is not None
-
-        mirror = [c for c in frame.attached_clients() if not c["controller"]]
-        assert len(mirror) == 1, "setup did not produce exactly one mirror"
+        assert len([c for c in frame.attached_clients() if not c["controller"]]) == 1, (
+            "setup did not produce exactly one mirror"
+        )
 
         second[0].kill()
         second[0].wait(timeout=10)
@@ -222,23 +218,20 @@ def test_a_mirror_resizing_itself_does_not_move_the_frame(tmp_path):
         )
         clients.append((mirror_proc, mirror_fd))
         assert _clients_numbering(frame, 1), "the mirror never attached"
-        frame.demote_clients_to_mirrors()
         clients.append(_attach_client(frame.socket, frame.target, cols=160, rows=48))
         assert _clients_numbering(frame, 2), "the controller never attached"
-        frame.elect_controller()
+        assert _settled_controllers(frame), "never settled on one controller"
 
         window = frame.windows()[record["id"]]
         # The controller's WIDTH, not its full size: tmux spends a row on the
         # status line, and relayout may snap the height. Width is the axis the
         # pane reflow is visible on anyway.
-        settled = _wait_for(
+        assert _wait_for(
             lambda: _window_size(frame, window).startswith("160x") or None,
             timeout=20.0,
-        )
-        assert settled, (
+        ), (
             f"the frame never took the controller's width, got "
-            f"{_window_size(frame, window)!r}; clients="
-            f"{frame.attached_clients()!r}"
+            f"{_window_size(frame, window)!r}; clients={frame.attached_clients()!r}"
         )
         before = _window_size(frame, window)
 
@@ -247,14 +240,11 @@ def test_a_mirror_resizing_itself_does_not_move_the_frame(tmp_path):
         os.kill(mirror_proc.pid, signal.SIGWINCH)
 
         # The resize must genuinely land, or this test observes nothing.
-        resized = _wait_for(
-            lambda: any(
-                c["size"] == "200x60" for c in frame.attached_clients()
-            )
+        assert _wait_for(
+            lambda: any(c["size"] == "200x60" for c in frame.attached_clients())
             or None,
             timeout=15.0,
-        )
-        assert resized, (
+        ), (
             "the mirror never reported its new size, so this test did not "
             "exercise the geometry vote it exists to check"
         )
@@ -294,7 +284,7 @@ def test_activity_ties_so_creation_order_decides(tmp_path):
 
     Ranking by activity therefore could not express "the newest screen" at all,
     and picked an arbitrary winner -- in practice the older, smaller client,
-    pulling the frame back to its geometry. Creation order is what decides.
+    pulling the frame back to its geometry.
     """
     frame, _record = _frame(tmp_path)
     clients: list[tuple[subprocess.Popen, int]] = []
@@ -302,7 +292,6 @@ def test_activity_ties_so_creation_order_decides(tmp_path):
         frame.open(no_attach=True)
         clients.append(_attach_client(frame.socket, frame.target, cols=100, rows=30))
         assert _clients_numbering(frame, 1), "the first client never attached"
-        frame.demote_clients_to_mirrors()
         clients.append(_attach_client(frame.socket, frame.target, cols=160, rows=48))
         rows = _clients_numbering(frame, 2)
         assert rows, "the second client never attached"
@@ -328,51 +317,12 @@ def test_activity_ties_so_creation_order_decides(tmp_path):
         frame.tmux(["kill-server"])
 
 
-def test_the_newest_screen_ends_up_in_control_without_any_demotion(tmp_path):
-    """A plain `tmux attach` -- nobody called `open`, so nothing was demoted.
-
-    Both clients arrive unflagged, so both are claimants and creation order is
-    the only thing separating them. The newest screen must end up driving: that
-    is the behaviour `window-size latest` always promised.
-    """
-    frame, _record = _frame(tmp_path)
-    clients: list[tuple[subprocess.Popen, int]] = []
-    try:
-        frame.open(no_attach=True)
-        clients.append(_attach_client(frame.socket, frame.target, cols=100, rows=30))
-        assert _clients_numbering(frame, 1), "the first client never attached"
-        clients.append(_attach_client(frame.socket, frame.target, cols=160, rows=48))
-        assert _clients_numbering(frame, 2), "the second client never attached"
-
-        settled = _wait_for(
-            lambda: (
-                [c for c in frame.attached_clients() if c["controller"]]
-                if sum(1 for c in frame.attached_clients() if c["controller"]) == 1
-                else None
-            ),
-            timeout=20.0,
-        )
-        assert settled, (
-            f"the frame never settled on exactly one controller: "
-            f"{frame.attached_clients()!r}"
-        )
-        assert settled[0]["size"] == "160x48", (
-            f"the older screen ended up in control: {frame.attached_clients()!r}"
-        )
-    finally:
-        _close(clients)
-        frame.tmux(["kill-server"])
-
-
 def test_repeated_elections_cannot_move_control(tmp_path):
     """Concurrent hooks must agree.
 
     `client-attached` and `client-detached` both run `run-shell -b`, so several
     elections can overlap. Each decides from the client set alone, so running it
-    again -- as a late hook does -- must change nothing. An earlier version
-    honoured "the client that just attached" and a late hook re-promoted a
-    demoted mirror, making the winner whichever hook finished last: flaky 2 runs
-    in 3.
+    again -- as a late hook does -- must change nothing.
     """
     frame, _record = _frame(tmp_path)
     clients: list[tuple[subprocess.Popen, int]] = []
@@ -380,7 +330,6 @@ def test_repeated_elections_cannot_move_control(tmp_path):
         frame.open(no_attach=True)
         clients.append(_attach_client(frame.socket, frame.target, cols=100, rows=30))
         assert _clients_numbering(frame, 1), "the first client never attached"
-        frame.demote_clients_to_mirrors()
         clients.append(_attach_client(frame.socket, frame.target, cols=160, rows=48))
         assert _clients_numbering(frame, 2), "the second client never attached"
 
