@@ -466,3 +466,87 @@ def test_a_pid_reused_before_the_sigterm_is_never_signalled():
         "signalled a pid that no longer carries the argv it was selected on"
     )
     assert result["killed"] == []
+
+
+# -- the fourth review round ----------------------------------------------------
+
+
+def test_a_server_started_with_a_compact_flag_is_still_seen():
+    """tmux accepts `-Lname` with no space. A server the classifier cannot see has
+    no presence to protect its sidebars, so the live frame's shells get reaped —
+    which is why a missed match here is expensive rather than merely untidy."""
+    rows = [
+        (99, 7200, f"tmux -L{SOCKET} -f /state/ide.conf new-session -d -s x -n N -c /w"),
+        shell(101, 7200),
+    ]
+
+    servers, _clients, shells = OrphanSweeper.classify(rows)
+    assert list(servers) == [SOCKET], "a compact -Lname server was invisible"
+
+    result, kills = sweep(rows)
+    assert result["shells"] == [], "reaped a live frame's sidebars"
+    assert kills.sent == []
+
+
+def test_a_compact_socket_path_client_still_protects_its_server():
+    """`-S/path` joined the same way."""
+    rows = [server(99, 86400 * 9), (500, 86400 * 9, f"tmux -S/tmp/tmux-1000/{SOCKET} attach")]
+
+    result, kills = reap(rows, unreachable=[SOCKET])
+
+    assert result["servers"] == []
+    assert kills.sent == []
+
+
+def test_an_equals_joined_tmux_socket_flag_is_read():
+    _servers, _clients, shells = OrphanSweeper.classify(
+        [(101, 7200, SHELL_ARGV.format(socket=SOCKET).replace(
+            f"--tmux-socket {SOCKET}", f"--tmux-socket={SOCKET}"))]
+    )
+    assert list(shells) == [SOCKET]
+
+
+def test_a_flag_like_string_inside_a_path_is_not_the_flag():
+    """The token anchor: `/opt/-Lsomething` must not read as `-L something`."""
+    rows = [(99, 7200, f"/usr/bin/python3 /opt/-L{SOCKET}/run.py")]
+
+    servers, clients, shells = OrphanSweeper.classify(rows)
+
+    assert servers == {} and clients == {} and shells == {}
+
+
+def test_a_process_that_merely_MENTIONS_the_sidebar_is_never_reaped():
+    """The self-match trap. An agent or a diagnostic whose command line contains
+    `hive_ide.sidebar` and `--tmux-socket hive-ide-…` is not a keep-alive loop,
+    and signalling it would kill the very investigation looking into this code.
+
+    Both halves must agree: a shell executable AND the loop's own shape.
+    """
+    mentions = [
+        (701, 7200, f"codex exec --task investigate hive_ide.sidebar --tmux-socket {SOCKET}"),
+        (702, 7200, f"/usr/bin/grep -rn hive_ide.sidebar --tmux-socket {SOCKET}"),
+        (703, 7200, f"python3 -m pytest -k hive_ide.sidebar --tmux-socket {SOCKET}"),
+    ]
+
+    _servers, _clients, shells = OrphanSweeper.classify(mentions)
+    assert shells == {}, "a process that only names the sidebar was taken for one"
+
+    result, kills = sweep(mentions)
+    assert result["shells"] == []
+    assert kills.sent == []
+
+
+def test_a_shell_without_the_loops_shape_is_not_a_keep_alive():
+    """A shell is necessary but not sufficient — `bash -c 'grep …'` is not the loop."""
+    rows = [(704, 7200, f"bash -c grep -rn hive_ide.sidebar --tmux-socket {SOCKET}")]
+
+    _servers, _clients, shells = OrphanSweeper.classify(rows)
+
+    assert shells == {}, "a one-shot shell command was taken for the keep-alive loop"
+
+
+def test_the_real_keep_alive_is_still_recognised():
+    """The other direction, or the narrowing would spare every orphan there is."""
+    _servers, _clients, shells = OrphanSweeper.classify([shell(101, 7200)])
+
+    assert list(shells) == [SOCKET]

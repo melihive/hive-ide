@@ -276,15 +276,30 @@ class OrphanSweeper:
     MAX_KILLS = 200
     TERM_GRACE_SECONDS = 2.0
 
-    _SOCKET_FLAG = re.compile(r"-L\s+([A-Za-z0-9._-]+)")
-    _TMUX_SOCKET_FLAG = re.compile(r"--tmux-socket\s+([A-Za-z0-9._-]+)")
+    #: tmux accepts the value joined to the flag (`-Lname`), so the separator is
+    #: OPTIONAL. Requiring whitespace made such a server invisible to `classify`,
+    #: and an invisible server means its live sidebars look orphaned and get
+    #: reaped — the asymmetry that makes a missed match expensive rather than
+    #: merely untidy. Anchored at a token boundary so `-L` inside a path or a
+    #: quoted string cannot masquerade as the flag.
+    _SOCKET_FLAG = re.compile(r"(?<!\S)-L\s*([A-Za-z0-9._-]+)")
+    _TMUX_SOCKET_FLAG = re.compile(r"(?<!\S)--tmux-socket[\s=]\s*([A-Za-z0-9._-]+)")
     #: `tmux -S <path> attach` names the socket by PATH and carries no `-L`, so a
     #: client matched on `-L` alone is invisible and its server loses the one
     #: protection that keeps a live screen alive. The basename IS the socket name.
-    _SOCKET_PATH_FLAG = re.compile(r"-S\s+(\S+)")
+    _SOCKET_PATH_FLAG = re.compile(r"(?<!\S)-S\s*(\S+)")
     #: A standalone `-d`: what makes a `new-session` a SERVER start rather than a
     #: client that attaches. `attach -d` is excluded before this is consulted.
     _DETACHED_FLAG = re.compile(r"(?<!\S)-d(?!\S)")
+    #: The keep-alive is a SHELL running a specific loop. Matching merely on the
+    #: strings `hive_ide.sidebar` + `--tmux-socket` condemned anything that
+    #: mentioned them — a diagnostic `grep`, or an agent process investigating
+    #: this very code — so the executable and the loop's own shape both have to
+    #: agree before anything is signalled.
+    _SHELL_COMMANDS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
+    #: Markers of the real loop: the visibility guard it polls, and the `while`
+    #: that makes it a loop rather than a one-shot mention.
+    _KEEPALIVE_MARKERS = ("window_active", "hive_ide.sidebar", "while")
 
     def __init__(
         self,
@@ -379,8 +394,10 @@ class OrphanSweeper:
                 continue
             executable = PurePosixPath(argv.split(None, 1)[0]).name
             if executable != "tmux":
-                if "hive_ide.sidebar" not in argv:
-                    continue
+                if executable not in cls._SHELL_COMMANDS:
+                    continue        # not a shell: cannot be the keep-alive loop
+                if not all(marker in argv for marker in cls._KEEPALIVE_MARKERS):
+                    continue        # mentions the sidebar; is not the loop
                 match = cls._TMUX_SOCKET_FLAG.search(argv)
                 if match and SocketReaper.ours(match.group(1)):
                     shells.setdefault(match.group(1), []).append((pid, age, argv))
