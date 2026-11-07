@@ -325,6 +325,7 @@ class OrphanSweeper:
              | None = None,
         kill: Callable[[int, int], None] | None = None,
         argv_of: Callable[[int], str | None] | None = None,
+        answers: Callable[[str], bool | None] | None = None,
         now: float | None = None,
     ):
         #: A list pins ONE snapshot; a CALLABLE is re-read on every access, which
@@ -334,6 +335,10 @@ class OrphanSweeper:
         self._rows = rows
         self._kill = kill or os.kill
         self._argv_reader = argv_of
+        #: Injectable so the unit suite stays hermetic: without it every shell
+        #: candidate shells out to a real `tmux has-session`, which makes the
+        #: tests depend on the machine's sockets rather than on their own rows.
+        self._answers = answers or self.server_answers
         self.now = time.time() if now is None else now
 
     # -- process table ----------------------------------------------------------
@@ -457,18 +462,28 @@ class OrphanSweeper:
     def sweep(self, *, keep: set[str] | None = None, apply: bool = False) -> dict:
         """Reap keep-alive shells whose server process is GONE. Servers: never.
 
-        Takes no reachability argument on purpose. A shell is judged against the
-        same `ps` snapshot that found it: if no server process anywhere names its
-        socket, no server exists for it to reach, in any socket directory, and the
-        shell can never paint a pane again. That is positive evidence, not the
-        absence of a probe result — so there is no unknown state to mishandle and
-        no directory to be scoped wrongly.
+        Takes no reachability argument on purpose: it establishes its own, and it
+        needs TWO INDEPENDENT NEGATIVES before it will signal anything, because
+        each covers the other's blind spot.
+
+        The process table alone is not enough. tmux's option surface is richer than
+        any regex — `-uLname` groups short options, `$TMUX` names the socket with
+        no flag at all — so a server we merely failed to PARSE reads as a server
+        that does not exist, and the live frame's shells get killed.
+
+        A socket probe alone is not enough either. It answers for OUR namespace, so
+        a server under a different `TMUX_TMPDIR` looks absent to it — while that
+        server is plainly there in the process table.
+
+        So a shell is reaped only where the table and tmux AGREE it has no server.
+        Anything inconclusive on either side keeps it: failing to clean up costs a
+        few forks, and getting it wrong costs somebody their sidebars.
         """
         protected = set(keep or ())
         rows = self._snapshot()
         servers, clients, shells = self.classify(rows)
 
-        doomed: list[tuple[str, int]] = []
+        doomed: list[tuple[str, int, str]] = []
         for name, entries in sorted(shells.items()):
             if name in protected:
                 continue
@@ -478,6 +493,9 @@ class OrphanSweeper:
                 # A client still names this socket. Its server is absent from the
                 # table, so this should be impossible; treat the contradiction as
                 # unknown and keep everything rather than act on a confused read.
+                continue
+            # The second, independent negative — see this method's docstring.
+            if self._answers(name) is not False:
                 continue
             for pid, age, argv in entries:
                 if age >= self.SHELL_MIN_AGE_SECONDS:
@@ -602,6 +620,13 @@ class OrphanSweeper:
         we probed. A person reading `verify` decides; this carries it out.
         """
         found = self._orphan_server_rows(unreachable=unreachable, keep=keep)[: self.MAX_KILLS]
+        if apply:
+            # Re-probe immediately before signalling. `unreachable` was collected
+            # before a probe-per-socket walk whose calls can take ten seconds each,
+            # and a tmux server recreates its socket on SIGUSR1 — so one of these
+            # may have recovered since. Its pid and argv are unchanged, so the
+            # identity check further down would pass it straight through.
+            found = [row for row in found if self._answers(row[0]) is False]
         return {
             "servers": [pid for _n, pid, _age, _a in found],
             "shells": [],

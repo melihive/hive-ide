@@ -70,28 +70,32 @@ class _Kills:
         self.sent.append((pid, sig))
 
 
-def _sweeper(rows, *, survive=None, argv_of=None, **kw):
+def _sweeper(rows, *, survive=None, argv_of=None, answers=None, **kw):
     kills = _Kills(survive)
     # By default a survivor still carries the argv it was matched on, so the
     # identity re-check passes and SIGKILL escalation is exercised. A test that
     # cares about pid REUSE overrides `argv_of`.
     table = {pid: argv for pid, _age, argv in rows}
+    # `answers` defaults to "tmux says there is no server there", so the rows stay
+    # the thing under test; without it every candidate would shell out to the real
+    # tmux and the suite would depend on this machine's sockets.
     sweeper = OrphanSweeper(
         rows=list(rows), kill=kills,
-        argv_of=argv_of or (lambda pid: table.get(pid)), **kw)
+        argv_of=argv_of or (lambda pid: table.get(pid)),
+        answers=answers if answers is not None else (lambda name: False), **kw)
     sweeper.TERM_GRACE_SECONDS = 0.0
     return sweeper, kills
 
 
-def sweep(rows, *, apply=True, survive=None, argv_of=None, **kw):
+def sweep(rows, *, apply=True, survive=None, argv_of=None, answers=None, **kw):
     """The AUTOMATIC path: shells only, no reachability argument."""
-    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, **kw)
+    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, answers=answers, **kw)
     return sweeper.sweep(apply=apply), kills
 
 
-def reap(rows, *, unreachable=(), apply=True, survive=None, argv_of=None, **kw):
+def reap(rows, *, unreachable=(), apply=True, survive=None, argv_of=None, answers=None, **kw):
     """The HUMAN-DRIVEN path: servers, and only names positively confirmed dead."""
-    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, **kw)
+    sweeper, kills = _sweeper(rows, survive=survive, argv_of=argv_of, answers=answers, **kw)
     result = sweeper.reap_servers(unreachable=set(unreachable), apply=apply)
     return result, kills
 
@@ -645,3 +649,59 @@ def test_another_users_process_is_never_a_candidate(monkeypatch):
     pids = [pid for pid, _age, _argv in rows]
 
     assert pids == [102], f"kept another user's process: {pids}"
+
+
+# -- the sixth review round -----------------------------------------------------
+
+
+def test_a_shell_is_kept_when_tmux_says_its_server_is_alive():
+    """The grouped-flag and `$TMUX` cases, covered without parsing either.
+
+    tmux accepts `-uLname`, and `$TMUX` names the socket with no flag at all, so a
+    live server can be unparseable and vanish from the table. Asking tmux resolves
+    the name the way tmux does, so a parsing gap can no longer invent an absence
+    and kill a live frame's sidebars.
+    """
+    result, kills = sweep([shell(101, 7200)], answers=lambda name: True)
+
+    assert result["shells"] == [], "reaped a shell whose server tmux says is alive"
+    assert kills.sent == []
+
+
+def test_a_shell_is_kept_when_the_probe_cannot_tell():
+    """And the third state: unknown keeps it."""
+    result, kills = sweep([shell(101, 7200)], answers=lambda name: None)
+
+    assert result["shells"] == []
+    assert kills.sent == []
+
+
+def test_a_shell_needs_BOTH_negatives_the_table_and_tmux():
+    """Positively: table says no server AND tmux says no server."""
+    result, kills = sweep([shell(101, 7200)], answers=lambda name: False)
+
+    assert result["shells"] == [101]
+    assert (101, signal.SIGTERM) in kills.sent
+
+
+def test_a_server_that_recovers_before_the_kill_is_spared():
+    """A tmux server recreates its socket on SIGUSR1, and `unreachable` was
+    collected before a probe-per-socket walk whose calls can take ten seconds
+    each. The pid and argv are unchanged, so the identity check would pass it
+    through — reachability has to be re-asked at the moment of signalling."""
+    # `unreachable` is the STALE verdict that selected it; the probe is what the
+    # world says now. The two deliberately disagree.
+    result, kills = reap(
+        [server(99, 86400 * 9)],
+        unreachable=[SOCKET],
+        answers=lambda name: True,
+    )
+
+    assert result["servers"] == [], "killed a server that had come back"
+    assert kills.sent == []
+
+    # The dry run still REPORTS it, because reporting is what `verify` wants and
+    # nothing is destroyed by saying so.
+    listed, _ = reap([server(99, 86400 * 9)], unreachable=[SOCKET],
+                     answers=lambda name: True, apply=False)
+    assert listed["servers"] == [99]
