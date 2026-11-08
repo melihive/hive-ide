@@ -4,6 +4,40 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.116] - 2026-11-08
+
+### Changed
+
+- A refused plan-pane operation now says WHO holds the lease and what to do
+  about it, instead of only reporting `pane_leased`. The remedy is derived only
+  from an owner label the package recognises (`hive-monitor:<skill>:<run>`,
+  which yields `<skill> monitor --close`); any other label gets "Ask its owner
+  to release it." rather than an invented command. `--force` is offered only by
+  the commands that actually accept it — `pane-lease` has no such flag, and
+  naming one it does not take sends the reader down a dead end.
+
+### Fixed
+
+- The real-tmux tests no longer fail on a loaded machine. Their deadlines now
+  scale from a fixed base with the run-queue pressure per CPU, capped, and
+  overridable with `HIVE_IDE_TEST_TIMEOUT_SCALE`; a load average that cannot be
+  read falls back to the base rather than to an invented multiplier.
+- The self-repair tests waited for only the agent pane to exec before
+  asserting, while repair reads the working directory of EVERY pane. tmux
+  returns from `new-window` before the pane's child has exec'd, and for that
+  moment the pane's pid is a forked copy of the server, carrying the server's
+  own working directory and environment. All three role panes are now waited
+  for. This is a mitigation: three load-flaky self-repair tests have not been
+  reproduced under 10 rounds at roughly 3.5x per-CPU load with a concurrent
+  real-tmux session, so the root cause is still unproven.
+
+### Removed
+
+- Machine names from the test fixtures and from historic changelog entries. The
+  guard that checks the published tree for them now covers Markdown and tests
+  rather than only the package sources, because a source distribution ships all
+  of them.
+
 ## [1.0.115] - 2026-11-08
 
 ### Added
