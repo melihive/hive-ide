@@ -165,18 +165,27 @@ def test_scan_skips_the_repos_own_worktrees_but_not_a_worktree_module(tmp_path):
     sibling.mkdir(parents=True)
     (sibling / "frame.py").write_text(
         f"# seen on {PRIVATE_HOSTS[0]}\n", encoding="utf-8")
+    (sibling / "notes.md").write_text(
+        f"# {PRIVATE_WORDS[0]} notes\n", encoding="utf-8")
     assert host_violations(tmp_path) == [], (
         "the scan walked the repo's own worktrees, so another branch's "
         "un-scrubbed file fails this branch's guard")
+    # Both scanners share the helper, so both must draw the same boundary.
+    assert vocabulary_violations(tmp_path) == [], (
+        "the vocabulary scan walked the repo's own worktrees")
 
     # ...but the same name INSIDE the package is shipped, so it is still read.
     module = tmp_path / "hive_ide" / "worktree"
     module.mkdir(parents=True)
     (module / "manage.py").write_text(
         f"# seen on {PRIVATE_HOSTS[0]}\n", encoding="utf-8")
+    (module / "notes.md").write_text(
+        f"# {PRIVATE_WORDS[0]} notes\n", encoding="utf-8")
     assert host_violations(tmp_path) == ["hive_ide/worktree/manage.py:1"], (
         "a package module named `worktree` was skipped — the guard is blind "
         "exactly where this package is most likely to add one")
+    assert vocabulary_violations(tmp_path) == ["hive_ide/worktree/notes.md:1"], (
+        "the vocabulary scan skipped a package module named `worktree`")
 
 
 def test_host_check_now_reaches_markdown_and_tests(tmp_path):
