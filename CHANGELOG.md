@@ -36,7 +36,8 @@ All notable changes to `hive-ide` will be documented in this file.
 - Machine names from the test fixtures and from historic changelog entries. The
   guard that checks the published tree for them now covers Markdown and tests
   rather than only the package sources, because a source distribution ships all
-  of them.
+  of them. It skips this repository's own `worktree/` checkouts, which no
+  distribution contains, while still reading a package module of that name.
 
 ## [1.0.115] - 2026-11-08
 
