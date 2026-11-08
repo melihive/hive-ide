@@ -26,8 +26,60 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def wait_for(predicate, timeout=8):
-    deadline = time.monotonic() + timeout
+# --- the real-tmux wait budget --------------------------------------------
+#
+# These waits drive an ACTUAL tmux server and wait for panes, children and files
+# to settle. The deadline was a flat 8 seconds, which became the suite's main
+# source of FALSE failures and cost release attempts: a loaded machine — another
+# worktree's suite, a release running next door — pushes a settle past 8s and the
+# test fails on a condition that was about to be true.
+#
+# Of the three options (a load-aware deadline, serialising the real-tmux files,
+# or marking them so a release can retry just this subset) this takes the first.
+# Serialising makes an already-slow suite slower on every run to fix a failure
+# that only happens under load, and a retry marker needs release-side wiring to
+# mean anything — it would be machinery with no consumer. Scaling the budget is
+# the only one of the three that costs nothing when the machine is idle.
+#
+# It does NOT relax an assertion. `wait_for` returns the instant its predicate is
+# true, so a larger ceiling changes nothing on an idle machine and only removes
+# the false negative on a busy one; the timing is a wait BUDGET for an inherently
+# async operation, not a claim about how fast the product is. A predicate that
+# never becomes true still fails — pinned by
+# `test_a_never_true_predicate_still_fails`, so the helper cannot quietly become
+# unfalsifiable. The ceiling keeps a genuine hang from turning into a long stall.
+TMUX_WAIT_BASE_S = 8.0
+TMUX_WAIT_CEILING_S = 40.0
+
+
+def tmux_wait_budget(base: float = TMUX_WAIT_BASE_S) -> float:
+    """Seconds to allow a real-tmux settle, scaled by run-queue pressure per CPU.
+
+    `HIVE_IDE_TEST_TIMEOUT_SCALE` overrides the computed factor outright, for a
+    runner whose load average is unreadable or not meaningful.
+
+    Load is UNKNOWN on a platform without `getloadavg` (Windows) and when the
+    override will not parse. Unknown routes to the base budget — the inert
+    answer — never to an invented multiplier: guessing high there would hide a
+    real hang behind a 40-second wait on every machine that cannot be measured.
+    """
+    override = os.environ.get("HIVE_IDE_TEST_TIMEOUT_SCALE")
+    if override:
+        try:
+            factor = max(1.0, float(override))
+        except ValueError:
+            return base
+        return min(base * factor, TMUX_WAIT_CEILING_S)
+    try:
+        load = os.getloadavg()[0]
+    except (OSError, AttributeError):   # no such thing on Windows
+        return base
+    factor = max(1.0, load / (os.cpu_count() or 1))
+    return min(base * factor, TMUX_WAIT_CEILING_S)
+
+
+def wait_for(predicate, timeout=None):
+    deadline = time.monotonic() + (tmux_wait_budget() if timeout is None else timeout)
     while time.monotonic() < deadline:
         result = predicate()
         if result:
@@ -36,7 +88,7 @@ def wait_for(predicate, timeout=8):
     pytest.fail("Timed out waiting for pane lease transition")
 
 
-def wait_for_text(path, timeout=8):
+def wait_for_text(path, timeout=None):
     """Wait for a file the leased child writes, and return its CONTENTS.
 
     Not `wait_for(path.exists)`: a path exists the instant it is opened, which is
@@ -46,6 +98,63 @@ def wait_for_text(path, timeout=8):
     on a developer machine the same evening.
     """
     return wait_for(lambda: path.read_text() if path.exists() else "", timeout=timeout)
+
+
+def test_the_wait_budget_grows_with_load_and_never_past_the_ceiling(monkeypatch):
+    """Idle → base. Loaded → longer. Never past the ceiling.
+
+    Asserted against the real function, with load and CPU count faked, because
+    the whole value of this is what it returns on a machine that is NOT this one.
+    """
+    monkeypatch.delenv("HIVE_IDE_TEST_TIMEOUT_SCALE", raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.4, 0.4, 0.4))
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S, "an idle machine paid for load it did not have"
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (16.0, 16.0, 16.0))   # 2x per CPU
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S * 2
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (800.0, 800.0, 800.0))
+    assert tmux_wait_budget() == TMUX_WAIT_CEILING_S, (
+        "a wedged machine turns a hang into an unbounded stall")
+
+
+def test_an_unreadable_load_falls_back_to_the_base_budget(monkeypatch):
+    """Unknown load is not "assume busy" — it is the base budget.
+
+    Windows has no `getloadavg`, and an override can be unparseable. Guessing
+    high there would hide a real hang behind the ceiling on every machine that
+    cannot be measured, so unknown routes to the inert answer.
+    """
+    monkeypatch.delenv("HIVE_IDE_TEST_TIMEOUT_SCALE", raising=False)
+
+    def boom():
+        raise OSError("no load average here")
+
+    monkeypatch.setattr(os, "getloadavg", boom)
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S
+
+    monkeypatch.setenv("HIVE_IDE_TEST_TIMEOUT_SCALE", "not-a-number")
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S
+
+    monkeypatch.setenv("HIVE_IDE_TEST_TIMEOUT_SCALE", "3")
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S * 3
+
+    # An override below 1 must not make the suite FLAKIER than the flat 8s it replaced.
+    monkeypatch.setenv("HIVE_IDE_TEST_TIMEOUT_SCALE", "0.1")
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S
+
+
+def test_a_never_true_predicate_still_fails():
+    """The budget must not make the helper unfalsifiable.
+
+    A load-aware deadline that swallowed a condition which never becomes true
+    would turn every one of these tests into a test that observes nothing — the
+    exact cost of "just raise the timeout".
+    """
+    with pytest.raises(pytest.fail.Exception):
+        wait_for(lambda: False, timeout=0.05)
 
 
 def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path, monkeypatch):
@@ -66,7 +175,7 @@ def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path, monkeypatc
     polls: list[int] = []
     original = wait_for
 
-    def driving_wait(predicate, timeout=8):
+    def driving_wait(predicate, timeout=None):
         def stepped():
             polls.append(1)
             if len(polls) > 1:      # first poll sees the empty file, as CI did
