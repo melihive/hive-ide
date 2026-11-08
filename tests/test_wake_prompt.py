@@ -22,7 +22,7 @@ from hive_ide.frame import Frame
 from hive_ide.store import StateStore
 
 
-PROMPT = "Relay → probe (you): reply from vivo in #ops. Run ./hive relay read"
+PROMPT = "Relay → probe (you): reply from workstation in #ops. Run ./hive relay read"
 REFERENCE = "0b1c2d3e-4f50-4617-8293-a4b5c6d7e8f9"
 
 

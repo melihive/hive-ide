@@ -57,36 +57,36 @@ def test_terminal_title_appends_local_host_name(tmp_path, monkeypatch):
     monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_CLIENT", raising=False)
-    monkeypatch.setenv("HOSTNAME", "vivo")
+    monkeypatch.setenv("HOSTNAME", "workstation")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE vivo"
+    assert frame._terminal_title() == "workspace IDE workstation"
 
 
 def test_terminal_title_appends_configured_ssh_host_name(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_IDE_HOST_NAME", "vivo.tailnet.example")
+    monkeypatch.setenv("HIVE_IDE_HOST_NAME", "workstation.tailnet.example")
     monkeypatch.setenv("SSH_CONNECTION", "100.64.12.34 51322 100.64.1.10 22")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE vivo"
+    assert frame._terminal_title() == "workspace IDE workstation"
 
 
 def test_terminal_title_appends_local_host_name_for_ssh_session(tmp_path, monkeypatch):
     monkeypatch.delenv("HIVE_IDE_HOST_NAME", raising=False)
     monkeypatch.setenv("SSH_CONNECTION", "100.64.12.34 51322 100.64.1.10 22")
-    monkeypatch.setenv("HOSTNAME", "vivo")
+    monkeypatch.setenv("HOSTNAME", "workstation")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE vivo"
+    assert frame._terminal_title() == "workspace IDE workstation"
 
 
 def test_pane_titles_use_workspace_session_and_plan_heading(tmp_path):

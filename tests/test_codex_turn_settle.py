@@ -51,7 +51,7 @@ def _rollout(codex_home: Path, records: list[dict], *, padding: int = 0) -> Path
 
 
 def _errored_turn(turn_id: str = TURN) -> list[dict]:
-    """What codex wrote on mim for a turn the API rejected (400) after ~1 s."""
+    """What codex wrote on a fleet host for a turn the API rejected (400) after ~1 s."""
     return [
         _event("task_started", turn_id, started_at=1792765400),
         {"timestamp": "2026-10-23T14:23:21.300Z", "type": "event_msg",
@@ -163,7 +163,7 @@ def test_prompt_hook_records_codex_turn_id(tmp_path, monkeypatch, codex_home):
 
 
 def test_errored_codex_turn_reads_as_ended_and_idle(tmp_path, monkeypatch, codex_home):
-    """The mim probe: prompt hook fires, the turn 400s, no Stop ever arrives."""
+    """The field probe: prompt hook fires, the turn 400s, no Stop ever arrives."""
     store, record = _session(tmp_path)
     _prompt(store, record, monkeypatch, tmp_path)
     _rollout(codex_home, _errored_turn())

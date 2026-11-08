@@ -999,7 +999,7 @@ All notable changes to `hive-ide` will be documented in this file.
 ### Fixed
 
 - Terminal titles now always include the IDE host label, including local frames,
-  so titles consistently render as `workspace IDE vivo` rather than only appending
+  so titles consistently render as `workspace IDE workstation` rather than only appending
   the host for SSH-opened sessions.
 
 ## [1.0.80] - 2026-09-09
@@ -1338,7 +1338,7 @@ All notable changes to `hive-ide` will be documented in this file.
 ### Fixed
 
 - SSH-opened terminal titles now append the IDE host name, not the SSH client
-  name, so a `gpd` terminal connected to `vivo` shows `workspace IDE vivo`.
+  name, so a `laptop` terminal connected to `workstation` shows `workspace IDE workstation`.
 
 ## [1.0.48] - 2026-08-10
 
