@@ -31,6 +31,8 @@ from hive_ide.frame import Frame
 from hive_ide.repair import SessionRepair
 from hive_ide.store import StateStore
 
+from conftest import tmux_wait_budget
+
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is unavailable")
 
@@ -39,10 +41,17 @@ def _source() -> dict:
     return {"kind": "stable", "interpreter": sys.executable, "version": __version__}
 
 
-def _wait_for(predicate, *, timeout: float = 5.0, interval: float = 0.05):
+def _wait_for(predicate, *, timeout: float | None = None, interval: float = 0.05):
     """Poll a condition on the live tmux server; the terminal condition is the
-    predicate itself, never wall-clock freshness."""
-    deadline = time.monotonic() + timeout
+    predicate itself, never wall-clock freshness.
+
+    The deadline scales with machine load (`tmux_wait_budget`) from the same 5s
+    base it always used, so an idle machine behaves exactly as before and only a
+    loaded one gets longer. Three tests here are load-flaky and one of them cost a
+    release attempt; a flat budget is a false failure waiting for a busy machine.
+    This widens no assertion — the predicate still has to come true.
+    """
+    deadline = time.monotonic() + (tmux_wait_budget(5.0) if timeout is None else timeout)
     while True:
         value = predicate()
         if value:
@@ -64,8 +73,8 @@ def _window_ids(frame: Frame) -> list[str]:
     ).stdout.split()
 
 
-def _agent_pane_started(frame: Frame, session_id: str) -> bool:
-    """Has the session's agent pane exec'd its own command yet?
+def _pane_started(frame: Frame, session_id: str, role: str) -> bool:
+    """Has this session's `role` pane exec'd its own command yet?
 
     tmux returns from `new-window` / `split-window` before the pane's child has
     exec'd: for that moment `#{pane_pid}` is still a forked copy of the tmux
@@ -76,15 +85,32 @@ def _agent_pane_started(frame: Frame, session_id: str) -> bool:
     pane has started once its root process carries THIS session's id — the -e
     value tmux spawned it with.
     """
-    pane_id = (frame.role_panes(session_id) or {}).get("agent")
+    pane_id = (frame.role_panes(session_id) or {}).get(role)
     env = frame.pane_hive_ide_env(pane_id) if pane_id else None
     return bool(env) and env.get("HIVE_IDE_SESSION_ID") == session_id
 
 
-def _wait_agent_pane_started(frame: Frame, session_id: str) -> None:
-    assert _wait_for(
-        lambda: _agent_pane_started(frame, session_id), timeout=10.0
-    ), "the agent pane never exec'd its command with this session's identity"
+def _wait_panes_started(frame: Frame, session_id: str) -> None:
+    """Wait for EVERY role pane to exec, not just the agent.
+
+    The hazard above is not agent-specific — it is how tmux returns from
+    `new-window` / `split-window` — but only the agent pane was ever waited for.
+    So a test could read the plan or sidebar pane while it was still the pre-exec
+    forked copy of the tmux server, whose cwd and environment are the server's,
+    not the ones the pane was spawned with. `repair` reads the cwd of EVERY pane
+    to decide what to rebuild, and the flakiest test here is the one asserting
+    exactly which pane repair touched.
+
+    Mitigation, not a proven root cause: the flake did not reproduce in 10 rounds
+    at ~3.5x per-CPU load with a concurrent real-tmux suite. What is certain is
+    that the guard covered one pane out of three while the mechanism it guards
+    against applies to all three.
+    """
+    for role in ("agent", "plan", "sidebar"):
+        assert _wait_for(
+            lambda role=role: _pane_started(frame, session_id, role),
+            timeout=tmux_wait_budget(10.0),
+        ), f"the {role} pane never exec'd its command with this session's identity"
 
 
 @pytest.fixture
@@ -114,7 +140,7 @@ def live(tmp_path, monkeypatch):
         assert frame.ensure(record)
         roles = frame.role_panes(record["id"])
         assert roles is not None and set(roles) == {"sidebar", "agent", "plan"}
-        _wait_agent_pane_started(frame, record["id"])
+        _wait_panes_started(frame, record["id"])
 
         def identity(*, pane: str | None, marker: str | None, tmux: str | None) -> None:
             for key, value in (
@@ -1008,8 +1034,8 @@ def test_deferred_driver_switch_completes_from_outside_on_the_marker(
     ]
 
     # A second outside run has nothing owed and nothing to do — once the
-    # replacement's agent pane has actually started (see _agent_pane_started).
-    _wait_agent_pane_started(live.frame, live.record["id"])
+    # replacement's panes have actually started (see _pane_started).
+    _wait_panes_started(live.frame, live.record["id"])
     again = live.repair(inert)
     assert again["rebuilt"] is False
     assert live.frame.windows()[live.record["id"]] == replacement

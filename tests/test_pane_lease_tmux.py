@@ -21,61 +21,15 @@ from hive_ide.repair import SessionRepair
 from hive_ide.sidebar_plugins import PlanProvider
 from hive_ide.store import StateStore
 
+from conftest import (
+    TMUX_WAIT_BASE_S,
+    TMUX_WAIT_CEILING_S,
+    tmux_wait_budget,
+)
+
 pytestmark = pytest.mark.skipif(
     shutil.which("tmux") is None, reason="tmux is unavailable"
 )
-
-
-# --- the real-tmux wait budget --------------------------------------------
-#
-# These waits drive an ACTUAL tmux server and wait for panes, children and files
-# to settle. The deadline was a flat 8 seconds, which became the suite's main
-# source of FALSE failures and cost release attempts: a loaded machine — another
-# worktree's suite, a release running next door — pushes a settle past 8s and the
-# test fails on a condition that was about to be true.
-#
-# Of the three options (a load-aware deadline, serialising the real-tmux files,
-# or marking them so a release can retry just this subset) this takes the first.
-# Serialising makes an already-slow suite slower on every run to fix a failure
-# that only happens under load, and a retry marker needs release-side wiring to
-# mean anything — it would be machinery with no consumer. Scaling the budget is
-# the only one of the three that costs nothing when the machine is idle.
-#
-# It does NOT relax an assertion. `wait_for` returns the instant its predicate is
-# true, so a larger ceiling changes nothing on an idle machine and only removes
-# the false negative on a busy one; the timing is a wait BUDGET for an inherently
-# async operation, not a claim about how fast the product is. A predicate that
-# never becomes true still fails — pinned by
-# `test_a_never_true_predicate_still_fails`, so the helper cannot quietly become
-# unfalsifiable. The ceiling keeps a genuine hang from turning into a long stall.
-TMUX_WAIT_BASE_S = 8.0
-TMUX_WAIT_CEILING_S = 40.0
-
-
-def tmux_wait_budget(base: float = TMUX_WAIT_BASE_S) -> float:
-    """Seconds to allow a real-tmux settle, scaled by run-queue pressure per CPU.
-
-    `HIVE_IDE_TEST_TIMEOUT_SCALE` overrides the computed factor outright, for a
-    runner whose load average is unreadable or not meaningful.
-
-    Load is UNKNOWN on a platform without `getloadavg` (Windows) and when the
-    override will not parse. Unknown routes to the base budget — the inert
-    answer — never to an invented multiplier: guessing high there would hide a
-    real hang behind a 40-second wait on every machine that cannot be measured.
-    """
-    override = os.environ.get("HIVE_IDE_TEST_TIMEOUT_SCALE")
-    if override:
-        try:
-            factor = max(1.0, float(override))
-        except ValueError:
-            return base
-        return min(base * factor, TMUX_WAIT_CEILING_S)
-    try:
-        load = os.getloadavg()[0]
-    except (OSError, AttributeError):   # no such thing on Windows
-        return base
-    factor = max(1.0, load / (os.cpu_count() or 1))
-    return min(base * factor, TMUX_WAIT_CEILING_S)
 
 
 def wait_for(predicate, timeout=None):
