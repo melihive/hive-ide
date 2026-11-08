@@ -129,7 +129,7 @@ class LeaseStore:
         return {key: value for key, value in lease.items() if key != "token"}
 
     @staticmethod
-    def refusal(lease: dict) -> str:
+    def refusal(lease: dict, *, force_option: bool = True) -> str:
         """Why the plan pane is held, and what to DO about it.
 
         `pane_leased` alone reads as "the IDE is busy", so a caller concluded the
@@ -148,6 +148,12 @@ class LeaseStore:
 
         No launcher prefix on the suggested command: this package runs on Windows
         too, where `./hive` is not how the Hive is invoked.
+
+        `force_option` says whether the COMMAND THAT REFUSED accepts `--force`.
+        Most do; `pane-lease` does not, and it reaches this same refusal through
+        `PaneLeases.check`. Advising `--force` there sends the caller to
+        `unrecognized arguments: --force`, which is worse than silence: it reads
+        as a supported recovery and leaves the lease exactly where it was.
         """
         owner = lease.get("owner") or {}
         label = str(owner.get("label") or "")
@@ -166,10 +172,16 @@ class LeaseStore:
             )
         else:
             parts.append("Ask its owner to release it.")
-        parts.append(
-            "Otherwise re-run with --force, which revokes the lease and restores "
-            "the pane."
-        )
+        if force_option:
+            parts.append(
+                "Otherwise re-run with --force, which revokes the lease and "
+                "restores the pane."
+            )
+        else:
+            parts.append(
+                "This command cannot revoke an existing lease — close the holder "
+                "first, then ask again."
+            )
         return " ".join(parts)
 
     def list(self, session_id: str | None = None) -> list[dict]:
@@ -196,20 +208,26 @@ class PaneLeases:
         self.leases = LeaseStore(self.store)
 
     def check(
-        self, session_id: str, role: str = "plan", *, force: bool = False
+        self, session_id: str, role: str = "plan", *, force: bool = False,
+        force_option: bool = True,
     ) -> None:
+        """`force_option` is whether the CALLING command accepts `--force`, which
+        decides the remedy the refusal names — see `LeaseStore.refusal`. It is not
+        `force`: that is whether this caller asked to revoke."""
         if role != "plan":
             return
         with self.store.mutation_lock():
             lease = self.leases.read(session_id, role)
             if lease:
                 if self.leases.alive(lease) and not force:
-                    raise LeaseError("pane_leased",
-                                     lease=self.leases.summary(lease),
-                                     message=LeaseStore.refusal(lease))
+                    raise LeaseError(
+                        "pane_leased",
+                        lease=self.leases.summary(lease),
+                        message=LeaseStore.refusal(lease, force_option=force_option),
+                    )
                 # Reap dead leases before allowing ordinary pane mutations.
                 # Force is still subject to the ordinary caller guard.
-                self.restore(lease, force=force)
+                self.restore(lease, force=force, force_option=force_option)
 
     def _pane(self, lease: dict) -> str | None:
         roles = self.frame.role_panes(lease["session_id"])
@@ -244,15 +262,22 @@ class PaneLeases:
             pass
 
     @serialized
-    def restore(self, lease: dict, *, force: bool = False) -> None:
-        """Restore a dead/forcibly revoked lease under the mutation lock."""
+    def restore(self, lease: dict, *, force: bool = False,
+                force_option: bool = True) -> None:
+        """Restore a dead/forcibly revoked lease under the mutation lock.
+
+        `force_option` is carried through from `check` so the race below — the
+        lease came back to life between the read and here — names the same remedy
+        the direct refusal would have."""
         current = self.leases.read(lease["session_id"], lease["role"])
         if not current or current["lease_id"] != lease["lease_id"]:
             return
         if self.leases.alive(current) and not force:
-            raise LeaseError("pane_leased",
-                             lease=self.leases.summary(current),
-                             message=LeaseStore.refusal(current))
+            raise LeaseError(
+                "pane_leased",
+                lease=self.leases.summary(current),
+                message=LeaseStore.refusal(current, force_option=force_option),
+            )
         pane = self._pane(current)
         if pane:
             self._guard(pane)
@@ -308,7 +333,8 @@ class PaneLeases:
             raise UsageError(f"Lease working directory does not exist: {working_dir}")
         with self.store.mutation_lock():
             self.leases.path(record["id"], role)  # Validate the requested lease role.
-            self.check(record["id"], role)
+            # `pane-lease` has no `--force` flag, so the refusal must not offer it.
+            self.check(record["id"], role, force_option=False)
             pane = (self.frame.role_panes(record["id"]) or {}).get(role)
             if not pane:
                 raise LeaseError(

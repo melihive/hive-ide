@@ -225,3 +225,50 @@ def test_a_lease_with_no_owner_at_all_still_says_what_to_do():
     assert "pid 42" in by_pid and "--force" in by_pid, by_pid
     anonymous = LeaseStore.refusal({})
     assert "another holder" in anonymous and "--force" in anonymous, anonymous
+
+def test_an_acquisition_refusal_does_not_offer_a_flag_pane_lease_lacks():
+    """`pane-lease` has no `--force`, so its refusal must not name one.
+
+    `PaneLeases.acquire` goes through the same `check`, so the shared remedy
+    reached a command that cannot act on it: following the advice gets
+    `unrecognized arguments: --force` and the lease is untouched. A remedy that
+    does not exist is worse than none, because it reads as supported recovery.
+    """
+    lease = {"owner": {"pid": 7, "label": "hive-monitor:runbook:demo-a1b2c3"}}
+    offered = LeaseStore.refusal(lease)
+    withheld = LeaseStore.refusal(lease, force_option=False)
+    assert "--force" in offered, offered
+    assert "--force" not in withheld, withheld
+    # Still actionable — it must say what CAN be done, not merely refuse.
+    assert "close the holder" in withheld, withheld
+    assert "runbook monitor --close" in withheld, withheld
+
+
+def test_acquire_asks_for_the_no_force_refusal(tmp_path):
+    """Pin the CALL, not just the helper.
+
+    The helper defaults to offering `--force`, so `refusal()` alone stays green
+    whichever way `acquire` calls `check`. This asserts the acquisition path opts
+    out. It lets `acquire` fail immediately after the check (no pane on a stub
+    frame), because the check is the only part under test here.
+    """
+    store = StateStore(tmp_path, tmp_path / "workspace")
+    frame = Mock()
+    frame.store = store
+    frame.safe_working_dir.return_value = str(tmp_path)
+    frame.role_panes.return_value = {}
+
+    leases = PaneLeases(frame)
+    seen = {}
+
+    def spy(session_id, role="plan", *, force=False, force_option=True):
+        seen.update(session_id=session_id, role=role, force_option=force_option)
+
+    leases.check = spy
+    with pytest.raises(LeaseError) as excinfo:
+        leases.acquire(
+            {"id": "session"}, role="plan", title="t", argv=["sh"], cwd=str(tmp_path)
+        )
+    assert excinfo.value.payload["error"] == "pane_not_found"
+    assert seen.get("force_option") is False, (
+        f"acquire offered --force, which `pane-lease` does not accept: {seen}")
