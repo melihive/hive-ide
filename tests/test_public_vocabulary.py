@@ -15,6 +15,29 @@ SKIP_PARTS = {
     "dist",
     "temp",
 }
+# This repo's own git worktrees live in `worktree/<name>`: other branches'
+# checkouts, which no source distribution ships. Scanning them reports
+# violations that cannot reach a user, and they fail on whatever those branches
+# have not caught up to yet — invisible from inside a worktree, where the
+# directory does not exist, which is exactly where a pre-ship verify runs.
+#
+# Only the TOP-LEVEL directory is skipped. A package module named `worktree`
+# must still be scanned: this package manages worktrees, so that name is a
+# plausible future module, and a blanket part-name skip would go blind on it.
+SKIP_TOP_LEVEL = {"worktree"}
+
+
+def is_scannable(path: Path, root: Path) -> bool:
+    """True when `path` is part of the tree a source distribution ships."""
+    parts = path.relative_to(root).parts
+    if parts and parts[0] in SKIP_TOP_LEVEL:
+        return False
+    return not any(
+        part in SKIP_PARTS
+        or part.startswith(".venv")
+        or part.endswith(".egg-info")
+        for part in parts
+    )
 
 # Assemble private terms without placing those terms in the export tree verbatim.
 PRIVATE_WORDS = (
@@ -73,12 +96,7 @@ def vocabulary_violations(root: Path) -> list[str]:
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
             continue
-        if any(
-            part in SKIP_PARTS
-            or part.startswith(".venv")
-            or part.endswith(".egg-info")
-            for part in path.relative_to(root).parts
-        ):
+        if not is_scannable(path, root):
             continue
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), 1):
@@ -115,12 +133,7 @@ def host_violations(root: Path) -> list[str]:
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix not in HOST_SUFFIXES:
             continue
-        if any(
-            part in SKIP_PARTS
-            or part.startswith(".venv")
-            or part.endswith(".egg-info")
-            for part in path.relative_to(root).parts
-        ):
+        if not is_scannable(path, root):
             continue
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), 1):
@@ -137,6 +150,33 @@ def test_host_check_observes_a_real_violation(tmp_path):
     bad = tmp_path / "frame.py"
     bad.write_text(f"# the freeze was seen on {PRIVATE_HOSTS[2]}\n", encoding="utf-8")
     assert host_violations(tmp_path) == ["frame.py:1"]
+
+
+def test_scan_skips_the_repos_own_worktrees_but_not_a_worktree_module(tmp_path):
+    """A sibling checkout is not shipped; a package module of that name is.
+
+    Run from the main checkout, the scan walked `worktree/<name>` — other
+    branches, which still carry whatever this branch just scrubbed — so the
+    guard failed on files no source distribution contains. A pre-ship verify
+    runs INSIDE a worktree, where that directory does not exist, so it could
+    never see this.
+    """
+    sibling = tmp_path / "worktree" / "other-branch" / "hive_ide"
+    sibling.mkdir(parents=True)
+    (sibling / "frame.py").write_text(
+        f"# seen on {PRIVATE_HOSTS[0]}\n", encoding="utf-8")
+    assert host_violations(tmp_path) == [], (
+        "the scan walked the repo's own worktrees, so another branch's "
+        "un-scrubbed file fails this branch's guard")
+
+    # ...but the same name INSIDE the package is shipped, so it is still read.
+    module = tmp_path / "hive_ide" / "worktree"
+    module.mkdir(parents=True)
+    (module / "manage.py").write_text(
+        f"# seen on {PRIVATE_HOSTS[0]}\n", encoding="utf-8")
+    assert host_violations(tmp_path) == ["hive_ide/worktree/manage.py:1"], (
+        "a package module named `worktree` was skipped — the guard is blind "
+        "exactly where this package is most likely to add one")
 
 
 def test_host_check_now_reaches_markdown_and_tests(tmp_path):
