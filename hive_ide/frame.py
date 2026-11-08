@@ -1470,6 +1470,9 @@ class Frame:
                 "session_id": record["id"],
                 "reason": "pane_leased",
                 "lease": LeaseStore.summary(lease),
+                # A returned refusal is read by the same caller as the raised one
+                # and strands them the same way — see `LeaseStore.refusal`.
+                "message": LeaseStore.refusal(lease),
                 "opened": "plan-pane",
             }
         PaneLeases(self).check(record["id"], force=force)
@@ -2535,6 +2538,10 @@ class Frame:
                 "reason": "pane_leased",
                 "window": existing,
                 "lease": LeaseStore.summary(lease),
+                # The refusal a long-running procedure hits when the lease is
+                # held by its OWN monitor: the rebuild defers, and `reason`
+                # named no holder, so the caller looked blocked by nothing.
+                "message": LeaseStore.refusal(lease),
             }
         PaneLeases(self).check(record["id"], force=force)
         previous_index = None

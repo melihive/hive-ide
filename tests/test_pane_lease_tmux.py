@@ -21,13 +21,19 @@ from hive_ide.repair import SessionRepair
 from hive_ide.sidebar_plugins import PlanProvider
 from hive_ide.store import StateStore
 
+from conftest import (
+    TMUX_WAIT_BASE_S,
+    TMUX_WAIT_CEILING_S,
+    tmux_wait_budget,
+)
+
 pytestmark = pytest.mark.skipif(
     shutil.which("tmux") is None, reason="tmux is unavailable"
 )
 
 
-def wait_for(predicate, timeout=8):
-    deadline = time.monotonic() + timeout
+def wait_for(predicate, timeout=None):
+    deadline = time.monotonic() + (tmux_wait_budget() if timeout is None else timeout)
     while time.monotonic() < deadline:
         result = predicate()
         if result:
@@ -36,7 +42,7 @@ def wait_for(predicate, timeout=8):
     pytest.fail("Timed out waiting for pane lease transition")
 
 
-def wait_for_text(path, timeout=8):
+def wait_for_text(path, timeout=None):
     """Wait for a file the leased child writes, and return its CONTENTS.
 
     Not `wait_for(path.exists)`: a path exists the instant it is opened, which is
@@ -46,6 +52,63 @@ def wait_for_text(path, timeout=8):
     on a developer machine the same evening.
     """
     return wait_for(lambda: path.read_text() if path.exists() else "", timeout=timeout)
+
+
+def test_the_wait_budget_grows_with_load_and_never_past_the_ceiling(monkeypatch):
+    """Idle → base. Loaded → longer. Never past the ceiling.
+
+    Asserted against the real function, with load and CPU count faked, because
+    the whole value of this is what it returns on a machine that is NOT this one.
+    """
+    monkeypatch.delenv("HIVE_IDE_TEST_TIMEOUT_SCALE", raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.4, 0.4, 0.4))
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S, "an idle machine paid for load it did not have"
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (16.0, 16.0, 16.0))   # 2x per CPU
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S * 2
+
+    monkeypatch.setattr(os, "getloadavg", lambda: (800.0, 800.0, 800.0))
+    assert tmux_wait_budget() == TMUX_WAIT_CEILING_S, (
+        "a wedged machine turns a hang into an unbounded stall")
+
+
+def test_an_unreadable_load_falls_back_to_the_base_budget(monkeypatch):
+    """Unknown load is not "assume busy" — it is the base budget.
+
+    Windows has no `getloadavg`, and an override can be unparseable. Guessing
+    high there would hide a real hang behind the ceiling on every machine that
+    cannot be measured, so unknown routes to the inert answer.
+    """
+    monkeypatch.delenv("HIVE_IDE_TEST_TIMEOUT_SCALE", raising=False)
+
+    def boom():
+        raise OSError("no load average here")
+
+    monkeypatch.setattr(os, "getloadavg", boom)
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S
+
+    monkeypatch.setenv("HIVE_IDE_TEST_TIMEOUT_SCALE", "not-a-number")
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S
+
+    monkeypatch.setenv("HIVE_IDE_TEST_TIMEOUT_SCALE", "3")
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S * 3
+
+    # An override below 1 must not make the suite FLAKIER than the flat 8s it replaced.
+    monkeypatch.setenv("HIVE_IDE_TEST_TIMEOUT_SCALE", "0.1")
+    assert tmux_wait_budget() == TMUX_WAIT_BASE_S
+
+
+def test_a_never_true_predicate_still_fails():
+    """The budget must not make the helper unfalsifiable.
+
+    A load-aware deadline that swallowed a condition which never becomes true
+    would turn every one of these tests into a test that observes nothing — the
+    exact cost of "just raise the timeout".
+    """
+    with pytest.raises(pytest.fail.Exception):
+        wait_for(lambda: False, timeout=0.05)
 
 
 def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path, monkeypatch):
@@ -66,7 +129,7 @@ def test_wait_for_text_waits_for_CONTENT_not_mere_existence(tmp_path, monkeypatc
     polls: list[int] = []
     original = wait_for
 
-    def driving_wait(predicate, timeout=8):
+    def driving_wait(predicate, timeout=None):
         def stepped():
             polls.append(1)
             if len(polls) > 1:      # first poll sees the empty file, as CI did

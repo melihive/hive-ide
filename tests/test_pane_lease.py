@@ -165,3 +165,110 @@ def test_supervisor_restoration_failure_execs_shell(tmp_path, monkeypatch, capsy
     pane_supervisor.supervise("a", "plan", ["unused"])
     assert calls and "opening a shell" in capsys.readouterr().out
     assert LeaseStore(store).read("s") is None
+
+def test_a_pane_leased_refusal_names_its_holder_and_the_remedy(tmp_path):
+    """`pane_leased` carries the remedy, not just the verdict.
+
+    The payload always held `owner.label`, the pid and the lease id, but the
+    refusal said only `pane_leased` — which reads as "the IDE is busy". Callers
+    concluded the session was in use and stopped, when the usual holder is a
+    monitor whose run has already finished.
+    """
+    store = StateStore(tmp_path, tmp_path / "workspace")
+    leases = LeaseStore(store)
+    leases.write(
+        {
+            "schema_version": 1,
+            "lease_id": "L1",
+            "token": "secret",
+            "session_id": "session",
+            "role": "plan",
+            "pid": os.getpid(),
+            "pid_start": process_start(os.getpid()),
+            "owner": {"pid": os.getpid(), "label": "hive-monitor:runbook:demo-a1b2c3"},
+        }
+    )
+    frame = Mock()
+    frame.store = store
+    with pytest.raises(LeaseError) as excinfo:
+        PaneLeases(frame).check("session", "plan")
+    payload = excinfo.value.payload
+    assert payload["error"] == "pane_leased"
+    message = payload.get("message") or ""
+    assert "demo-a1b2c3" in message, message
+    assert "runbook monitor --close" in message, message
+    # The refusal is handed to a caller that failed authorization — it must not
+    # become the channel that gives them the lease token.
+    assert "secret" not in json.dumps(payload), payload
+
+
+def test_an_unrecognised_lease_owner_gets_no_invented_remedy():
+    """An unknown holder gets the generic remedy, never a made-up command.
+
+    The close hint is derived from a label shape this package recognises. For
+    anything else the honest answer is "ask the owner", because a confidently
+    wrong remedy is worse than none: the caller runs it.
+    """
+    message = LeaseStore.refusal({"owner": {"pid": 42, "label": "someone-elses-tool"}})
+    assert "monitor --close" not in message, message
+    assert "Ask its owner to release it." in message, message
+    assert "--force" in message, message
+
+
+def test_a_lease_with_no_owner_at_all_still_says_what_to_do():
+    """Three states: a known label, an unknown label, and no label.
+
+    A lease written before `owner` existed, or by a caller that passed no label,
+    must still produce a refusal a human can act on rather than an empty one.
+    """
+    by_pid = LeaseStore.refusal({"owner": {"pid": 42}})
+    assert "pid 42" in by_pid and "--force" in by_pid, by_pid
+    anonymous = LeaseStore.refusal({})
+    assert "another holder" in anonymous and "--force" in anonymous, anonymous
+
+def test_an_acquisition_refusal_does_not_offer_a_flag_pane_lease_lacks():
+    """`pane-lease` has no `--force`, so its refusal must not name one.
+
+    `PaneLeases.acquire` goes through the same `check`, so the shared remedy
+    reached a command that cannot act on it: following the advice gets
+    `unrecognized arguments: --force` and the lease is untouched. A remedy that
+    does not exist is worse than none, because it reads as supported recovery.
+    """
+    lease = {"owner": {"pid": 7, "label": "hive-monitor:runbook:demo-a1b2c3"}}
+    offered = LeaseStore.refusal(lease)
+    withheld = LeaseStore.refusal(lease, force_option=False)
+    assert "--force" in offered, offered
+    assert "--force" not in withheld, withheld
+    # Still actionable — it must say what CAN be done, not merely refuse.
+    assert "close the holder" in withheld, withheld
+    assert "runbook monitor --close" in withheld, withheld
+
+
+def test_acquire_asks_for_the_no_force_refusal(tmp_path):
+    """Pin the CALL, not just the helper.
+
+    The helper defaults to offering `--force`, so `refusal()` alone stays green
+    whichever way `acquire` calls `check`. This asserts the acquisition path opts
+    out. It lets `acquire` fail immediately after the check (no pane on a stub
+    frame), because the check is the only part under test here.
+    """
+    store = StateStore(tmp_path, tmp_path / "workspace")
+    frame = Mock()
+    frame.store = store
+    frame.safe_working_dir.return_value = str(tmp_path)
+    frame.role_panes.return_value = {}
+
+    leases = PaneLeases(frame)
+    seen = {}
+
+    def spy(session_id, role="plan", *, force=False, force_option=True):
+        seen.update(session_id=session_id, role=role, force_option=force_option)
+
+    leases.check = spy
+    with pytest.raises(LeaseError) as excinfo:
+        leases.acquire(
+            {"id": "session"}, role="plan", title="t", argv=["sh"], cwd=str(tmp_path)
+        )
+    assert excinfo.value.payload["error"] == "pane_not_found"
+    assert seen.get("force_option") is False, (
+        f"acquire offered --force, which `pane-lease` does not accept: {seen}")
