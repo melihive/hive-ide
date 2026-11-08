@@ -4,6 +4,57 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.115] - 2026-11-08
+
+### Added
+
+- `hive-ide reap` removes the processes a dead frame leaves behind, and nothing
+  else does. A tmux server whose socket file is gone keeps running with every
+  pane it owned, and each sidebar keep-alive under it forks twice a second
+  forever to ask a server it cannot reach whether its window is visible — found
+  on one machine in 2026-11 as a server up 65 hours with 30 such shells. `verify`
+  now reports them (`orphan_servers`, `orphan_shells`, `orphan_findings`),
+  deliberately outside `ok`: an orphan is waste, not breakage, and failing `ok`
+  would turn every ship's verify red on a machine that happens to have one.
+  `reap` is a dry run until `--apply`, and it reports `spared` — processes that
+  took a SIGTERM and were then deliberately left running because they answered
+  again — so "killed" never includes something still alive. `open` sweeps dead
+  socket FILES and kills nothing: a process may own live panes with someone
+  attached, so ending one is a decision with a person behind it, not a side
+  effect of opening a frame.
+
+### Fixed
+
+- The reaper no longer decides a kill from the process table's rendering. `ps`
+  joins a command line with spaces and drops the quoting, so a boundary that
+  mattered is already gone before any regex sees it: a socket path containing a
+  space hid an attached client, a name containing a colon was truncated into a
+  different socket, `-uL` and `-Lname` went unparsed, and a pane command's own
+  `vim -S session.vim` or `-d` could rename or disguise the server that owned the
+  frame. Each of those ends in the same place — SIGTERM to a healthy server with
+  live panes and somebody watching them. The process table now only ENUMERATES;
+  every judgement that precedes a signal reads `/proc/<pid>/cmdline`, which keeps
+  argument boundaries, and parses tmux's option grammar rather than matching it
+  (joined values, grouped short flags, the value-consuming globals, last flag
+  wins, stop at the command word).
+
+- An orphan is confirmed against the socket directory it actually probes, qualified
+  by its mount namespace: `/tmp` inside a container or a `PrivateTmp` unit is not
+  the `/tmp` the reaper is standing in, and a healthy server in another directory
+  looks dead when probed by name alone. A relative `TMUX_TMPDIR` resolves against
+  its own process's cwd, so it cannot be resolved from outside and is treated as
+  unknown rather than guessed. An empty `/proc/<pid>/environ` is unknown too — the
+  kernel serves zero bytes for a process whose memory is unreadable and for the
+  whole fork-to-exec window, and reading that as "unset" resolved to the default
+  `/tmp`, which read as agreement and cleared a kill.
+
+- Reachability is re-asked immediately before each of the two signals rather than
+  once for the batch, identity is confirmed by when a process started instead of
+  by it out-aging the one selected (so a replacement spawned during a slow walk
+  cannot inherit the verdict), and two processes claiming one socket name is a
+  contradiction that resolves to unknown instead of to a kill. Every unreadable
+  or ambiguous read routes to leaving the process alone, by construction.
+
 ## [1.0.114] - 2026-11-07
 
 ### Changed
