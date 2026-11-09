@@ -35,6 +35,18 @@ FALLBACKS: tuple[str, ...] = ("xterm-256color", "screen-256color", "xterm", "vt1
 REQUIRED_CAPABILITY = "cup"
 
 
+def can_probe() -> bool:
+    """True when this host can answer whether a terminal is usable at all.
+
+    `is_usable` reports False both for "this terminal is unusable" and for "I
+    have no way to find out", which is safe for choosing a TERM — the caller
+    leaves the environment alone either way — but is NOT safe for reporting a
+    fault. A host with no `tput` would otherwise be told its terminal is broken
+    forever. Absence, error and an explicit negative are three different states.
+    """
+    return shutil.which("tput") is not None
+
+
 @lru_cache(maxsize=None)
 def is_usable(term: str | None) -> bool:
     """True when tmux can drive `term` on this host.

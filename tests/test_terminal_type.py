@@ -225,3 +225,24 @@ def test_verify_reports_an_unusable_terminal_and_fails_on_it(tmp_path, monkeypat
     # because the verdict actually counts it.
     assert payload["ok"] is False
     assert payload["hook_findings"] == []
+
+
+@needs_tput
+def test_verify_stays_quiet_when_it_cannot_tell(tmp_path, monkeypatch, capsys):
+    """No `tput` means "unknown", which is not the same as "broken".
+
+    `is_usable` answers False in both cases, so without the `can_probe` guard a
+    minimal host would be told its terminal was unusable on every single run —
+    a permanent false outage. The inert outcome is no finding, stated in the
+    payload so the gap is visible rather than silent.
+    """
+    monkeypatch.setattr(terminal, "can_probe", lambda: False)
+    monkeypatch.setattr(terminal, "is_usable", lambda term: False)
+    monkeypatch.setattr(HookInstaller, "verify", lambda self: [])
+    monkeypatch.chdir(tmp_path)
+    cli.main(["--state-home", str(tmp_path / "state"), "verify"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["terminal_findings"] == []
+    assert payload["terminal_probe"] == "unavailable"
+    assert payload["ok"] is True

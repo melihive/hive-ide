@@ -1552,9 +1552,15 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     # this fires only when the host genuinely has none — which is unfixable from
     # inside the package and exactly what the user needs told.
     current_term = os.environ.get("TERM")
+    # `can_probe` first: without it this cannot distinguish "unusable terminal"
+    # from "no way to tell", and a host with no `tput` would be told its
+    # terminal is broken on every run, forever. Unknown routes to the inert
+    # outcome — no finding — and says so in the payload instead. Nothing is
+    # lost by staying quiet: if the terminal really is unusable there, `open`
+    # still fails and names it.
     terminal_findings = (
         []
-        if terminal.is_usable(current_term)
+        if not terminal.can_probe() or terminal.is_usable(current_term)
         else [
             f"TERM={current_term or '<unset>'} is not a terminal tmux can drive here "
             "(no terminfo entry, or no cursor addressing) and none of the fallbacks "
@@ -1624,6 +1630,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "source_errors": source_errors,
         "config_findings": config_findings,
         "terminal": current_term or "",
+        "terminal_probe": "available" if terminal.can_probe() else "unavailable",
         "terminal_findings": terminal_findings,
         "hook_findings": hook_findings,
         "client_findings": client_findings,
