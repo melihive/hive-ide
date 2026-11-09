@@ -1558,15 +1558,27 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     # outcome — no finding — and says so in the payload instead. Nothing is
     # lost by staying quiet: if the terminal really is unusable there, `open`
     # still fails and names it.
+    # Ask what IS available rather than asserting nothing is: reaching here with
+    # a usable fallback present means something got in without passing through
+    # `main` (a direct Python API caller), and telling that reader "no fallback
+    # is installed" would be simply false.
+    terminal_alternative = terminal.resolve() if terminal.can_probe() else None
     terminal_findings = (
         []
         if not terminal.can_probe() or terminal.is_usable(current_term)
         else [
             f"TERM={current_term or '<unset>'} is not a terminal tmux can drive here "
-            "(no terminfo entry, or no cursor addressing) and none of the fallbacks "
-            f"({', '.join(terminal.FALLBACKS)}) is installed either, so every `open` "
-            'will fail with "missing or unsuitable terminal". Install a terminfo '
-            "entry for it, or set TERM to one this host has."
+            "(no terminfo entry, or no cursor addressing), so every `open` will fail "
+            'with "missing or unsuitable terminal". '
+            + (
+                f"This host does have {terminal_alternative}, which the hive-ide CLI "
+                "substitutes on entry — so something reached here without going "
+                f"through it. Set TERM={terminal_alternative}."
+                if terminal_alternative
+                else "No fallback is installed either "
+                f"({', '.join(terminal.FALLBACKS)}): install a terminfo entry, or "
+                "set TERM to one this host has."
+            )
         ]
     )
     hook_findings = HookInstaller(

@@ -246,3 +246,27 @@ def test_verify_stays_quiet_when_it_cannot_tell(tmp_path, monkeypatch, capsys):
     assert payload["terminal_findings"] == []
     assert payload["terminal_probe"] == "unavailable"
     assert payload["ok"] is True
+
+
+@needs_good_term
+def test_verify_names_the_terminal_this_host_does_have(tmp_path, monkeypatch, capsys):
+    """Never tell a reader "no fallback is installed" when one is.
+
+    Reaching `verify` with an unusable TERM while a usable type exists means
+    something got in without passing through `main` — a direct Python API
+    caller. Claiming nothing is available would simply be false, and it sends
+    them off to install terminfo they already have. `normalize_environment` is
+    stubbed out here to stand in for that entry path.
+    """
+    monkeypatch.setattr(terminal, "normalize_environment", lambda env=None: None)
+    monkeypatch.setattr(terminal, "is_usable", lambda term: term != "network")
+    monkeypatch.setattr(HookInstaller, "verify", lambda self: [])
+    monkeypatch.setenv("TERM", "network")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["--state-home", str(tmp_path / "state"), "verify"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["terminal_findings"], payload
+    finding = payload["terminal_findings"][0]
+    assert "This host does have" in finding
+    assert "No fallback is installed" not in finding

@@ -103,8 +103,13 @@ def normalize_environment(
     """Replace an unusable ``$TERM`` in `env` (default ``os.environ``), in place.
 
     Returns ``{"from": ..., "to": ...}`` when something changed and None when it
-    did not, so a caller can report what it did instead of silently rewriting
-    the environment under the user.
+    did not.
+
+    `cli.main` deliberately does NOT print that: stdout carries a per-command
+    JSON contract, and an unasked-for line on it is exactly what makes
+    ``--format=json`` unparseable for a caller. The substitution is observable
+    through `verify`, which reports the terminal in play and whether it could be
+    probed at all.
 
     Call this at PROCESS ENTRY, before any thread starts or any child is
     spawned. Mutating the real environment is the point — every tmux this
