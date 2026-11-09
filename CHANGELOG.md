@@ -4,6 +4,37 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- A terminal type tmux cannot drive no longer costs the whole frame. tmux loads
+  terminfo for the terminal it is about to serve and refuses to run at all under
+  one it cannot ("missing or unsuitable terminal: `<TERM>`"), so a single hostile
+  value in the environment took down every session rather than degrading one.
+  macOS `login` stamps each ssh ("network") tty with `TERM=network`, from the tty
+  type in `/etc/ttys`, and no terminfo entry exists for it — so every remote
+  `open` onto a macOS host failed with all of its sessions "failed". `open` now
+  settles `$TERM` once at process entry, which covers every tmux the process
+  spawns and the `execvp` attach that replaces it; the caller's own terminal is
+  kept whenever the target host knows it, so a capable terminal is not
+  downgraded, and nothing is substituted when no usable type exists.
+- The fatal message for that case named the sessions rather than the cause. It
+  repeated tmux's refusal once per session, which read as "my sessions are
+  broken" and sent the reader to the session error store. It now states that the
+  terminal is at fault, names the `TERM` in play, and gives the remedy, once.
+- `verify` no longer reports a healthy frame while no session can open. It
+  inspected the frame thoroughly and never the terminal, so it answered
+  `ok: true` throughout an outage in which every `open` failed; an unusable
+  terminal with no usable fallback is now a finding and fails the verdict.
+
+### Changed
+
+- Terminal suitability is probed in a fresh subprocess per candidate rather than
+  through in-process `curses`. Once `setupterm` has succeeded for one terminal,
+  calling it again with an unknown one does not raise, leaves the previous entry
+  in place, and `tigetstr` answers from it — so an unknown type was reported
+  usable depending only on what had been checked before it. The verdict is
+  cached, so the normal case costs one probe.
+
 ## [1.0.116] - 2026-11-08
 
 ### Changed

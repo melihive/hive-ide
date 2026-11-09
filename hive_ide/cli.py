@@ -22,6 +22,7 @@ from .config import configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
 from .errors import CommandOutcome, HiveIdeError, UsageError
+from . import terminal
 from .environments import EnvironmentManager
 from .frame import Frame
 from .handoff import HandoffPackage
@@ -1544,6 +1545,42 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         dead_sockets = SocketReaper(Path(frame.socket_path()).parent).inventory()
     except Exception:
         dead_sockets = None          # could not look; not the same as none
+    # The terminal itself. Through the 2026-10-30 outage `verify` answered
+    # `ok: true` while every single `open` failed on tmux refusing $TERM: it
+    # inspected the frame thoroughly and never the one thing that was broken.
+    # By here `main` has already substituted a usable TERM if one existed, so
+    # this fires only when the host genuinely has none — which is unfixable from
+    # inside the package and exactly what the user needs told.
+    current_term = os.environ.get("TERM")
+    # `can_probe` first: without it this cannot distinguish "unusable terminal"
+    # from "no way to tell", and a host with no `tput` would be told its
+    # terminal is broken on every run, forever. Unknown routes to the inert
+    # outcome — no finding — and says so in the payload instead. Nothing is
+    # lost by staying quiet: if the terminal really is unusable there, `open`
+    # still fails and names it.
+    # Ask what IS available rather than asserting nothing is: reaching here with
+    # a usable fallback present means something got in without passing through
+    # `main` (a direct Python API caller), and telling that reader "no fallback
+    # is installed" would be simply false.
+    terminal_alternative = terminal.resolve() if terminal.can_probe() else None
+    terminal_findings = (
+        []
+        if not terminal.can_probe() or terminal.is_usable(current_term)
+        else [
+            f"TERM={current_term or '<unset>'} is not a terminal tmux can drive here "
+            "(no terminfo entry, or no cursor addressing), so every `open` will fail "
+            'with "missing or unsuitable terminal". '
+            + (
+                f"This host does have {terminal_alternative}, which the hive-ide CLI "
+                "substitutes on entry — so something reached here without going "
+                f"through it. Set TERM={terminal_alternative}."
+                if terminal_alternative
+                else "No fallback is installed either "
+                f"({', '.join(terminal.FALLBACKS)}): install a terminfo entry, or "
+                "set TERM to one this host has."
+            )
+        ]
+    )
     hook_findings = HookInstaller(
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
@@ -1593,6 +1630,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not error_findings
             and not incomplete
             and not codex_isolation_findings
+            and not terminal_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1603,6 +1641,9 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "sessions": len(sessions),
         "source_errors": source_errors,
         "config_findings": config_findings,
+        "terminal": current_term or "",
+        "terminal_probe": "available" if terminal.can_probe() else "unavailable",
+        "terminal_findings": terminal_findings,
         "hook_findings": hook_findings,
         "client_findings": client_findings,
         "clients": clients,
@@ -2074,6 +2115,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Settle $TERM before anything here can reach tmux. tmux refuses to run at
+    # all under a terminal it cannot drive, so one hostile value takes down a
+    # whole frame rather than degrading one session; macOS hands exactly such a
+    # value to every ssh login (see `terminal`). Doing it ONCE here covers every
+    # tmux this process spawns, the `execvp` attach included, instead of each of
+    # the twenty-odd call sites remembering to.
+    terminal.normalize_environment()
     parser = build_parser()
     try:
         raw_argv = list(argv) if argv is not None else sys.argv[1:]

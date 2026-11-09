@@ -3451,6 +3451,19 @@ class Frame:
             reasons = "; ".join(
                 f"{failure['name']}: {failure['error']}" for failure in failed
             )
+            # tmux's "missing or unsuitable terminal" is a property of the
+            # ENVIRONMENT, not of these sessions. Listing it once per session
+            # reads as "my sessions are broken" and sends the reader to the
+            # session store, which is why a terminal problem cost three days
+            # once already. Name the real cause, once.
+            if "unsuitable terminal" in reasons:
+                raise UsageError(
+                    "No session windows could be opened: tmux will not run with "
+                    f"TERM={os.environ.get('TERM') or '<unset>'} on this host, so "
+                    f"none of the {len(failed)} session(s) could start. This is the "
+                    "terminal, not the sessions — install a terminfo entry for it, "
+                    "or set TERM to one this host has. tmux said: " + reasons
+                )
             raise UsageError(
                 f"No session windows could be opened; {len(failed)} session(s) "
                 f"failed. {reasons or 'No reason was recorded.'}"
