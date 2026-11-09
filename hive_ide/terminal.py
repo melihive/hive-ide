@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import MutableMapping
 from functools import lru_cache
 
 # Tried in order, AFTER the terminal the caller actually has. 256-colour first
@@ -73,7 +74,7 @@ def is_usable(term: str | None) -> bool:
         # covers both halves of tmux's own refusal: an unknown terminal fails
         # the lookup, and a known-but-unsuitable one (`dumb`) has no `cup`.
         probe = subprocess.run(
-            ["tput", "-T", term, "cup", "0", "0"],
+            ["tput", "-T", term, REQUIRED_CAPABILITY, "0", "0"],
             capture_output=True,
             timeout=5,
         )
@@ -96,12 +97,24 @@ def resolve(term: str | None = None) -> str | None:
     return None
 
 
-def normalize_environment(env: dict[str, str] | None = None) -> dict[str, str] | None:
+def normalize_environment(
+    env: MutableMapping[str, str] | None = None,
+) -> dict[str, str] | None:
     """Replace an unusable ``$TERM`` in `env` (default ``os.environ``), in place.
 
     Returns ``{"from": ..., "to": ...}`` when something changed and None when it
     did not, so a caller can report what it did instead of silently rewriting
     the environment under the user.
+
+    Call this at PROCESS ENTRY, before any thread starts or any child is
+    spawned. Mutating the real environment is the point — every tmux this
+    process goes on to spawn, and the `execvp` attach that replaces it, must
+    inherit the result, and threading a dict through every call site instead
+    would mean each one remembering to. But `os.environ` writes are not
+    atomic against a concurrent `getenv` in C, so doing this later, with
+    children or threads already running, trades one bug for a worse one.
+
+    `MutableMapping` rather than `dict`: ``os.environ`` is an ``os._Environ``.
     """
     target = os.environ if env is None else env
     current = target.get("TERM")
