@@ -22,6 +22,7 @@ from .config import configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
 from .errors import CommandOutcome, HiveIdeError, UsageError
+from . import terminal
 from .environments import EnvironmentManager
 from .frame import Frame
 from .handoff import HandoffPackage
@@ -1544,6 +1545,24 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         dead_sockets = SocketReaper(Path(frame.socket_path()).parent).inventory()
     except Exception:
         dead_sockets = None          # could not look; not the same as none
+    # The terminal itself. Through the 2026-10-30 outage `verify` answered
+    # `ok: true` while every single `open` failed on tmux refusing $TERM: it
+    # inspected the frame thoroughly and never the one thing that was broken.
+    # By here `main` has already substituted a usable TERM if one existed, so
+    # this fires only when the host genuinely has none — which is unfixable from
+    # inside the package and exactly what the user needs told.
+    current_term = os.environ.get("TERM")
+    terminal_findings = (
+        []
+        if terminal.is_usable(current_term)
+        else [
+            f"TERM={current_term or '<unset>'} is not a terminal tmux can drive here "
+            "(no terminfo entry, or no cursor addressing) and none of the fallbacks "
+            f"({', '.join(terminal.FALLBACKS)}) is installed either, so every `open` "
+            'will fail with "missing or unsuitable terminal". Install a terminfo '
+            "entry for it, or set TERM to one this host has."
+        ]
+    )
     hook_findings = HookInstaller(
         stable_python=args.stable_python,
         selected_state_home=args.state_home,
@@ -1593,6 +1612,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not error_findings
             and not incomplete
             and not codex_isolation_findings
+            and not terminal_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1603,6 +1623,8 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "sessions": len(sessions),
         "source_errors": source_errors,
         "config_findings": config_findings,
+        "terminal": current_term or "",
+        "terminal_findings": terminal_findings,
         "hook_findings": hook_findings,
         "client_findings": client_findings,
         "clients": clients,
@@ -2074,6 +2096,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Settle $TERM before anything here can reach tmux. tmux refuses to run at
+    # all under a terminal it cannot drive, so one hostile value takes down a
+    # whole frame rather than degrading one session; macOS hands exactly such a
+    # value to every ssh login (see `terminal`). Doing it ONCE here covers every
+    # tmux this process spawns, the `execvp` attach included, instead of each of
+    # the twenty-odd call sites remembering to.
+    terminal.normalize_environment()
     parser = build_parser()
     try:
         raw_argv = list(argv) if argv is not None else sys.argv[1:]
