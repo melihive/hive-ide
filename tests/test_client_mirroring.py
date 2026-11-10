@@ -352,3 +352,80 @@ def test_repeated_elections_cannot_move_control(tmp_path, monkeypatch):
     finally:
         _close(clients)
         frame.tmux(["kill-server"])
+
+
+def _zoomed(frame: Frame, window: str) -> str:
+    return frame.tmux(
+        ["display-message", "-p", "-t", window, "#{window_zoomed_flag}"]
+    ).stdout.strip()
+
+
+def test_returning_to_a_wide_screen_takes_the_frame_back_from_an_idle_narrow_one(
+    tmp_path, monkeypatch
+):
+    """The reported bug, end to end (2026-11-10).
+
+    A 49x44 client attached after a 203x68 one and, ranked by CREATION, owned the
+    frame for as long as it stayed attached -- 4.3 hours of it idle. The window
+    sat at 49 columns, below the mobile threshold, zoomed to a single pane, and
+    coming back to the wide screen recovered nothing: no client attached,
+    detached or resized, so no election ran and nothing re-laid the frame out.
+
+    Driven here through `IdeClients.elect(relayout_on_change=True)` -- what the
+    `client-focus-in` hook runs -- because focus itself cannot be delivered to a
+    bare pty: no terminal emulator is reporting focus to tmux in a test. The
+    ranking is what the real hook then depends on, and that IS exercised: neither
+    pty client reports focus, so activity alone has to promote the wide screen.
+    """
+    frame, _record = _frame(tmp_path, monkeypatch)
+    clients: list[tuple[subprocess.Popen, int]] = []
+    try:
+        frame.open(no_attach=True)
+        window = frame.tmux(["display-message", "-p", "#{window_id}"]).stdout.strip()
+        wide = _attach_client(frame.socket, frame.target, cols=203, rows=68)
+        clients.append(wide)
+        assert _clients_numbering(frame, 1), "the wide client never attached"
+        narrow = _attach_client(frame.socket, frame.target, cols=49, rows=44)
+        clients.append(narrow)
+        assert _clients_numbering(frame, 2), "the narrow client never attached"
+
+        settled = _settled_controllers(frame)
+        assert settled and settled[0]["size"] == "49x44", (
+            f"the narrow screen never took the frame, so there is nothing to "
+            f"recover from: {frame.attached_clients()!r}"
+        )
+        assert _wait_for(lambda: _window_size(frame, window).startswith("49x")), (
+            f"the window never followed the narrow controller: "
+            f"{_window_size(frame, window)}"
+        )
+
+        # Recovery drives itself from here. Typing on the wide screen changes the
+        # window's latest client; tmux notifies `client-active`; the hook elects,
+        # and because the controller MOVED it relays the frame out. Nothing below
+        # touches the election directly, which is the whole point -- the first
+        # version of this test called it by hand, so it proved the ranking while
+        # proving nothing about whether anything deployed would run it (Codex
+        # review, 2026-11-10). Neither pty client reports focus, so
+        # `client-focus-in` cannot be what recovers it here: this is the path a
+        # web terminal or a bare tty is left with.
+        def _the_wide_screen_took_the_frame() -> bool:
+            # Input, because `client_activity` moves on input and nothing else --
+            # which is the whole reason an idle controller could hold the frame.
+            os.write(wide[1], b"\r")
+            controllers = [c for c in frame.attached_clients() if c["controller"]]
+            return len(controllers) == 1 and controllers[0]["size"] == "203x68"
+
+        assert _wait_for(_the_wide_screen_took_the_frame, timeout=30.0, interval=0.5), (
+            f"the idle narrow screen kept the frame: {frame.attached_clients()!r}"
+        )
+        assert _wait_for(lambda: _window_size(frame, window).startswith("203x")), (
+            f"the window stayed at the narrow screen's geometry: "
+            f"{_window_size(frame, window)}"
+        )
+        assert _wait_for(lambda: _zoomed(frame, window) == "0"), (
+            "the window grew back but stayed zoomed to the one pane the mobile "
+            "ladder left it on, which is what made it unusable"
+        )
+    finally:
+        _close(clients)
+        frame.tmux(["kill-server"])

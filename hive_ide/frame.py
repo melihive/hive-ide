@@ -3070,6 +3070,24 @@ class Frame:
                 self.socket,
             ],
         )
+        # tmux names the triggering client to the hook, and nothing else can --
+        # an election that starts afterwards has no way to work out which screen
+        # the event was about, and during the second two screens attach in, every
+        # other ordering key ties. Stamped as a session option BEFORE the
+        # election starts, so two overlapping elections read the same fact rather
+        # than each carrying its own (see `attention_client`). `-F` is what
+        # expands the format; a plain `set-option` stores the literal text.
+        #
+        # NOT on `client-detached`: there the hook's client is the one leaving,
+        # and preferring it would name a client that is already gone.
+        stamp = (
+            f"set-option -F -t {shlex.quote(self.target)} "
+            f"{self.ATTENTION_OPTION} '#{{client_name}}'"
+        )
+
+        def attention_hook(command: str) -> str:
+            return f"{stamp} ; run-shell -b {shlex.quote(command)}"
+
         # ONE hook, ordered: elect, THEN relayout. As two independent hooks,
         # relayout could read the departing client's 100x30 before the election
         # demoted it, resize the panes to that, and leave a layout nothing
@@ -3080,7 +3098,7 @@ class Frame:
                 "-t",
                 self.target,
                 "client-attached",
-                f"run-shell -b {shlex.quote(elect + '; ' + relayout_window)}",
+                attention_hook(elect + "; " + relayout_window),
             ]
         )
         # Relayout after the detach election too, not just the attach one. A
@@ -3098,8 +3116,69 @@ class Frame:
                 f"run-shell -b {shlex.quote(elect + '; ' + relayout_window)}",
             ]
         )
-        for redundant_hook in ("client-active", "client-focus-in"):
-            self.tmux(["set-hook", "-t", self.target, "-u", redundant_hook])
+        # A screen GAINING FOCUS elects too -- the client set is not the only way
+        # the answer changes. Without this, a frame whose controller is a stale
+        # narrow client stays pinned to it: coming back to the wide screen fires
+        # neither `client-attached` (it never left) nor `client-resized` (its
+        # terminal did not change size), so nothing re-decided and the window sat
+        # at the narrow client's geometry -- mobile-zoomed and unusable
+        # (2026-11-10).
+        #
+        # This hook ran relayout once before and was removed in 1.0.86 as a hook
+        # storm: focus-in fires on every alt-tab, and a full relayout resizes
+        # every window and pane. So it runs the ELECTION -- a handful of tmux
+        # calls -- and relayout follows only when the controller actually
+        # CHANGED. The storm came from doing the expensive thing
+        # unconditionally, not from listening to focus.
+        #
+        # No lock-free shortcut for the settled case, deliberately: the election
+        # self-corrects a stale read by re-reading under the workspace lock
+        # (`elect_controller`), and an early return on the first read would
+        # bypass exactly that. It would also optimize the wrong thing -- the
+        # interpreter this hook starts costs more than the lock and the tmux
+        # calls together.
+        focus_elect = self._module(
+            "clients",
+            [
+                "--state-home",
+                str(self.store.home),
+                "--workspace-key",
+                self.store.workspace_key,
+                "--tmux-socket",
+                self.socket,
+                "--relayout-on-change",
+            ],
+        )
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-focus-in",
+                attention_hook(focus_elect),
+            ]
+        )
+        # `client-active` elects as well, because focus is not always observable:
+        # tmux asks for focus events only from a terminal that supports them, so
+        # a web terminal or a bare tty never fires `client-focus-in` and the
+        # frame could still not be recovered there (Codex review, 2026-11-10).
+        # Typing is the signal that survives when focus reporting does not.
+        #
+        # Safe because it is CHANGE-paced, not key-paced: tmux notifies
+        # `client-active` from the same place it recalculates a `window-size
+        # latest` window, and only when the window's latest client actually
+        # changes. Measured rather than assumed -- 10 keystrokes across two
+        # clients fired it twice, once per switch, and never for a repeat on the
+        # client already in charge (`temp/scripts/probe-client-active.py`).
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "client-active",
+                attention_hook(focus_elect),
+            ]
+        )
         self.tmux(["set-hook", "-t", self.target, "-u", "after-select-pane"])
         sidebar_key = keys.get("sidebar")
         if sidebar_key:
@@ -3192,19 +3271,59 @@ class Frame:
         if current and current.get("component") == "frame:open":
             self.store.delete("errors", record["id"])
 
+    #: Session option naming the client that most recently attached, gained
+    #: focus, or started being typed into -- stamped by the hooks that know, and
+    #: the top-ranking fact about which screen is in use. See `attached_clients`.
+    ATTENTION_OPTION = "@hive_ide_attention"
+
+    def attention_client(self) -> str:
+        """The client tmux last told us the human turned to, or `""`.
+
+        Read from a session option rather than passed in, so that two elections
+        running at once see the SAME answer: the hooks stamp it before either of
+        them starts, which is what keeps `_intended_controller` pure.
+        """
+        result = self.tmux(
+            ["show-options", "-qv", "-t", self.target, self.ATTENTION_OPTION]
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+
     def attached_clients(self) -> list[dict[str, Any]]:
-        """Clients attached to this frame, most recently CREATED first.
+        """Clients attached to this frame, the one in USE first.
 
         `controller` is the one client whose size the frame obeys. The rest are
         MIRRORS: `ignore-size` clients that render the same windows, truncated to
         their own terminal, without a vote on geometry. See `elect_controller`.
 
-        Ordered by creation rather than activity because "the newest screen" is
-        the thing being decided, and `client_activity` cannot express it: it has
-        one-second granularity, so a second screen attaching TIES with the first
-        and the order became arbitrary. `client_pid` breaks a tie within the same
-        second -- a process started later holds a higher pid.
+        Ranked `focused`, then activity, then creation, then pid. Until 1.0.117
+        this ranked by CREATION alone, which made the newest ATTACH the
+        controller forever: a narrow screen that attached later owned the frame
+        even after hours of disuse, and returning to the wide one promoted
+        nothing, because the only elections ran on attach and detach. Found
+        2026-11-10 — a 49x44 client idle 4.3h held a 203x68 one hostage, so the
+        window sat at 49 columns, below the mobile threshold, zoomed to a single
+        unusable pane.
+
+        So creation is no longer the question — "which screen is the human at?"
+        is. ATTENTION answers it outright: tmux names the triggering client to
+        the hook that fires, and those hooks stamp it (`attention_client`). The
+        rest are fallbacks for an election no attention event triggered, such as
+        a detach: `focused`, because a screen can be read without being typed
+        into; then activity; then creation; then `client_pid`, a process started
+        later holding the higher one.
+
+        Attention is not a refinement of activity, it REPLACES it as the primary
+        key, because activity cannot answer during the second that matters.
+        `client_activity` is whole seconds, so for the whole second in which two
+        screens attach, every remaining key ties -- and `client-active` fires
+        exactly once, on the first keystroke, right inside that second (measured:
+        `temp/scripts/probe-client-active.py`). Ranked without attention the one
+        election that runs lands on the tie, picks by pid, and nothing re-runs.
+
+        Every key is read from tmux, none from the caller, so this stays PURE:
+        see `_intended_controller`.
         """
+        attention = self.attention_client()
         result = self.tmux(
             [
                 "list-clients",
@@ -3232,13 +3351,28 @@ class Frame:
                     "last_active_epoch": int(activity) if activity.isdigit() else None,
                     "created_epoch": int(created) if created.isdigit() else None,
                     "pid": int(pid) if pid.isdigit() else None,
+                    "attention": bool(attention) and name == attention,
+                    "focused": "focused" in flags.split(","),
                     "controller": "ignore-size" not in flags.split(","),
                 }
             )
-        clients.sort(
-            key=lambda c: (c["created_epoch"] or 0, c["pid"] or 0), reverse=True
-        )
+        clients.sort(key=Frame._client_rank, reverse=True)
         return clients
+
+    @staticmethod
+    def _client_rank(client: dict[str, Any]) -> tuple[int, int, int, int, int]:
+        """Rank one client for `attached_clients` — see its docstring.
+
+        Tolerates a client dict without `attention` or `focused`: both keys are
+        newer than the callers that build these by hand.
+        """
+        return (
+            1 if client.get("attention") else 0,
+            1 if client.get("focused") else 0,
+            client.get("last_active_epoch") or 0,
+            client.get("created_epoch") or 0,
+            client.get("pid") or 0,
+        )
 
     #: A stale election re-reads and corrects itself rather than locking. Three
     #: attempts: concurrent elections agree on the answer (see
@@ -3250,8 +3384,8 @@ class Frame:
     def _intended_controller(clients: list[dict[str, Any]]) -> str | None:
         """Who should be sizing the frame, given this client list.
 
-        The most recently created client, full stop — `attached_clients` is
-        ordered for exactly this. PURE, and that is the point: every concurrent
+        The screen the human is at, full stop — `attached_clients` is ordered
+        for exactly this. PURE, and that is the point: every concurrent
         election derives the same answer from the same facts, so two overlapping
         elections cannot disagree, only arrive at the same place twice.
 

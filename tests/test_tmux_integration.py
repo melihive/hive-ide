@@ -263,8 +263,20 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         hooks = frame.tmux(["show-hooks", "-t", frame.target]).stdout
         assert "client-resized" in hooks
         assert "client-attached" in hooks
-        assert "client-active" not in hooks
-        assert "client-focus-in" not in hooks
+        # Both hooked again since 1.0.117, as the ELECTION only. `client-focus-in`
+        # was removed in 1.0.86 for running a full relayout on every alt-tab;
+        # without the pair, a frame whose controller is a stale narrow client
+        # cannot be recovered by coming back to the wide one, which fires no other
+        # hook -- and focus alone does not reach a terminal that reports no focus.
+        for hook in ("client-focus-in", "client-active"):
+            line = next(
+                (row for row in hooks.splitlines() if row.startswith(hook)), ""
+            )
+            assert "-m hive_ide.clients" in line, f"{hook} does not elect: {line!r}"
+            assert "--relayout-on-change" in line
+            assert "-m hive_ide.relayout" not in line, (
+                f"{hook} relays out unconditionally again: {line!r}"
+            )
         assert "after-select-pane" not in hooks
         assert "session-window-changed" in hooks
         client_resized = next(
