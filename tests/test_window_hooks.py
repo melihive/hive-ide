@@ -136,15 +136,14 @@ def test_client_hooks_elect_before_relayout(tmp_path, monkeypatch):
         installed = [
             args[-1]
             for args in calls
-            if args[0] == "set-hook"
-            and hook in args
-            and str(args[-1]).startswith("run-shell")
+            if args[0] == "set-hook" and hook in args and "run-shell" in str(args[-1])
         ]
         assert len(installed) == 1, f"{hook}: expected one hook, got {installed}"
-        tokens = shlex.split(installed[0])
-        assert tokens[:2] == ["run-shell", "-b"]
+        # `client-attached` stamps the attention client before the run-shell, so
+        # the command is the tail rather than the whole value.
+        tokens = shlex.split(installed[0].split("run-shell -b ", 1)[-1])
         observed = subprocess.run(
-            tokens[2], shell=True, capture_output=True, text=True, check=True
+            tokens[0], shell=True, capture_output=True, text=True, check=True
         )
         assert observed.stdout.splitlines() == ["clients", "relayout"], (
             f"{hook} ran {observed.stdout.splitlines()}; the election must come "

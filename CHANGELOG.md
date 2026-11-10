@@ -6,6 +6,20 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Fixed
 
+- Returning to a screen puts it back in charge of the frame. One frame carries
+  several clients, exactly one of which sizes it; that one was elected by
+  creation order, so a narrow screen that attached later owned the frame for as
+  long as it stayed attached — however long it then sat idle. Coming back to the
+  wide screen recovered nothing, because the only elections ran on attach and
+  detach and the screen you return to never left, while `client-resized` cannot
+  stand in: its terminal's size never changed, only which client tmux was
+  listening to. A 49-column client holding a 203-column one hostage left the
+  window below the mobile threshold, zoomed to a single pane, with no way back.
+  Clients are now ranked by the screen in USE and the frame re-elects when you
+  turn back to one: tmux names the triggering client to the hook that fires, and
+  attaching, gaining focus and being typed into all stamp it, with focus,
+  activity, creation and pid left as fallbacks for an election no such event
+  triggered. Recovery is one keystroke, measured at about 160ms end to end.
 - A terminal type tmux cannot drive no longer costs the whole frame. tmux loads
   terminfo for the terminal it is about to serve and refuses to run at all under
   one it cannot ("missing or unsuitable terminal: `<TERM>`"), so a single hostile
@@ -28,6 +42,15 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ### Changed
 
+- `client-focus-in` and `client-active` are hooked again, as the election only.
+  `client-focus-in` was removed in 1.0.86 for running a full relayout on every
+  alt-tab, which is a hook storm; the election is a handful of tmux calls, and a
+  relayout follows only when the controller actually moved. It has to follow one
+  then: tmux preserves a zoom across an automatic resize, so a promoted screen
+  would otherwise grow to its own size and stay zoomed to the one pane the mobile
+  ladder left it on. Both hooks are needed — tmux asks for focus events only from
+  a terminal that reports them, so on a web terminal or a bare tty focus never
+  fires and typing is the only signal left.
 - Terminal suitability is probed in a fresh subprocess per candidate rather than
   through in-process `curses`. Once `setupterm` has succeeded for one terminal,
   calling it again with an unknown one does not raise, leaves the previous entry
