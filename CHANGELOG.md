@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.117] - 2026-11-10
+
 ### Fixed
 
 - Returning to a screen puts it back in charge of the frame. One frame carries
