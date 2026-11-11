@@ -35,11 +35,13 @@ from .relayout import IdeRelayout
 from .source import inspect_interpreter, resolve_source
 from .socket_gc import OrphanSweeper, SocketReaper
 from .store import StateStore, utc_now
+from .clients import IdeClients
 from .workspace_map import WorkspaceMap
 
 
 WORKSPACE_MUTATIONS = frozenset(
     {
+        "activate",
         "archive",
         "adopt",
         "plan",
@@ -1435,6 +1437,89 @@ def cmd_reap(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_activate(args: argparse.Namespace) -> dict[str, Any]:
+    """Put this package's hooks on frames that are ALREADY running.
+
+    A tmux server keeps the hooks it started with, so installing a newer
+    hive-ide updates the CLI and leaves every live frame on the hooks of the
+    version that opened it. Until this existed, the only way to activate an
+    upgrade in a running frame was `open` -- which is a poor thing to ask of
+    someone working in it, so in practice nobody did, and a release could ship a
+    fix the panes could not use (2026-11-10).
+
+    NOT a dry run, unlike `reap`. That one kills processes, which may own panes
+    somebody is still reading, so it waits to be told twice. This writes hooks,
+    bindings and options and nothing else: no window is built, no pane
+    respawned, nothing signalled. Then it elects, because a frame that was stuck
+    on an old election is probably stuck right now, and the whole point is to
+    leave it usable rather than merely correct.
+    """
+    home = state_home(args.state_home)
+    keys: list[str] = []
+    if args.all:
+        keys = [
+            item["workspace_key"]
+            for item in WorkspaceMap(home).build()["workspaces"]
+            if isinstance(item.get("workspace_key"), str)
+        ]
+    else:
+        # Same fallback as `_context`: inside a frame pane the workspace is in
+        # the environment, not the cwd, so reading only the cwd re-hooked some
+        # other workspace and left the one asked for untouched (Codex review,
+        # 2026-11-11).
+        keys = [
+            str(workspace_key(
+                args.workspace_key or os.environ.get("HIVE_IDE_WORKSPACE_KEY")
+            ))
+        ]
+
+    frames: list[dict[str, Any]] = []
+    for key in keys:
+        store = StateStore(home, key)
+        frame = Frame(store)
+        if not frame.exists():
+            # Not an error and not a repair: there is no server to re-hook. A
+            # host with one frame open would otherwise report every other
+            # workspace it has ever used as a failure.
+            frames.append({"workspace": key, "running": False})
+            continue
+        hooks = frame.reinstall_hooks()
+        controller = IdeClients.elect(home, key, frame.socket, relayout_on_change=True)
+        frames.append(
+            {
+                "workspace": key,
+                "running": True,
+                "socket": frame.socket,
+                "hooks_missing_before": hooks["missing_before"],
+                "hooks_missing_after": hooks["missing_after"],
+                "version_before": hooks["version_before"],
+                "version_after": hooks["version_after"],
+                "was_stale": hooks["was_stale"],
+                "still_stale": hooks["still_stale"],
+                "controller": controller,
+            }
+        )
+    running = [f for f in frames if f["running"]]
+    repaired = [f for f in running if f["was_stale"] and not f["still_stale"]]
+    # Judged on the SAME signal the repair was judged stale by, not on hook names
+    # alone. `bind_keys` does not check the return code of its tmux writes, so a
+    # write that failed leaves the frame stale while every hook name is present —
+    # and a repair command that reports success without repairing anything is
+    # worse than one that does nothing (Codex review, 2026-11-11).
+    unfixed = [f for f in running if f["still_stale"]]
+    return {
+        "frames": frames,
+        "running": len(running),
+        "repaired": len(repaired),
+        "ok": not unfixed,
+        "unrepaired": [f["workspace"] for f in unfixed],
+        "note": (
+            "Hooks, bindings and options only — no window was built and no pane "
+            "respawned."
+        ),
+    }
+
+
 def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     _refresh_workspace_sources(store)
@@ -1454,6 +1539,34 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             source_errors.append(f"{session['name']}: {exc}")
     frame = Frame(store)
     config_findings = frame.verify_user_config()
+    # A running server carries the hooks it STARTED with, so an upgraded package
+    # and a stale frame look identical from everywhere else — which is exactly
+    # how a released fix reached nobody on 2026-11-10. Empty when no frame is
+    # running: that is "nothing to say", not "healthy".
+    bindings = frame.stale_bindings()
+    stale_hooks = bindings["missing_hooks"]
+    frame_hook_findings = (
+        [
+            "this frame's tmux server is still running the behaviour of "
+            + (
+                f"{bindings['bound_version']}"
+                if bindings["bound_version"]
+                else "whatever version opened it"
+            )
+            + f", not {__version__}"
+            + (
+                f" — it is missing {len(stale_hooks)} hook(s) this version "
+                f"installs ({', '.join(stale_hooks)})"
+                if stale_hooks
+                else " — every hook is named correctly but was written by that "
+                "version"
+            )
+            + ". An upgrade does not reach a server that is already up. Run "
+            "`hive-ide activate` to install them without rebuilding anything."
+        ]
+        if bindings["stale"]
+        else []
+    )
     # Several clients is normal: MIRRORING keeps every screen attached, one
     # controlling the frame's geometry and the rest watching it (see
     # `Frame.elect_controller`). What IS wrong is no controller or several —
@@ -1631,6 +1744,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
             and not incomplete
             and not codex_isolation_findings
             and not terminal_findings
+            and not frame_hook_findings
         ),
         "protocol_version": PROTOCOL_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -1645,6 +1759,9 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "terminal_probe": "available" if terminal.can_probe() else "unavailable",
         "terminal_findings": terminal_findings,
         "hook_findings": hook_findings,
+        "frame_hooks_missing": stale_hooks,
+        "frame_bound_version": bindings["bound_version"],
+        "frame_hook_findings": frame_hook_findings,
         "client_findings": client_findings,
         "clients": clients,
         # Informational, and deliberately NOT part of `ok`: a frame does not own its
@@ -1774,6 +1891,7 @@ def build_parser() -> argparse.ArgumentParser:
         "hook-setup": "Install shell/agent hooks used by the IDE.",
         "verify": "Verify package, drivers, hooks, source, and frame health.",
         "reap": "Kill leftover frame processes nothing can reach (dry run unless --apply).",
+        "activate": "Install this version's hooks on frames already running (after an upgrade).",
         "version": "Print package, protocol, schema, and interpreter versions.",
         "map": "Show local IDE workspaces and their sessions.",
         "monitor": "Show live Hive IDE agent/sidebar memory by session.",
@@ -2028,6 +2146,14 @@ def build_parser() -> argparse.ArgumentParser:
     reap.add_argument("--apply", action="store_true",
                       help="actually signal the orphans; omit to preview them")
     reap.set_defaults(handler=cmd_reap)
+
+    activate = command("activate")
+    activate.add_argument(
+        "--all",
+        action="store_true",
+        help="every workspace on this machine, not just this one — what a release runs",
+    )
+    activate.set_defaults(handler=cmd_activate)
 
     verify = command("verify")
     verify.add_argument("--stable-python")

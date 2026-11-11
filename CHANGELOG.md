@@ -4,6 +4,36 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `hive-ide activate` installs this version's hooks on frames that are **already
+  running**. A tmux server keeps the hooks it was given when it started and
+  `bind_keys` only runs from `open`, so installing a newer hive-ide updated the
+  CLI and left every live frame on the behaviour of whatever version opened it.
+  1.0.117 shipped a fix for a frame held hostage by an idle narrow client, went
+  out to PyPI and the whole fleet, and minutes later the same bug appeared on a
+  frame whose server dated from 1.0.113 — correct, released, installed, and
+  unreachable. It writes hooks, bindings and options only: no window is built,
+  no pane respawned, nothing signalled, so it is safe against a frame somebody
+  is working in. It then re-elects, because a frame stuck on an old election is
+  stuck right now. `--all` sweeps every workspace on the machine, which is what
+  a release runs after upgrading a host.
+
+### Fixed
+
+- `verify` reports a frame whose tmux server is behind this package, and fails
+  its verdict on it. Nothing else could tell an upgraded package from a stale
+  server, so the only way to discover one was to hit the bug it still had.
+  Staleness is two independent signals, because each catches what the other
+  cannot: a MISSING hook means a server older than the hook itself, and a
+  `@hive_ide_bound_version` stamp that does not match this package means a
+  server whose hooks are all named correctly and run the wrong thing — which is
+  the common case, since a version usually changes what an existing hook does
+  rather than adding a new one. Three states stay distinct: a frame that is not
+  running, a server that cannot be read, and a server that answers with no hooks
+  at all. Only the last is a finding; not running is not stale, and an unstamped
+  server is not a mismatch.
+
 ## [1.0.117] - 2026-11-10
 
 ### Fixed

@@ -3271,6 +3271,124 @@ class Frame:
         if current and current.get("component") == "frame:open":
             self.store.delete("errors", record["id"])
 
+    #: Every tmux hook `bind_keys` installs on the frame's session.
+    #:
+    #: A tmux server keeps the hooks it was given when it started, so installing
+    #: a newer hive-ide updates the CLI and leaves a RUNNING frame on the hooks
+    #: of whatever version opened it -- `bind_keys` only runs from `open`. On
+    #: 2026-11-10 that shipped a fix nobody could use: servers started by 1.0.113
+    #: had neither election hook, so the frame could not re-elect and the user hit
+    #: the bug the release had just fixed. `missing_frame_hooks` detects it and
+    #: `reinstall_hooks` repairs it, without opening anything.
+    #:
+    #: Kept as data rather than read back out of `bind_keys` so the two can be
+    #: compared: a test asserts every hook that method installs appears here, so a
+    #: hook added later cannot go unnoticed by the check that exists to notice it.
+    FRAME_HOOKS: tuple[str, ...] = (
+        "session-window-changed",
+        "client-resized",
+        "client-attached",
+        "client-detached",
+        "client-focus-in",
+        "client-active",
+    )
+
+    def installed_frame_hooks(self) -> set[str] | None:
+        """Hook names the live server carries, or None when it could not be read.
+
+        None and the empty set are DIFFERENT answers and the caller must not
+        collapse them: "I could not ask" is unknown, while "I asked and it has
+        none" is the stalest server there is -- the one that most needs
+        repairing. Returning an empty set for both reported it as healthy
+        (Codex review, 2026-11-11).
+        """
+        result = self.tmux(["show-hooks", "-t", self.target])
+        if result.returncode != 0:
+            return None
+        return {
+            line.split("[", 1)[0].strip()
+            for line in result.stdout.splitlines()
+            if line.strip() and not line.startswith(" ")
+        }
+
+    def missing_frame_hooks(self) -> list[str]:
+        """Which of `FRAME_HOOKS` the running server does NOT have.
+
+        Three states, not two (`unknown-is-not-a-verdict`). No frame running:
+        absence of a server is not a stale server, and reporting one would make
+        every machine without a frame open look broken. Unreadable: nothing is
+        claimed either way. A server that answers and carries NO hooks: every
+        one of them is missing, which is a real finding and the state most in
+        need of `activate` -- not a quieter version of "could not tell".
+        """
+        if not self.exists():
+            return []
+        installed = self.installed_frame_hooks()
+        if installed is None:
+            return []
+        return [hook for hook in self.FRAME_HOOKS if hook not in installed]
+
+    def binding_version(self) -> str | None:
+        """The package version that last wrote this server's hooks and bindings.
+
+        `bind_keys` stamps `@hive_ide_bound_version` as its last act, so this is
+        the only honest answer to "is this server running the current
+        behaviour?". Hook NAMES cannot answer it: a version that changes what an
+        existing hook runs — as 1.0.117 did, wrapping three of them in the
+        attention stamp — leaves every name in place on a server that is
+        thoroughly stale (Codex review, 2026-11-11).
+
+        None when the option is unreadable or was never stamped. Neither is
+        evidence of staleness, so neither produces a finding on its own.
+        """
+        result = self.tmux(["show-option", "-gvq", "@hive_ide_bound_version"])
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    def stale_bindings(self) -> dict[str, Any]:
+        """Why this running server is behind, if it is.
+
+        Two independent signals, because each catches what the other cannot. A
+        MISSING HOOK is a server older than the hook itself. A stamp that does
+        not match this package is a server whose hooks are all named correctly
+        and run the wrong thing.
+        """
+        if not self.exists():
+            return {"running": False, "missing_hooks": [], "bound_version": None,
+                    "stale": False}
+        missing = self.missing_frame_hooks()
+        bound = self.binding_version()
+        return {
+            "running": True,
+            "missing_hooks": missing,
+            "bound_version": bound,
+            # An unknown stamp is not a mismatch: a server predating the stamp
+            # reports None, and calling that stale would flag it forever.
+            "stale": bool(missing) or (bound is not None and bound != __version__),
+        }
+
+    def reinstall_hooks(self) -> dict[str, Any]:
+        """Put this package's hooks on a frame that is ALREADY running.
+
+        Hooks, key bindings and options only: `bind_keys` builds no window,
+        respawns no pane and kills nothing, which is what makes this safe to run
+        against a frame somebody is working in. It is the activation half of an
+        upgrade -- the CLI path is live the moment a host installs, and this is
+        what the panes' own server needs.
+        """
+        before = self.stale_bindings()
+        self.bind_keys()
+        after = self.stale_bindings()
+        return {
+            "missing_before": before["missing_hooks"],
+            "missing_after": after["missing_hooks"],
+            "version_before": before["bound_version"],
+            "version_after": after["bound_version"],
+            "was_stale": before["stale"],
+            "still_stale": after["stale"],
+        }
+
     #: Session option naming the client that most recently attached, gained
     #: focus, or started being typed into -- stamped by the hooks that know, and
     #: the top-ranking fact about which screen is in use. See `attached_clients`.
