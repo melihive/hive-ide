@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.118] - 2026-11-11
+
 ### Added
 
 - `hive-ide activate` installs this version's hooks on frames that are **already
