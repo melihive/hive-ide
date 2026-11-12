@@ -5829,7 +5829,8 @@ def test_environment_setup_creates_stable_and_editable_dev(monkeypatch, tmp_path
     monkeypatch.setattr(manager, "_run", fake_run)
     monkeypatch.setattr(
         "hive_ide.environments.inspect_interpreter",
-        lambda interpreter: {
+        # **_ absorbs refresh=: install() re-asks after its own upgrade.
+        lambda interpreter, **_: {
             "interpreter": str(interpreter),
             "package_version": "1.2.3",
         },
@@ -5878,7 +5879,7 @@ def test_environment_setup_force_refreshes_local_artifacts(monkeypatch, tmp_path
     )
     monkeypatch.setattr(
         "hive_ide.environments.inspect_interpreter",
-        lambda selected: {
+        lambda selected, **_: {
             "interpreter": str(selected),
             "package_version": "0.1.0.dev0",
         },
