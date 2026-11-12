@@ -50,7 +50,9 @@ class EnvironmentManager:
             argv.append("--editable")
         argv.append(requirement)
         self._run(argv, purpose=f"install hive-ide into the {kind} environment")
-        handshake = inspect_interpreter(interpreter)
+        # refresh: we just upgraded this very path, so a handshake cached earlier
+        # in this process describes the version we have just replaced.
+        handshake = inspect_interpreter(interpreter, refresh=True)
         return {
             "kind": kind,
             "interpreter": handshake["interpreter"],
