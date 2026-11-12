@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.119] - 2026-11-12
+
 ### Changed
 
 - The interpreter handshake is asked once per interpreter instead of once per
