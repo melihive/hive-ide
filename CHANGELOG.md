@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.120] - 2026-11-13
+
 ### Fixed
 
 - Hook staleness is judged per session, not per server. `bind_keys` writes two
