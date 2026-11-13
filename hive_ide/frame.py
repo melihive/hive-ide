@@ -3215,6 +3215,9 @@ class Frame:
             ["set-option", "-g", "@hive_ide_bound_keys", " ".join(bound)]
         )
         self.tmux(["set-option", "-g", "@hive_ide_bound_version", __version__])
+        self.tmux(
+            ["set-option", "-t", self.target, self.HOOKS_VERSION_OPTION, __version__]
+        )
 
     def verify_user_config(self) -> list[str]:
         findings: list[str] = []
@@ -3341,10 +3344,65 @@ class Frame:
         None when the option is unreadable or was never stamped. Neither is
         evidence of staleness, so neither produces a finding on its own.
         """
+        result = self.tmux(
+            ["show-option", "-qv", "-t", self.target, self.HOOKS_VERSION_OPTION]
+        )
+        session_stamp = result.stdout.strip() if result.returncode == 0 else ""
+        legacy = self._attributable_legacy_stamp() if not session_stamp else ""
+        # BOTH are consulted, worst-first. Returning as soon as the session stamp
+        # exists stopped checking the server-wide one, and on a shared socket
+        # another workspace on a different version can overwrite the global key
+        # bindings while this session's hooks stay current. Whichever stamp
+        # disagrees with this package is the answer; a matching one cannot vouch
+        # for the other. A server carrying NEITHER is genuinely unknown — and
+        # every server in the field today carries only the legacy one, so reading
+        # the session option alone would report an outdated server as unknown and
+        # drop its upgrade warning.
+        return session_stamp or legacy or None
+
+    def key_binding_version(self) -> str | None:
+        """The version that last wrote this SERVER's key bindings, or None.
+
+        A different question from `binding_version`, and they were conflated.
+        tmux key bindings are server-wide, so on a shared socket another
+        workspace on an older version can overwrite them while this session's
+        hooks stay perfectly current — the frame then has current hooks and
+        someone else's bindings, and one combined answer could report either
+        while hiding the other.
+        """
         result = self.tmux(["show-option", "-gvq", "@hive_ide_bound_version"])
         if result.returncode != 0:
             return None
         return result.stdout.strip() or None
+
+    def _attributable_legacy_stamp(self) -> str:
+        """The server-wide stamp, but only when it can be about THIS session.
+
+        A session with no stamp of its own predates the per-session one, and for
+        the overwhelmingly common case — one workspace, one socket, one session —
+        the server-wide stamp is about it and is the only evidence there is.
+        Ignoring it would report every server in the field as unknown and drop
+        the upgrade warning they need.
+
+        But the stamp is server-wide, so the moment a socket carries MORE than
+        one session it is unattributable: a sibling refreshed by this version
+        sets it, and an un-refreshed session would then read as current on
+        someone else's evidence — which is the cross-session bug the per-session
+        stamp exists to close, walked back in through the migration door. Found
+        by a real two-session probe; a mocked one cannot see it, because the mock
+        decides the answer.
+
+        So: exactly one session means attributable, anything else means unknown,
+        and an unknown session is still caught by its MISSING HOOK NAMES.
+        """
+        listed = self.tmux(["list-sessions", "-F", "#{session_name}"])
+        if listed.returncode != 0:
+            return ""
+        names = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+        if len(names) != 1:
+            return ""
+        result = self.tmux(["show-option", "-gvq", "@hive_ide_bound_version"])
+        return result.stdout.strip() if result.returncode == 0 else ""
 
     def stale_bindings(self) -> dict[str, Any]:
         """Why this running server is behind, if it is.
@@ -3355,17 +3413,44 @@ class Frame:
         and run the wrong thing.
         """
         if not self.exists():
-            return {"running": False, "missing_hooks": [], "bound_version": None,
-                    "stale": False}
+            # Every key the running branch returns, so a caller reading the
+            # result cannot crash on a frame that simply is not up.
+            return {
+                "running": False,
+                "missing_hooks": [],
+                "bound_version": None,
+                "key_binding_version": None,
+                "stale": False,
+            }
         missing = self.missing_frame_hooks()
-        bound = self.binding_version()
+        hooks = self.binding_version()
+        keys = self.key_binding_version()
+        # Three independent signals, because each catches what the others cannot:
+        # a missing hook NAME is a server older than the hook itself; a hooks
+        # stamp that disagrees is a session whose hooks are all named correctly
+        # and run the wrong thing; a key-binding stamp that disagrees is a server
+        # whose BINDINGS were last written by a different version, which on a
+        # shared socket can be another workspace entirely.
+        #
+        # An unknown stamp is never a mismatch — a server predating either option
+        # reports None, and calling that stale would flag it forever with a
+        # remedy that cannot clear it.
+        #
+        # Residual and accepted: a session with no stamp of its own, on a socket
+        # shared with others, whose hooks are old but whose hook NAMES are
+        # unchanged, reads as current. There is no per-session evidence to use,
+        # and the cost is a missed suggestion rather than a wrong action —
+        # `activate` is idempotent and can simply be run.
         return {
             "running": True,
             "missing_hooks": missing,
-            "bound_version": bound,
-            # An unknown stamp is not a mismatch: a server predating the stamp
-            # reports None, and calling that stale would flag it forever.
-            "stale": bool(missing) or (bound is not None and bound != __version__),
+            "bound_version": hooks,
+            "key_binding_version": keys,
+            "stale": (
+                bool(missing)
+                or (hooks is not None and hooks != __version__)
+                or (keys is not None and keys != __version__)
+            ),
         }
 
     def reinstall_hooks(self) -> dict[str, Any]:
@@ -3388,6 +3473,16 @@ class Frame:
             "was_stale": before["stale"],
             "still_stale": after["stale"],
         }
+
+    #: Session option naming the version that last wrote THIS SESSION's hooks.
+    #:
+    #: Separate from the server-global `@hive_ide_bound_version`, which tracks
+    #: the KEY BINDINGS, because tmux keeps the two at different scopes: bindings
+    #: are server-wide, hooks are per session. One stamp covering both meant that
+    #: on a socket carrying two workspaces, one session's `bind_keys` updated the
+    #: global version and the other session's stale hooks then read as current
+    #: whenever their names happened to be unchanged.
+    HOOKS_VERSION_OPTION = "@hive_ide_hooks_version"
 
     #: Session option naming the client that most recently attached, gained
     #: focus, or started being typed into -- stamped by the hooks that know, and
