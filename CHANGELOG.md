@@ -4,6 +4,29 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Hook staleness is judged per session, not per server. `bind_keys` writes two
+  kinds of state and tmux keeps them at different scopes — key bindings are
+  server-global, hooks are per-session — and one stamp covered both. On a socket
+  carrying two workspaces, one session's `bind_keys` updated the global version
+  and the other session's stale hooks then read as current whenever their names
+  were unchanged. Hooks now carry their own session-scoped stamp; the global one
+  keeps its original job of tracking the key bindings, and `verify` now reports
+  both independently — a frame can legitimately have current hooks and bindings
+  last written by another workspace, and one combined answer could report either
+  while hiding the other.
+
+  The server-wide stamp is still used to judge a session that has none of its
+  own, because every server in the field carries only that one and ignoring it
+  would drop their upgrade warning — but only when it can be ATTRIBUTED, meaning
+  the socket carries exactly one session. On a shared socket a sibling's refresh
+  is not evidence about this session, which is the original bug walked back in
+  through the migration door; found by a real two-session tmux test, which a
+  mocked one cannot find because the mock decides the answer. A server with no
+  attributable stamp is reported unknown rather than stale, so nothing is
+  flagged with a remedy that cannot clear it.
+
 ## [1.0.119] - 2026-11-12
 
 ### Changed

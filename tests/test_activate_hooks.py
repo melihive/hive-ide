@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from importlib.metadata import version
 import subprocess
 
 import pytest
@@ -327,6 +328,7 @@ def test_activate_does_not_claim_success_when_the_frame_is_still_stale(
             "running": True,
             "missing_hooks": [],          # every NAME is present…
             "bound_version": "1.0.113",   # …and the server is still old
+            "key_binding_version": "1.0.113",
             "stale": True,
         },
     )
@@ -389,6 +391,7 @@ def test_verify_reports_a_stale_server_and_fails_on_it(tmp_path, monkeypatch, ca
             "running": True,
             "missing_hooks": ["client-focus-in", "client-active"],
             "bound_version": "1.0.113",
+            "key_binding_version": "1.0.113",
             "stale": True,
         },
     )
@@ -429,3 +432,201 @@ def test_verify_says_nothing_about_a_frame_that_is_not_running(
 
     assert payload["frame_hooks_missing"] == []
     assert payload["frame_hook_findings"] == []
+
+
+# --- the stamp's SCOPE -------------------------------------------------------
+# Deferred from a Codex review on 2026-11-11 and taken here. `bind_keys` writes
+# two kinds of state and tmux keeps them at different scopes: key bindings are
+# server-global, hooks are per session. One stamp covering both meant that on a
+# socket carrying two workspaces, one session's bind_keys updated the global
+# version and the other session's stale hooks read as current.
+
+
+def test_hook_staleness_is_judged_per_session_not_per_server(tmp_path, monkeypatch):
+    """The hooks question is asked of THIS session, not of the server."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    frame = Frame(store, socket="shared-socket")
+
+    asked: list[list[str]] = []
+
+    def tmux(self, args, **kw):
+        asked.append(list(args))
+        return _Result("")
+
+    monkeypatch.setattr(Frame, "tmux", tmux)
+    frame.binding_version()
+
+    assert asked, "binding_version asked tmux nothing"
+    first = asked[0]
+    assert Frame.HOOKS_VERSION_OPTION in first, f"read the wrong option first: {first}"
+    assert "-t" in first and frame.target in first, (
+        f"read the stamp SERVER-wide, so a sibling session vouches for this one: {first}"
+    )
+    assert "-gvq" not in first
+
+
+def test_the_two_stamps_answer_two_different_questions(tmp_path, monkeypatch):
+    """Hooks are per-session; key bindings are server-wide.
+
+    Conflating them meant one answer could report either while hiding the other.
+    A frame can legitimately have current hooks and someone else's bindings.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket="shared-socket")
+
+    def tmux(self, args, **kw):
+        if Frame.HOOKS_VERSION_OPTION in args:
+            return _Result(version("hive-ide"))   # this session's hooks are current
+        if "@hive_ide_bound_version" in args:
+            return _Result("1.0.100")             # the server's bindings are not
+        return _Result("")
+
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "missing_frame_hooks", lambda self: [])
+    monkeypatch.setattr(Frame, "tmux", tmux)
+
+    state = frame.stale_bindings()
+
+    assert state["bound_version"] == version("hive-ide"), "the hooks answer moved"
+    assert state["key_binding_version"] == "1.0.100"
+    assert state["stale"] is True, (
+        "current hooks hid key bindings last written by another version"
+    )
+
+
+def test_bind_keys_stamps_this_sessions_hooks(tmp_path, monkeypatch):
+    """The writer half — and the half a mutation run would otherwise find missing."""
+    store = StateStore(tmp_path / "state", tmp_path)
+    frame = Frame(store, socket="fixture")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        frame,
+        "tmux",
+        lambda argv, **kw: calls.append(list(argv))
+        or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    monkeypatch.setattr(frame, "_module", lambda module, args: f"module={module}")
+
+    frame.bind_keys()
+
+    stamped = [
+        c
+        for c in calls
+        if c[0] == "set-option" and Frame.HOOKS_VERSION_OPTION in c
+    ]
+    assert len(stamped) == 1, f"expected one hooks stamp, got {stamped}"
+    assert "-t" in stamped[0] and frame.target in stamped[0], (
+        f"the hooks stamp was written server-wide: {stamped[0]}"
+    )
+
+
+def test_an_existing_server_is_still_judged_by_its_old_stamp(tmp_path, monkeypatch):
+    """Codex review finding, 2026-11-13. Migration must not hide a stale server.
+
+    Every server on the fleet right now has the server-wide stamp and not the
+    session one. Reading only the new option turns a 1.0.116 server with
+    unchanged hook NAMES into "unknown", and `verify` then drops the upgrade
+    warning for exactly the frames that need it.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket="old-server")
+
+    def tmux(self, args, **kw):
+        if args and args[0] == "list-sessions":
+            return _Result("hive-ide-abc123\n")   # one session: attributable
+        if self.HOOKS_VERSION_OPTION in args:
+            return _Result("")          # the new option does not exist yet
+        if "@hive_ide_bound_version" in args:
+            return _Result("1.0.116")   # but the old one does
+        return _Result("")
+
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "missing_frame_hooks", lambda self: [])
+    monkeypatch.setattr(Frame, "tmux", tmux)
+
+    assert frame.binding_version() == "1.0.116"
+    assert frame.stale_bindings()["stale"] is True, (
+        "a server running 1.0.116's hooks was reported current by the migration"
+    )
+
+
+def test_a_server_without_the_session_stamp_is_unknown_not_stale(tmp_path, monkeypatch):
+    """Migration. Every existing server answers empty on the first read.
+
+    Calling that stale would flag every frame on the fleet the moment this ships,
+    with a remedy that cannot clear it until something writes the stamp — the
+    forbidden direction for an unknown.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket="old-server")
+
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "missing_frame_hooks", lambda self: [])
+    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Result(""))
+
+    assert frame.binding_version() is None
+    assert frame.stale_bindings()["stale"] is False
+
+
+def test_verify_names_stale_key_bindings_as_such(tmp_path, monkeypatch, capsys):
+    """Codex review finding, 2026-11-13.
+
+    Attributing every failure to the hook version printed "running the behaviour
+    of 1.0.114, not 1.0.114" when only the server's key bindings were outdated —
+    which reads as a bug in the message rather than as the finding it is. Each
+    signal is reported as itself, and the mismatched version appears in the JSON.
+    """
+    current = version("hive-ide")
+    monkeypatch.setattr(
+        Frame,
+        "stale_bindings",
+        lambda self: {
+            "running": True,
+            "missing_hooks": [],
+            "bound_version": current,       # this session's hooks ARE current
+            "key_binding_version": "1.0.100",  # the server's bindings are not
+            "stale": True,
+        },
+    )
+    monkeypatch.setattr(HookInstaller, "verify", lambda self: [])
+    monkeypatch.chdir(tmp_path)
+    cli.main(["--state-home", str(tmp_path / "state"), "verify"])
+    payload = json.loads(capsys.readouterr().out)
+
+    finding = payload["frame_hook_findings"][0]
+    assert "key bindings were written by 1.0.100" in finding, finding
+    assert f"not running {current}" in finding
+    assert f"hooks were written by {current}" not in finding, (
+        f"blamed the hooks, which are current: {finding}"
+    )
+    assert payload["frame_key_binding_version"] == "1.0.100"
+    assert payload["ok"] is False
+
+
+def test_a_frame_that_is_not_running_has_the_same_result_shape(tmp_path):
+    """The not-running branch must carry every key the running branch does.
+
+    It did not, and `verify` raised KeyError on any machine whose frame was
+    simply down — found by the existing tests the moment the new key was added.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace), socket="not-running")
+
+    down = frame.stale_bindings()
+
+    assert down["running"] is False
+    assert set(down) == {
+        "running",
+        "missing_hooks",
+        "bound_version",
+        "key_binding_version",
+        "stale",
+    }, f"shape differs from the running branch: {sorted(down)}"
+

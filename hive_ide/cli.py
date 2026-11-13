@@ -1545,24 +1545,36 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     # running: that is "nothing to say", not "healthy".
     bindings = frame.stale_bindings()
     stale_hooks = bindings["missing_hooks"]
+    # Each signal is reported as itself. Attributing every failure to the hook
+    # version printed "running the behaviour of 1.0.114, not 1.0.114" when only
+    # the server's key bindings were outdated — which reads as a bug in the
+    # message rather than the finding it is (Codex review, 2026-11-13).
+    frame_hook_reasons: list[str] = []
+    if stale_hooks:
+        frame_hook_reasons.append(
+            f"it is missing {len(stale_hooks)} hook(s) this version installs "
+            f"({', '.join(stale_hooks)})"
+        )
+    if bindings["bound_version"] and bindings["bound_version"] != __version__:
+        frame_hook_reasons.append(
+            f"this session's hooks were written by {bindings['bound_version']}"
+        )
+    if (
+        bindings["key_binding_version"]
+        and bindings["key_binding_version"] != __version__
+    ):
+        frame_hook_reasons.append(
+            "this server's key bindings were written by "
+            f"{bindings['key_binding_version']}"
+            # On a shared socket those bindings may belong to another workspace
+            # entirely, so say what was observed rather than blaming this frame.
+        )
     frame_hook_findings = (
         [
-            "this frame's tmux server is still running the behaviour of "
-            + (
-                f"{bindings['bound_version']}"
-                if bindings["bound_version"]
-                else "whatever version opened it"
-            )
-            + f", not {__version__}"
-            + (
-                f" — it is missing {len(stale_hooks)} hook(s) this version "
-                f"installs ({', '.join(stale_hooks)})"
-                if stale_hooks
-                else " — every hook is named correctly but was written by that "
-                "version"
-            )
+            f"this frame is not running {__version__}'s behaviour: "
+            + "; ".join(frame_hook_reasons or ["the reason could not be named"])
             + ". An upgrade does not reach a server that is already up. Run "
-            "`hive-ide activate` to install them without rebuilding anything."
+            "`hive-ide activate` to install it without rebuilding anything."
         ]
         if bindings["stale"]
         else []
@@ -1761,6 +1773,7 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
         "hook_findings": hook_findings,
         "frame_hooks_missing": stale_hooks,
         "frame_bound_version": bindings["bound_version"],
+        "frame_key_binding_version": bindings["key_binding_version"],
         "frame_hook_findings": frame_hook_findings,
         "client_findings": client_findings,
         "clients": clients,
