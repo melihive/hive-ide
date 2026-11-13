@@ -4,6 +4,22 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- A warm `open` spawns 769 tmux processes instead of 1025. `windows()` probed
+  `has-session` before every listing, and the listing already answers that:
+  tmux exits non-zero both when the server is absent and when the session is
+  missing, and zero only when it is there. Since `windows()` runs 239 times in
+  one `open`, that probe was 258 of the launch's 1025 subprocesses — a quarter
+  of them spent asking a question the very next call answers.
+
+  Behaviour is unchanged by construction: a failed listing already returned no
+  windows, so absence and failure collapse exactly as before. That collapsing
+  is a known weakness — a transient failure reads as "no window", and a caller
+  that builds on absence would build a duplicate — but it predates this change
+  and belongs to the observation-model work, which has to decide what unknown
+  means at each of the dozen call sites rather than here.
+
 ## [1.0.120] - 2026-11-13
 
 ### Fixed

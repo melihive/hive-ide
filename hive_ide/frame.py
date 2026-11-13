@@ -256,8 +256,21 @@ class Frame:
         return [s for s in self.tmux_sessions() if s["name"] != self.target]
 
     def windows(self) -> dict[str, str]:
-        if not self.exists():
-            return {}
+        # No `exists()` probe first. `list-windows` already answers it: tmux
+        # exits non-zero both when the server is absent ("error connecting to
+        # <socket>") and when the session is missing ("can't find session"), and
+        # zero only when it is there — so the probe cost a second subprocess per
+        # call to learn what the call itself reports. `windows()` runs 239 times
+        # in one warm `open`, which made this the single most repeated redundant
+        # process in a launch.
+        #
+        # Behaviour is unchanged: a failed listing already returned {} below, so
+        # absence and failure collapse exactly as they did before. That
+        # collapsing is itself a known weakness — a transient failure reads as
+        # "no window", and a caller that builds on absence would build a
+        # duplicate — but it predates this change and is owned by the
+        # observation-model task, which has to decide what unknown means at
+        # every one of the dozen call sites rather than here.
         result = self.tmux(
             [
                 "list-windows",
