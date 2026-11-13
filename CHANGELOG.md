@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.121] - 2026-11-14
+
 ### Changed
 
 - A warm `open` spawns 769 tmux processes instead of 1025. `windows()` probed
