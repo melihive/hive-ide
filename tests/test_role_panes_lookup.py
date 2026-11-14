@@ -135,22 +135,69 @@ def test_only_the_selected_windows_roles_are_reported(frame):
     )
 
 
-def test_a_failed_listing_is_unknown_while_the_session_is_there(frame, monkeypatch):
-    """The deliberate semantic change, and the direction it fails in.
+def test_a_colliding_window_name_cannot_hijack_the_listing(frame):
+    """`-s` does not make `-t` a session target. It still resolves a WINDOW first.
 
-    `None` reads as "could not observe" and makes callers defer. Deferring costs
-    a retry; rebuilding on a misread destroys a live window, so the unknown
-    routes to the inert outcome.
+    A bare `-t <name>` matches a window of that name in whatever session tmux
+    considers current, and `-s` then lists THAT session's panes. A successful
+    listing of the wrong session reads as "no roles here", which licenses a
+    rebuild of a healthy window. `={name}:` forces an exact session target.
     """
-    _window(frame, "s1", {"agent": ""})
+    expected = _window(frame, "s1", {"sidebar": "", "agent": ""})
+    # A decoy session created LAST, so tmux treats it as current, holding a
+    # window named exactly like this frame's session.
+    _tmux(frame, "new-session", "-d", "-s", "decoy", "sh")
+    _tmux(frame, "rename-window", "-t", "decoy", frame.target)
+    _tmux(frame, "set-option", "-w", "-t", "decoy", "@hive_ide_session_id", "DECOY")
+
+    # The premise, pinned: the bare form really does read the decoy. If tmux
+    # ever changes this, this line fails and the guard above is what is stale --
+    # rather than the test quietly passing for a new reason.
+    hijacked = _tmux(
+        frame, "list-panes", "-s", "-t", frame.target, "-F", "#{@hive_ide_session_id}"
+    )
+    assert "DECOY" in hijacked, f"tmux no longer resolves a bare -t as a window: {hijacked}"
+
+    assert frame.role_panes("s1") == expected
+
+
+def test_a_failed_fast_path_falls_back_to_the_old_two_calls(frame, monkeypatch):
+    """No new answer is invented from one failure: the old path still answers.
+
+    A single failed listing cannot tell "the window is gone" from "I could not
+    look", and those want opposite outcomes. `windows()` plus the per-window
+    pane listing can, and that is the shipped contract.
+    """
+    expected = _window(frame, "s1", {"agent": ""})
+    ran: list[str] = []
     real = Frame.tmux
 
-    def failing_listing(self, args, **kwargs):
+    def failing_fast_path(self, args, **kwargs):
+        ran.append(args[0])
         if args[:1] == ["list-panes"] and "-s" in args:
             return subprocess.CompletedProcess(args, 1, "", "server exited unexpectedly")
         return real(self, args, **kwargs)
 
-    monkeypatch.setattr(Frame, "tmux", failing_listing)
+    monkeypatch.setattr(Frame, "tmux", failing_fast_path)
+
+    assert frame.role_panes("s1") == expected
+    assert ran == ["list-panes", "list-windows", "list-panes"], ran
+
+
+def test_panes_that_cannot_be_observed_at_all_are_unknown(frame, monkeypatch):
+    """The window is found, but no pane listing works: unknown, never absence.
+
+    Deferring costs a retry; rebuilding on a misread destroys a live window.
+    """
+    _window(frame, "s1", {"agent": ""})
+    real = Frame.tmux
+
+    def failing_pane_listings(self, args, **kwargs):
+        if args[:1] == ["list-panes"]:
+            return subprocess.CompletedProcess(args, 1, "", "server exited unexpectedly")
+        return real(self, args, **kwargs)
+
+    monkeypatch.setattr(Frame, "tmux", failing_pane_listings)
 
     assert frame.role_panes("s1") is None
 
@@ -196,21 +243,3 @@ def test_the_happy_path_is_one_tmux_call(frame, monkeypatch):
     frame.role_panes("s1")
 
     assert ran == ["list-panes"], f"spent more than one tmux call: {ran}"
-
-
-def test_the_absence_probe_costs_nothing_until_the_listing_fails(frame, monkeypatch):
-    """The `has-session` probe is on the failure path only."""
-    _window(frame, "s1", {"agent": ""})
-    ran: list[str] = []
-    real = Frame.tmux
-
-    def failing_listing(self, args, **kwargs):
-        ran.append(args[0])
-        if args[:1] == ["list-panes"] and "-s" in args:
-            return subprocess.CompletedProcess(args, 1, "", "boom")
-        return real(self, args, **kwargs)
-
-    monkeypatch.setattr(Frame, "tmux", failing_listing)
-    frame.role_panes("s1")
-
-    assert ran == ["list-panes", "has-session"], ran

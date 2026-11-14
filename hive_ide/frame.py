@@ -303,6 +303,17 @@ class Frame:
         once, and a pane resolves its own window's `@hive_ide_session_id` through
         tmux's option hierarchy, so the single listing answers both questions.
 
+        The target is `={target}:`, NOT a bare session name. `-s` makes tmux list
+        the session of whatever `-t` resolves to, but it still resolves `-t` as a
+        WINDOW target first -- so a bare name matches a window of that name in
+        whatever session tmux considers current, and lists THAT session's panes.
+        Reproduced on tmux 3.8: with a decoy session holding a window named like
+        this frame's session, the bare form returned the decoy's panes. A
+        successful listing of the wrong session reads as "no roles here", which
+        licenses a rebuild of a perfectly healthy window. `=` forces an exact
+        name match and the trailing `:` forces a session target, which is what
+        `list-windows` has always done.
+
         ONE WINDOW, even when two carry the same tag. Listing the session at once
         means panes arrive with no window identity unless the format carries it,
         and merging them would report a window as having roles that live in some
@@ -310,18 +321,21 @@ class Frame:
         at the wrong window. So panes are grouped by window and only the selected
         window's roles are returned. The selection is the last tagged window in
         listing order, which is the one `windows()` keeps when it collapses
-        duplicates into a single mapping.
+        duplicates into a single mapping; both commands walk the session's
+        windows in the same order.
 
-        A FAILED listing asks `has-session` before it answers, because tmux exits
-        non-zero both when the window is genuinely gone and when it could not be
-        looked at, and those two want opposite outcomes. Confirmed absence (no
-        server, no session) is `{}`, exactly as the old `windows()` call reported
-        it -- a persisted lease left by a reboot still reaches its reconstruction
-        path. A listing that fails while the session IS there is `None`: deferring
-        costs a retry, rebuilding on a misread destroys a live window, so the
-        unknown routes to the inert outcome. A wedged server reads as absent, as
-        it did before. The probe costs a subprocess only when something is
-        already wrong.
+        NO SEMANTIC CHANGE: a failed listing falls back to the two calls this
+        method used to make, rather than inventing an answer from one failure.
+        tmux exits non-zero both when the window is genuinely gone and when it
+        could not be looked at, and those two want opposite outcomes -- absence
+        licenses a rebuild, unknown must defer -- so a single failed listing
+        cannot tell them apart. The old path could: `windows()` reports absence,
+        and the per-window pane listing reports unknown. Collapsing them is a
+        real weakness, but it is the SHIPPED one, and deciding what unknown means
+        belongs to the observation-model work that has to answer it at every one
+        of the dozen call sites at once, not to a change whose whole purpose is
+        to spend fewer subprocesses. The fallback costs its two calls only when
+        the fast path has already failed.
         """
         if not session_id:
             return {}
@@ -330,13 +344,16 @@ class Frame:
                 "list-panes",
                 "-s",
                 "-t",
-                self.target,
+                f"={self.target}:",
                 "-F",
                 "#{@hive_ide_session_id}\t#{window_id}\t#{@hive_ide_pane}\t#{pane_id}",
             ]
         )
         if result.returncode != 0:
-            return {} if not self.exists() else None
+            window_id = self.windows().get(session_id)
+            if not window_id:
+                return {}
+            return self._role_panes_in_window(window_id)
         by_window: dict[str, dict[str, str]] = {}
         selected: str | None = None
         for line in result.stdout.splitlines():

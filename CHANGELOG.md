@@ -13,23 +13,29 @@ All notable changes to `hive-ide` will be documented in this file.
   and a pane resolves its own window's `@hive_ide_session_id` through tmux's
   option hierarchy, so one listing answers both questions.
 
-  Listing the session at once means panes arrive without window identity, so
-  the format carries `window_id` and the panes are grouped by it: only the
-  selected window's roles are returned, and the selection is the window
-  `windows()` keeps when it collapses duplicates. Two windows carrying the same
-  session tag would otherwise be merged, reporting a window as holding roles
-  that live in the other one — which hides a missing pane from repair and aims
-  a mutation at a window nobody selected.
+  Behaviour is unchanged, including on failure: a failed listing falls back to
+  the two calls this method used to make. tmux exits non-zero both when the
+  window is gone and when it could not be looked at, and those want opposite
+  outcomes — absence licenses a rebuild, unknown must defer — so one failed
+  listing cannot tell them apart while `windows()` plus the per-window pane
+  listing can. Collapsing them remains a known weakness, and it stays owned by
+  the observation-model work that has to answer it at every call site at once.
+  The fallback spends its two calls only after the fast path has failed.
 
-  A failed listing now asks `has-session` before it answers, because tmux exits
-  non-zero both when the window is genuinely gone and when it could not be
-  looked at, and those want opposite outcomes. Confirmed absence (no server, no
-  session) stays `{}`, so a plan lease persisted across a reboot still reaches
-  its reconstruction path instead of refusing with `pane_unobservable`. A
-  listing that fails while the session IS there answers `None`: deferring costs
-  a retry, rebuilding on a misread destroys a live window, so the unknown
-  routes to the inert outcome. The probe costs a subprocess only when something
-  is already wrong, which leaves the happy path at one call.
+  The target is `={session}:`, not a bare name: `-s` lists the session of
+  whatever `-t` resolves to, but `-t` is still resolved as a WINDOW target
+  first, so a bare name matches a window of that name in whatever session tmux
+  considers current. Reproduced on tmux 3.8 — with a decoy session holding a
+  window named like the frame's session, the bare form returned the decoy's
+  panes, and a successful listing of the wrong session reads as "no roles
+  here", which would license rebuilding a healthy window.
+
+  Panes also arrive without window identity, so the format carries `window_id`
+  and they are grouped by it; only the selected window's roles are returned,
+  and the selection is the window `windows()` keeps. Two windows sharing a
+  session tag would otherwise be merged, reporting a window as holding roles
+  that live in the other one — hiding a missing pane from repair and aiming a
+  mutation at a window nobody selected.
 
 ## [1.0.121] - 2026-11-14
 

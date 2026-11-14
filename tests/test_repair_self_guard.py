@@ -485,12 +485,15 @@ def test_marker_is_kept_when_the_outside_run_cannot_observe_the_panes(live, monk
     intercepted: list[list[str]] = []
 
     def failing_role_listing(args, **kwargs):
-        # Matched by WHAT IT ASKS FOR, not by one exact format string: the
+        # EVERY role listing fails, fast path and fallback alike -- the
+        # premise is that the panes cannot be observed at all, and
+        # `role_panes()` falls back to a second listing when the first
+        # fails. Matched by WHAT IT ASKS FOR, not by one exact format string: the
         # previous exact matcher stopped intercepting the moment `role_panes()`
         # added a field, which left this test asserting against a real, healthy
         # listing and passing for the wrong reason. `intercepted` below is the
         # part that cannot rot quietly.
-        if args[:1] == ["list-panes"] and "-s" in args and "@hive_ide_pane" in args[-1]:
+        if args[:1] == ["list-panes"] and "@hive_ide_pane" in args[-1]:
             intercepted.append(args)
             return SimpleNamespace(returncode=1, stdout="", stderr="no server running")
         return original(live.frame, args, **kwargs)
@@ -889,7 +892,7 @@ def test_unobservable_panes_never_authorize_a_rebuild(live, monkeypatch):
         # See the matcher note in the deferred-marker test above: asking what the
         # listing is FOR survives a format change, and `intercepted` fails loudly
         # if it ever stops matching.
-        if args[:1] == ["list-panes"] and "-s" in args and "@hive_ide_pane" in args[-1]:
+        if args[:1] == ["list-panes"] and "@hive_ide_pane" in args[-1]:
             intercepted.append(args)
             return SimpleNamespace(returncode=1, stdout="", stderr="no server running")
         return original(live.frame, args, **kwargs)
