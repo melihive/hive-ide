@@ -91,6 +91,13 @@ class Frame:
             or saved_tmux.get("socket")
             or f"hive-ide-{store.workspace_hash[:8]}"
         )
+        #: The `TMUX_TMPDIR` this frame's server lives under, when its snapshot
+        #: pinned one. Read from STATE, never from the ambient environment: a
+        #: process that does not know the directory looks in `/tmp`, fails to
+        #: connect, and a failed probe must never read as "no frame exists".
+        #: Absent (every frame built before this) means tmux's own default, so an
+        #: already-running server keeps the address it was started on.
+        self.socket_tmpdir = saved_tmux.get("socket_tmpdir") or None
         self.target = f"hive-ide-{store.workspace_hash[:8]}"
         self.python = sys.executable
         # None means no open has planned its launch order yet, which is NOT the
@@ -155,12 +162,43 @@ class Frame:
         generated = self._ide_conf() if clean_start else None
         config = ["-f", str(generated)] if generated else []
         argv = ["tmux", "-L", self.socket, *config, *args]
+        # tmux resolves `-L <name>` under `TMUX_TMPDIR`, so a pinned frame has to
+        # pass it on EVERY call. Without it the same `-L` name means a different
+        # socket path, and the symptom is not an error but a second, empty server.
+        env = None
+        if self.socket_tmpdir:
+            self._ensure_socket_tmpdir()
+            env = {**os.environ, "TMUX_TMPDIR": self.socket_tmpdir}
         try:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            return subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, env=env
+            )
         except subprocess.TimeoutExpired:
             return subprocess.CompletedProcess(
                 argv, 124, stdout="", stderr=f"tmux timed out after {timeout}s"
             )
+
+    def _ensure_socket_tmpdir(self) -> None:
+        """Create the pinned socket directory, private, once per frame.
+
+        tmux creates the `tmux-<uid>` directory INSIDE `TMUX_TMPDIR` but not
+        `TMUX_TMPDIR` itself, so a pinned frame whose directory does not exist
+        cannot start a server at all. Found by the test that asserts the socket
+        lands where the frame says: nothing in the package was creating it.
+
+        0700 because a socket anyone can reach is a tmux server anyone can drive.
+        A failure is left to tmux to report rather than silently falling back to
+        the default directory — a fallback would put the server at an address the
+        rest of this frame is not looking at, which is the one outcome worth
+        avoiding more than a clear error.
+        """
+        if getattr(self, "_socket_tmpdir_ready", False) or not self.socket_tmpdir:
+            return
+        try:
+            Path(self.socket_tmpdir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            pass
+        self._socket_tmpdir_ready = True
 
     def require_tmux(self) -> None:
         if shutil.which("tmux") is None:
@@ -431,6 +469,10 @@ class Frame:
         caller's own server look foreign, and the guards then refuse the relaunch
         and defer the rebuild that a healthy pane is entitled to.
         """
+        if self.socket_tmpdir:
+            return str(
+                Path(self.socket_tmpdir) / f"tmux-{os.getuid()}" / self.socket
+            )
         return str(SocketReaper.default_directory() / self.socket)
 
     @staticmethod

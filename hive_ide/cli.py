@@ -18,7 +18,7 @@ from .adoption import AdoptableConversation, ConversationAdopter
 from .agents import AgentResumeState
 from .holders import ConversationHolders
 from .launch_gate import PROCESS_MARKER as LAUNCH_GATE_MARKER
-from .config import configured_registry, load_config, normalized_snapshot
+from .config import durable_socket_tmpdir, configured_registry, load_config, normalized_snapshot
 from .conversation import ConversationGuard
 from .drivers import ConversationState
 from .errors import CommandOutcome, HiveIdeError, UsageError
@@ -95,6 +95,22 @@ def _context(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any]]:
 
 def _refresh_workspace_sources(store: StateStore) -> None:
     store.refresh_stable_sources(collections=("sessions", "archive"))
+
+
+def _socket_tmpdir(store: StateStore, socket: str) -> str | None:
+    """The socket directory this frame should use, carried across rewrites.
+
+    The snapshot is rewritten on every `open`, so the previous value has to be
+    read back and handed to the chooser — otherwise a frame's address would be
+    re-decided while its server is running.
+    """
+    previous = (store.read_path(store.config_snapshot_path()) or {}).get("tmux") or {}
+    return durable_socket_tmpdir(
+        state_home=store.home,
+        socket=socket,
+        previous=previous.get("socket_tmpdir") or None,
+        listening=SocketReaper.is_listening,
+    )
 
 
 def cmd_create(args: argparse.Namespace) -> dict[str, Any]:
@@ -966,6 +982,7 @@ def cmd_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         socket=args.tmux_socket,
         registry=registry,
         config=config,
+        socket_tmpdir=_socket_tmpdir(store, args.tmux_socket),
     )
     store.write_path(store.config_snapshot_path(), snapshot)
     return snapshot
@@ -1171,6 +1188,7 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         socket=socket,
         registry=registry,
         config=config,
+        socket_tmpdir=_socket_tmpdir(store, socket),
     )
     store.write_path(store.config_snapshot_path(), snapshot)
     frame = Frame(store, socket=socket)
