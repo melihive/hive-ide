@@ -12,6 +12,7 @@ from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .drivers import DriverRegistry
+from .socket_gc import SocketReaper
 from .errors import StateError, UsageError
 from .layout import IdeLayout
 from .python_cmd import PythonCommand
@@ -282,6 +283,71 @@ def configured_registry(config: dict[str, Any], *, plugins: bool = True) -> Driv
     return registry
 
 
+#: Unix socket paths are bounded by `sockaddr_un.sun_path` — 108 bytes on Linux,
+#: 104 on macOS. A durable directory under a deep `$HOME` can exceed it, and the
+#: failure is not cosmetic: tmux cannot create the socket and the frame does not
+#: start at all. 100 leaves room for the `tmux-<uid>/` segment and the name.
+SOCKET_PATH_BUDGET = 100
+
+
+def durable_socket_tmpdir(
+    *, state_home: Path, socket: str, previous: str | None, listening
+) -> str | None:
+    """Where this frame's tmux socket should live, or None for tmux's default.
+
+    `/tmp` is age-cleaned — `q /tmp … 10d` with the cleaner timer active on a
+    stock Fedora — so a frame nothing touches for ten days can have its socket
+    deleted from under a server that is still running, with every pane still in
+    it. Measured trigger: tmpfiles removes an entry only when atime, btime, ctime
+    AND mtime are all older than the age, and connecting to the socket refreshes
+    atime, so a frame in USE is never at risk. The exposed population is a live
+    frame nothing has touched for ten straight days, which is what the orphan
+    sweeper exists for.
+
+    Three rules, in order, and the first two matter more than the third:
+
+    1. **An address already pinned is kept.** It is where the server actually is.
+    2. **A server currently listening at the legacy address keeps it.** The
+       snapshot is rewritten on every `open`, so adopting a new directory here
+       would change the address of a RUNNING server: every later call would look
+       somewhere else, find nothing, and a failed probe must never read as "no
+       frame exists, build one". Relocating a running server is not a thing this
+       can do, so it does not try.
+    3. **Otherwise a new frame gets the durable directory**, unless the path
+       would not fit, in which case tmux's default stands rather than a frame
+       that cannot start.
+
+    `$XDG_RUNTIME_DIR` is deliberately NOT used: it is destroyed on last logout
+    unless lingering is enabled, which trades age cleanup for logout cleanup and
+    does not satisfy "long-lived". Enabling lingering is host administration, not
+    a side effect of a package install.
+    """
+    if previous:
+        return previous
+    legacy = SocketReaper.default_directory() / socket
+    # A path with NO SOCKET FILE is a genuinely new frame, and that is the common
+    # case this exists for. `is_listening` cannot say so: it answers None for
+    # ENOENT, because it reports whether a server ANSWERS and only an explicit
+    # refusal proves one is dead. Asking it first therefore meant a brand-new
+    # frame got `None` and never adopted the durable directory at all — the
+    # feature was inert in production, and the test that was supposed to cover it
+    # injected `False` and hid that. Review caught it; the test did not.
+    if legacy.exists():
+        if listening(legacy) is not False:
+            # Answering (True) or unreadable (None) both mean: do not move it.
+            # Only a definite "nothing is there" frees an address in use.
+            return None
+    base = Path(state_home) / "sockets"
+    candidate = base / f"tmux-{os.getuid()}" / socket
+    # BYTES, not characters. `sun_path` is a byte buffer, so a path of 51
+    # characters can occupy 111 bytes once filesystem-encoded and be refused by
+    # both supported platforms while passing a character count. Review
+    # reproduced exactly that.
+    if len(os.fsencode(str(candidate))) > SOCKET_PATH_BUDGET:
+        return None
+    return str(base)
+
+
 def normalized_snapshot(
     *,
     state_home: Path,
@@ -290,6 +356,7 @@ def normalized_snapshot(
     socket: str,
     registry: DriverRegistry,
     config: dict[str, Any],
+    socket_tmpdir: str | None = None,
 ) -> dict[str, Any]:
     theme = config.get("theme") or DEFAULT_THEME
     if not isinstance(theme, dict):
@@ -317,6 +384,7 @@ def normalized_snapshot(
         "command_argv": PythonCommand.cli_argv(python=sys.executable),
         "tmux": {
             "socket": socket,
+            "socket_tmpdir": socket_tmpdir,
             "sidebar_width": IdeLayout.SIDEBAR_W,
             "plan_width": IdeLayout.PLAN_W,
         },
