@@ -35,6 +35,7 @@ switching feel slow or wedge the frame.
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import argparse
 from pathlib import Path
@@ -78,9 +79,42 @@ class IdeWake:
                 pane_id, role=IdeWake.ROLE, session_id=record["id"], tty=tty
             ):
                 return False
-            return IdeSidebar.paint_fd(skill_dir, repo, record["id"], fd)
+            painted = IdeSidebar.paint_fd(skill_dir, repo, record["id"], fd)
+            # Then hand the pane back to its OWN renderer. Painting shows the right
+            # frame now; only the keep-alive can start the process that keeps it
+            # right, and it is asleep on a backstop that may be 30s away.
+            IdeWake.restart_renderer(frame, pane_id)
+            return painted
         finally:
             os.close(fd)
+
+    @staticmethod
+    def restart_renderer(frame: Frame, pane_id: str) -> bool:
+        """Signal the pane's keep-alive so it re-probes and restarts the renderer.
+
+        **Only a loop that says it can take the signal.** SIGUSR1's default action
+        is to TERMINATE, so signalling a keep-alive without the trap kills the
+        shell, closes its pane and — if that was the last pane — takes the session
+        with it. Reproduced on tmux 3.8. That is not a corner case on upgrade, it is
+        the NORMAL case: installing a new hive-ide does not replace a command
+        already running in a pane, so every frame already running when this ships
+        is still looping on the old untrapped command. Those panes must keep their
+        one-second poll and be left alone; they get the new loop when they are next
+        built. The marker in the pane's own start command is the evidence, read from
+        tmux rather than assumed from the installed version — the installed version
+        says what WOULD be built now, not what this pane was built with.
+        """
+        target = frame.pane_wake_target(pane_id)
+        if target is None:
+            return False
+        pid, start_command = target
+        if Frame.SIDEBAR_WAKE_MARKER not in start_command:
+            return False      # an older, untrapped keep-alive: signalling it is fatal
+        try:
+            os.kill(pid, signal.SIGUSR1)
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+        return True
 
     @staticmethod
     def main(argv: list[str] | None = None) -> int:

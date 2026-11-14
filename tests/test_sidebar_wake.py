@@ -20,6 +20,11 @@ paint a pane it cannot address, and the fail-open promise.
 from __future__ import annotations
 
 import os
+import signal
+import uuid
+import time
+import subprocess
+import shutil
 
 import pytest
 
@@ -328,3 +333,202 @@ class _Reply:
         self.stdout = stdout
         self.returncode = returncode
         self.stderr = ""
+
+
+# -- waking the pane's own keep-alive ----------------------------------------------
+#
+# Painting shows the right frame at once; only the keep-alive can start the
+# process that keeps it right, and after a switch it is asleep on a backstop. So
+# `wake` signals it — and SIGUSR1's default action is to TERMINATE, so a
+# keep-alive without the trap dies, its pane closes, and if that was the last
+# pane the session goes too (reproduced on tmux 3.8). Installing a new hive-ide
+# does NOT replace a command already running in a pane, so every frame already
+# running when this ships is on the old untrapped loop. The gate is the marker in
+# the pane's own start command. Real tmux below: "does this signal kill this
+# process" is not a question a fake can answer.
+
+requires_tmux = pytest.mark.skipif(
+    shutil.which("tmux") is None, reason="tmux is unavailable"
+)
+
+
+def _tmux(live_frame, *args) -> str:
+    return subprocess.run(
+        ["tmux", "-L", live_frame.socket, *args], capture_output=True, text=True
+    ).stdout.strip()
+
+@pytest.fixture
+def live_frame(tmp_path):
+    # Imported here, as the `store` fixture above does, rather than at module
+    # level — same file, same convention.
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    socket = f"hive-ide-wake-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    made = Frame(StateStore(tmp_path / "state", workspace), socket=socket)
+    try:
+        yield made
+    finally:
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"], capture_output=True, text=True
+        )
+
+
+
+
+def _loop(ticks, *, wakeable: bool) -> str:
+    """A keep-alive of the shipped shape, or of the shape already running out there."""
+    body = (
+        f"while :; do echo tick >> {ticks}; "
+        'sleep 30 & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; done'
+    )
+    if not wakeable:
+        return f"while :; do echo tick >> {ticks}; sleep 30; done"
+    return f"{Frame.SIDEBAR_WAKE_MARKER}; trap ':' USR1; {body}"
+
+
+def _pane_with(live_frame, command: str) -> str:
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c", command)
+    return _tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:", "-F", "#{pane_id}")
+
+
+def _ticks(path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except FileNotFoundError:
+        return 0
+
+
+def _wait_for_tick(path, above: int, timeout: float = 1.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        now = _ticks(path)
+        if now > above:
+            return now
+        time.sleep(0.02)
+    return _ticks(path)
+
+
+@requires_tmux
+def test_an_untrapped_keepalive_is_never_signalled(live_frame, tmp_path):
+    """The P1 this gate exists for: signalling it destroys the pane and session."""
+    ticks = tmp_path / "old-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=False))
+    assert _wait_for_tick(ticks, 0) >= 1, "the old-style loop never started"
+
+    assert IdeWake.restart_renderer(live_frame, pane) is False, "signalled an untrapped loop"
+
+    # The whole point: it is still there.
+    assert live_frame.exists() is True, "the session was destroyed"
+    assert _tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:", "-F", "#{pane_id}") == pane
+
+
+@requires_tmux
+def test_signalling_an_untrapped_loop_really_would_be_fatal(live_frame, tmp_path):
+    """Pins the hazard, so the gate above can never become dead code.
+
+    If a future tmux or shell stops terminating on an untrapped SIGUSR1, this
+    fails and the gate becomes a choice rather than a necessity — which is a
+    thing to find out from a red test, not from a silently pointless guard.
+    """
+    ticks = tmp_path / "doomed-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=False))
+    assert _wait_for_tick(ticks, 0) >= 1
+    pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+    os.kill(pid, signal.SIGUSR1)  # deliberately ungated
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and live_frame.exists():
+        time.sleep(0.05)
+    assert live_frame.exists() is False, "an untrapped SIGUSR1 no longer kills the keep-alive"
+
+
+@requires_tmux
+def test_a_wakeable_keepalive_wakes_promptly(live_frame, tmp_path):
+    ticks = tmp_path / "new-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=True))
+    started = _wait_for_tick(ticks, 0)
+    assert started >= 1, "the wakeable loop never started"
+
+    began = time.monotonic()
+    assert IdeWake.restart_renderer(live_frame, pane) is True
+    after = _wait_for_tick(ticks, started)
+    elapsed = time.monotonic() - began
+
+    assert after > started, "the loop did not re-probe after being woken"
+    assert live_frame.exists() is True, "waking it killed it"
+    # Generous bound: the measured wake is 4-5ms, and the sleep it cut short is
+    # 30s, so anything in this range proves the wait was interrupted rather than
+    # the nap having elapsed.
+    assert elapsed < 5.0, f"woke too slowly to be a signal: {elapsed:.2f}s"
+
+
+@requires_tmux
+def test_rapid_duplicate_wakes_leave_one_loop(live_frame, tmp_path):
+    """Duplicate hooks and fast switching must converge on one renderer."""
+    ticks = tmp_path / "rapid-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=True))
+    assert _wait_for_tick(ticks, 0) >= 1
+    pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+    for _ in range(8):
+        IdeWake.restart_renderer(live_frame, pane)
+        time.sleep(0.01)
+    time.sleep(0.3)
+
+    assert live_frame.exists() is True, "rapid wakes killed the frame"
+    assert int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}")) == pid, \
+        "the keep-alive was replaced rather than woken"
+    assert len(_tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:",
+                     "-F", "#{pane_id}").splitlines()) == 1
+
+
+@requires_tmux
+def test_a_missing_or_dead_pane_is_not_signalled(live_frame):
+    _pane_with(live_frame, _loop("/dev/null", wakeable=True))
+
+    assert IdeWake.restart_renderer(live_frame, "%999") is False
+
+
+@requires_tmux
+def test_the_marker_is_in_what_frame_actually_builds(live_frame):
+    """The gate reads a marker; the builder has to still emit it.
+
+    Same reason socket_gc pins its keep-alive signature against the real builder:
+    a gate that matches on a string the builder stopped emitting silently stops
+    waking anything, and the symptom is a sidebar that is merely slow.
+    """
+    record = {"id": "s1", "source": {}}
+    command = live_frame._sidebar_command(record)
+
+    assert Frame.SIDEBAR_WAKE_MARKER in command
+    assert "trap ':' USR1" in command, "the loop would die on the signal it is sent"
+    assert f"hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in command
+    assert f"hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}" in command, \
+        "no fast retry: a renderer that exits on a version change leaves a visible pane stale"
+    # The backstop must stay a BACKSTOP. If this ever reads 1 again, the idle cost
+    # this whole change exists to remove is back.
+    assert Frame.SIDEBAR_NAP_SECONDS >= 10
+
+
+@requires_tmux
+@pytest.mark.parametrize("reported", ["0\tsh -c loop", "1\tsh -c loop",
+                                      "\tsh -c loop", "notapid\tsh -c loop"])
+@requires_tmux
+def test_a_nonsense_pid_is_never_signalled(live_frame, monkeypatch, reported):
+    """`os.kill(0, sig)` signals the CALLER'S WHOLE PROCESS GROUP.
+
+    So a pid tmux could not report properly is not a cosmetic parse failure: 0
+    would turn one pane's wake into a signal storm across the hook's own group,
+    and 1 is init. The guard is cheap; the failure is not survivable, and no
+    integration test can produce it because tmux will not report it.
+    """
+    monkeypatch.setattr(
+        Frame, "tmux",
+        lambda self, args, _out=reported, **kw: subprocess.CompletedProcess(args, 0, _out, ""),
+    )
+
+    assert live_frame.pane_wake_target("%0") is None
+    assert IdeWake.restart_renderer(live_frame, "%0") is False

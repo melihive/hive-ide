@@ -1615,7 +1615,16 @@ def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
     assert 'wait "$guard"' in sidebar
     assert '[ "$out" = 1 ]' in sidebar
     assert "grep -qx 1" not in sidebar
-    assert "else sleep 1" in sidebar
+    # The hidden branch still SLEEPS rather than spins — but the sleep is now a
+    # backstop the switch hook can cut short, not the activation path. `else sleep
+    # 1` was the old shape, and it cost four processes per hidden window per
+    # second. The three parts that make the new one safe: a long nap, the trap
+    # that keeps SIGUSR1 from killing the shell, and a waited-on background sleep
+    # so the trap can interrupt it.
+    assert f"else hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in sidebar
+    assert "trap ':' USR1" in sidebar
+    assert 'wait "$hive_ide_sleeper"' in sidebar
+    assert "sleep 1;" not in sidebar, "the one-second hidden poll is back"
 
 
 def test_frame_exports_legacy_hive_activity_environment(tmp_path):

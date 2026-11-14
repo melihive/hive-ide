@@ -60,6 +60,26 @@ class Frame:
         "gvim": ["-R", "-c", "set mouse="],
     }
     INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
+    #: What `wake` must see in a pane's start command before it signals that pane.
+    #: A keep-alive WITHOUT the trap below dies on SIGUSR1 — the default action —
+    #: and takes its pane with it; if that was the last pane, the session goes too
+    #: (reproduced on tmux 3.8: panes 1 -> 0, session GONE). Installing new hooks
+    #: does NOT replace a command already running in a pane, so after an upgrade
+    #: every live frame is still running the old untrapped loop. This marker is the
+    #: only thing standing between `wake` and killing it.
+    SIDEBAR_WAKE_MARKER = "HIVE_IDE_SIDEBAR_WAKEABLE=1"
+    #: The hidden-window backstop, not the activation path. The hook wakes the loop
+    #: in 4–5 ms, so this only has to cover a MISSED hook and can be long. At one
+    #: second it cost four processes per hidden window per second: 276 process
+    #: creations a second across 43 windows, measured idle, so that 42 of them could
+    #: learn they were still hidden.
+    SIDEBAR_NAP_SECONDS = 30
+    #: The retry after the renderer exits while its window is STILL current, which
+    #: is a designed path rather than a crash: `sidebar` deliberately exits when the
+    #: installed package version changes so the wrapper restarts it on fresh code.
+    #: Napping the full backstop there would leave a VISIBLE sidebar stale through
+    #: every upgrade, which is the regression the reverted 15 s backoff shipped.
+    SIDEBAR_RETRY_SECONDS = 1
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
 
     def __init__(self, store: StateStore, *, socket: str | None = None):
@@ -1024,10 +1044,43 @@ class Frame:
             interpreter=self._record_python(record),
         )
         visible = self._sidebar_visible_probe()
-        return self._interactive_command(
-            f"while :; do if {visible}; then {command}; sleep 1; "
-            "else sleep 1; fi; done"
+        # The nap is a BACKGROUND sleep that is waited on, not a plain `sleep`: a
+        # trapped signal cuts a `wait` short, and that is what makes one loop both
+        # a cheap backstop and an instant activation path. Verified standalone
+        # under bash 5.3, dash and busybox ash 1.37 — tmux runs this command as
+        # `sh -c`, never through `default-shell`, so per-distro /bin/sh is the
+        # whole portability surface (this fleet's default-shell is fish, which has
+        # no `trap` at all and never sees this).
+        nap = (
+            'sleep "$hive_ide_nap" & hive_ide_sleeper=$!; '
+            'wait "$hive_ide_sleeper" 2>/dev/null; '
+            'kill "$hive_ide_sleeper" 2>/dev/null'
         )
+        return self._interactive_command(
+            f"{self.SIDEBAR_WAKE_MARKER}; trap ':' USR1; "
+            "while :; do "
+            f"if {visible}; then {command}; "
+            f"if {visible}; then hive_ide_nap={self.SIDEBAR_RETRY_SECONDS}; "
+            f"else hive_ide_nap={self.SIDEBAR_NAP_SECONDS}; fi; "
+            f"else hive_ide_nap={self.SIDEBAR_NAP_SECONDS}; fi; "
+            f"{nap}; done"
+        )
+
+    def pane_wake_target(self, pane_id: str) -> tuple[int, str] | None:
+        """`(pid, start command)` for a pane in ONE tmux call, or None.
+
+        Both fields in one listing because the decision needs them together: the
+        pid is who to signal and the start command is whether signalling is safe.
+        """
+        result = self.tmux(
+            ["display-message", "-p", "-t", pane_id, "#{pane_pid}\t#{pane_start_command}"]
+        )
+        if result.returncode != 0:
+            return None
+        pid, _, start = result.stdout.strip().partition("\t")
+        if not pid.isdigit() or int(pid) <= 1:
+            return None
+        return int(pid), start
 
     @staticmethod
     def _sidebar_visible_probe() -> str:
