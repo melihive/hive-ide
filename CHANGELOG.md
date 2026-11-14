@@ -4,6 +4,55 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [1.0.123] - 2026-11-14
+
+### Changed
+
+- The sidebar is now ACTIVATED BY HOOK rather than by polling, so switching to a
+  window gets its sidebar in 4–5 ms instead of up to a second, and a hidden
+  window stops doing work. Every ide window ran a shell asking once a second
+  whether it was visible, and each probe spawned four processes: 276 process
+  creations a second across 43 windows, measured idle, so that 42 of them could
+  learn they were still hidden. The oldest such shell had burned over an hour of
+  CPU.
+
+  The switch hook now WAKES the pane's own keep-alive with a trapped `SIGUSR1`
+  instead of restarting anything from outside, which lets the backstop sleep be
+  30 s. Nothing is cleared and nothing is started from outside, so the blank pane
+  that reverted the earlier `respawn-pane -k` approach cannot recur, and the
+  earlier "just poll less often" attempt is not repeated either — that one left a
+  switched-to window unresponsive for the length of the backoff, because the
+  sidebar PROCESS exits when its window stops being current and the keep-alive is
+  what restarts it.
+
+  A frame that was already running when this lands keeps its old wrapper, because
+  installing a new hive-ide does not replace a command already running in a pane.
+  Those wrappers are reported stale and upgrade once through the respawn path that
+  already existed for a changed source marker — never on a window switch. They are
+  also never signalled in the meantime: `SIGUSR1` terminates by default, so
+  signalling a wrapper without the trap would close its pane and take the session
+  with it, and `wake` therefore reads a marker out of the pane's own start command
+  rather than trusting the installed version.
+
+### Fixed
+
+- Visibility has three answers instead of two. The probe kills its own tmux client
+  after 250 ms, and a failed read used to take the same long sleep as a window
+  that is genuinely hidden — stranding a VISIBLE sidebar for the whole backstop
+  with no further switch hook coming. A failed read now retries in a second.
+
+- A wake delivered while the probe was still running is no longer dropped. The
+  trap records it and the flag is checked immediately before sleeping, so a window
+  you just switched to cannot wait out a 30 s backstop for a wake that already
+  arrived.
+
+- The orphan sweeper recognises both keep-alive generations. The new wrapper's
+  preamble meant its shape check matched nothing the package builds, so an
+  orphaned wrapper would never have been cleaned up and would have polled on
+  forever. The preamble it accepts is spelled out exactly, so a shell merely
+  storing the loop text in a quoted variable is still rejected rather than
+  selected for cleanup.
+
 ## [1.0.122] - 2026-11-14
 
 ### Changed
