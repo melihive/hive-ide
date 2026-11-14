@@ -614,6 +614,40 @@ def test_open_isolates_and_reports_a_missing_session_directory(tmp_path, monkeyp
 _SHELL_COMMANDS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
 
 
+def _keepalive_diagnosis(pane_pid: str, freeze: Path | None = None) -> str:
+    """What a failure of the frozen-keep-alive assertion needs to say.
+
+    "assert True is False" names neither the process that was running nor the
+    command its parent was built with — and the difference between "the freeze
+    did not hold" and "a renderer started for another reason" is exactly which of
+    those it is. Reconstructing that by hand cost an afternoon.
+    """
+    try:
+        parent = subprocess.run(
+            ["ps", "-ww", "-p", pane_pid, "-o", "args="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        kids = subprocess.run(
+            ["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5
+        ).stdout.split()
+        argv = subprocess.run(
+            ["ps", "-ww", "-p", ",".join(kids), "-o", "pid=,comm=,args="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip() if kids else "(no children)"
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
+        return f"could not diagnose pid {pane_pid}: {exc!r}"
+    present = "not checked" if freeze is None else freeze.exists()
+    return (
+        f"a sidebar renderer was running under keep-alive {pane_pid} at the first "
+        f"fresh frame, which the freeze should have made impossible.\n"
+        f"  freeze FILE exists right now: {present}\n"
+        f"  freeze present in the keep-alive command: "
+        f"{'freeze-keepalive' in parent}\n"
+        f"  keep-alive argv: {parent[:400]}\n"
+        f"  children: {argv[:600]}"
+    )
+
+
 def _sidebar_running(pane_pid: str) -> bool | None:
     """Is a real `hive_ide.sidebar` process running under this keep-alive shell?
 
@@ -735,11 +769,27 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
     # front of it — and pass or fail for reasons that have nothing to do with it.
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parent.parent))
     freeze = tmp_path / "freeze-keepalive"
-    real_probe = Frame._sidebar_visible_probe()
+    # Patch the seam the LOOP uses. This patched `_sidebar_visible_probe`, which
+    # the loop stopped calling once the probe was split so its exit status could
+    # survive — so the freeze went inert, the keep-alive was built unfrozen, and
+    # this test failed intermittently on a renderer it assumed impossible.
+    # `test_the_builder_uses_the_visibility_seam` in test_sidebar_wake.py now
+    # fails if the builder stops using this seam.
+    #
+    # Answer HIDDEN (rc 0, out 0), not unreadable: the loop distinguishes "not
+    # current" (sleep out the backstop) from "could not read the probe" (retry in
+    # a second), so failing the probe would spin at 1s and simulate the wrong
+    # thing. SIGSTOPping the keep-alive instead was tried and does NOT work —
+    # tmux resumes a stopped pane process immediately (verified: state T outside
+    # tmux, back to S inside it), so the shell cannot be held still.
+    real_capture = Frame._sidebar_visibility_capture()
     monkeypatch.setattr(
         Frame,
-        "_sidebar_visible_probe",
-        staticmethod(lambda: f"[ ! -e {shlex.quote(str(freeze))} ] && {{ {real_probe}; }}"),
+        "_sidebar_visibility_capture",
+        staticmethod(
+            lambda: f"if [ -e {shlex.quote(str(freeze))} ]; then out=0; "
+                    f"else {real_capture}; fi"
+        ),
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -827,6 +877,8 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
         frame.tmux(["select-window", "-t", win_second])
         started = time.monotonic()
         fresh_at_ms = None
+        renderer_at_fresh: bool | None = None
+        pid_at_fresh = ""
         blank_samples: list[float] = []
         while time.monotonic() - started < PAINT_CEILING_S:
             text = shown()
@@ -838,6 +890,14 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
                 blank_samples.append(elapsed_ms)
             elif has_alpha and has_bravo and text.index("BRAVO") < text.index("ALPHA"):
                 fresh_at_ms = elapsed_ms
+                # Recorded HERE. "A renderer exists now" does not mean it produced
+                # the paint, and one that painted and exited would already be
+                # invisible — so the only moment worth asking about is the first
+                # fresh frame itself.
+                renderer_at_fresh = _sidebar_running(pid_before)
+                pid_at_fresh = frame.tmux(
+                    ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
+                ).stdout.strip()
                 break
             time.sleep(0.01)
 
@@ -851,12 +911,11 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
             "switch, with the keep-alive frozen: the wake hook did not repaint the "
             "sidebar, so the window shows the order from the last time it was displayed"
         )
-        # Still frozen: the keep-alive cannot have painted it, and did not start.
-        assert _sidebar_running(pid_before) is False
+        # Still frozen AT THE MOMENT IT PAINTED: the keep-alive cannot have
+        # painted it, and had not started.
+        assert renderer_at_fresh is False, _keepalive_diagnosis(pid_before, freeze)
         # The mechanism, pinned without a clock: the pane was painted, not rebuilt.
-        pid_after = frame.tmux(
-            ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
-        ).stdout.strip()
+        pid_after = pid_at_fresh
         assert pid_after and pid_after == pid_before, (
             f"the pane was respawned ({pid_before} -> {pid_after}); a respawn clears it, "
             "which is what made the sidebar blink empty on every switch"

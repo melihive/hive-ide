@@ -20,6 +20,11 @@ paint a pane it cannot address, and the fail-open promise.
 from __future__ import annotations
 
 import os
+import signal
+import uuid
+import time
+import subprocess
+import shutil
 
 import pytest
 
@@ -328,3 +333,496 @@ class _Reply:
         self.stdout = stdout
         self.returncode = returncode
         self.stderr = ""
+
+
+# -- waking the pane's own keep-alive ----------------------------------------------
+#
+# Painting shows the right frame at once; only the keep-alive can start the
+# process that keeps it right, and after a switch it is asleep on a backstop. So
+# `wake` signals it — and SIGUSR1's default action is to TERMINATE, so a
+# keep-alive without the trap dies, its pane closes, and if that was the last
+# pane the session goes too (reproduced on tmux 3.8). Installing a new hive-ide
+# does NOT replace a command already running in a pane, so every frame already
+# running when this ships is on the old untrapped loop. The gate is the marker in
+# the pane's own start command. Real tmux below: "does this signal kill this
+# process" is not a question a fake can answer.
+
+requires_tmux = pytest.mark.skipif(
+    shutil.which("tmux") is None, reason="tmux is unavailable"
+)
+
+
+def _tmux(live_frame, *args) -> str:
+    return subprocess.run(
+        ["tmux", "-L", live_frame.socket, *args], capture_output=True, text=True
+    ).stdout.strip()
+
+@pytest.fixture
+def live_frame(tmp_path):
+    # Imported here, as the `store` fixture above does, rather than at module
+    # level — same file, same convention.
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    socket = f"hive-ide-wake-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    made = Frame(StateStore(tmp_path / "state", workspace), socket=socket)
+    try:
+        yield made
+    finally:
+        subprocess.run(
+            ["tmux", "-L", socket, "kill-server"], capture_output=True, text=True
+        )
+
+
+
+
+def _loop(ticks, *, wakeable: bool) -> str:
+    """A keep-alive of the shipped shape, or of the shape already running out there."""
+    if not wakeable:
+        return f"while :; do echo tick >> {ticks}; sleep 30; done"
+    # Mirrors the shipped loop's wake handling: the trap RECORDS the wake, and the
+    # flag is checked before napping, so a signal that lands between iterations is
+    # not dropped. A `trap ':'` here would test a loop the package no longer builds.
+    return (
+        f"{Frame.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+        "trap 'hive_ide_woke=1' USR1; "
+        f"while :; do echo tick >> {ticks}; "
+        'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi; '
+        "sleep 30 & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; "
+        "hive_ide_woke=0; done"
+    )
+
+
+def _pane_with(live_frame, command: str) -> str:
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c", command)
+    return _tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:", "-F", "#{pane_id}")
+
+
+def _ticks(path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except FileNotFoundError:
+        return 0
+
+
+def _wait_for_tick(path, above: int, timeout: float = 1.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        now = _ticks(path)
+        if now > above:
+            return now
+        time.sleep(0.02)
+    return _ticks(path)
+
+
+@requires_tmux
+def test_an_untrapped_keepalive_is_never_signalled(live_frame, tmp_path):
+    """The P1 this gate exists for: signalling it destroys the pane and session."""
+    ticks = tmp_path / "old-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=False))
+    assert _wait_for_tick(ticks, 0) >= 1, "the old-style loop never started"
+
+    assert IdeWake.restart_renderer(live_frame, pane) is False, "signalled an untrapped loop"
+
+    # The whole point: it is still there.
+    assert live_frame.exists() is True, "the session was destroyed"
+    assert _tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:", "-F", "#{pane_id}") == pane
+
+
+@requires_tmux
+def test_signalling_an_untrapped_loop_really_would_be_fatal(live_frame, tmp_path):
+    """Pins the hazard, so the gate above can never become dead code.
+
+    If a future tmux or shell stops terminating on an untrapped SIGUSR1, this
+    fails and the gate becomes a choice rather than a necessity — which is a
+    thing to find out from a red test, not from a silently pointless guard.
+    """
+    ticks = tmp_path / "doomed-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=False))
+    assert _wait_for_tick(ticks, 0) >= 1
+    pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+    os.kill(pid, signal.SIGUSR1)  # deliberately ungated
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and live_frame.exists():
+        time.sleep(0.05)
+    assert live_frame.exists() is False, "an untrapped SIGUSR1 no longer kills the keep-alive"
+
+
+@requires_tmux
+def test_a_wakeable_keepalive_wakes_promptly(live_frame, tmp_path):
+    ticks = tmp_path / "new-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=True))
+    started = _wait_for_tick(ticks, 0)
+    assert started >= 1, "the wakeable loop never started"
+
+    began = time.monotonic()
+    assert IdeWake.restart_renderer(live_frame, pane) is True
+    after = _wait_for_tick(ticks, started)
+    elapsed = time.monotonic() - began
+
+    assert after > started, "the loop did not re-probe after being woken"
+    assert live_frame.exists() is True, "waking it killed it"
+    # Generous bound: the measured wake is 4-5ms, and the sleep it cut short is
+    # 30s, so anything in this range proves the wait was interrupted rather than
+    # the nap having elapsed.
+    assert elapsed < 5.0, f"woke too slowly to be a signal: {elapsed:.2f}s"
+
+
+@requires_tmux
+def test_rapid_duplicate_wakes_leave_one_loop(live_frame, tmp_path):
+    """Duplicate hooks and fast switching must converge on one renderer."""
+    ticks = tmp_path / "rapid-ticks"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=True))
+    assert _wait_for_tick(ticks, 0) >= 1
+    pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+    before = _ticks(ticks)
+    for _ in range(8):
+        IdeWake.restart_renderer(live_frame, pane)
+        time.sleep(0.01)
+    time.sleep(0.3)
+    after = _ticks(ticks)
+
+    assert live_frame.exists() is True, "rapid wakes killed the frame"
+    # CONVERGENCE, not just survival: this test used to assert only that the pane
+    # and pid lived, so it passed with waking disabled entirely. The loop must
+    # actually have advanced, and must not have run away either — eight wakes in
+    # 80ms must not become dozens of iterations.
+    assert after > before, "rapid wakes did not advance the loop at all"
+    assert after - before <= 16, (
+        f"eight wakes produced {after - before} iterations: the loop is spinning, "
+        "not converging"
+    )
+    assert int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}")) == pid, \
+        "the keep-alive was replaced rather than woken"
+    assert len(_tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:",
+                     "-F", "#{pane_id}").splitlines()) == 1
+
+
+@requires_tmux
+def test_a_missing_or_dead_pane_is_not_signalled(live_frame):
+    _pane_with(live_frame, _loop("/dev/null", wakeable=True))
+
+    assert IdeWake.restart_renderer(live_frame, "%999") is False
+
+
+@requires_tmux
+def test_the_marker_is_in_what_frame_actually_builds(live_frame):
+    """The gate reads a marker; the builder has to still emit it.
+
+    Same reason socket_gc pins its keep-alive signature against the real builder:
+    a gate that matches on a string the builder stopped emitting silently stops
+    waking anything, and the symptom is a sidebar that is merely slow.
+    """
+    record = {"id": "s1", "source": {}}
+    command = live_frame._sidebar_command(record)
+
+    assert Frame.SIDEBAR_WAKE_MARKER in command
+    assert "trap 'hive_ide_woke=1' USR1" in command, \
+        "the loop would die on the signal it is sent, or would drop a delivered wake"
+    assert f"hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in command
+    assert f"hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}" in command, \
+        "no fast retry: a renderer that exits on a version change leaves a visible pane stale"
+    # The backstop must stay a BACKSTOP. If this ever reads 1 again, the idle cost
+    # this whole change exists to remove is back.
+    assert Frame.SIDEBAR_NAP_SECONDS >= 10
+
+
+@requires_tmux
+@pytest.mark.parametrize("reported", ["0\tsh -c loop", "1\tsh -c loop",
+                                      "\tsh -c loop", "notapid\tsh -c loop"])
+@requires_tmux
+def test_a_nonsense_pid_is_never_signalled(live_frame, monkeypatch, reported):
+    """`os.kill(0, sig)` signals the CALLER'S WHOLE PROCESS GROUP.
+
+    So a pid tmux could not report properly is not a cosmetic parse failure: 0
+    would turn one pane's wake into a signal storm across the hook's own group,
+    and 1 is init. The guard is cheap; the failure is not survivable, and no
+    integration test can produce it because tmux will not report it.
+    """
+    monkeypatch.setattr(
+        Frame, "tmux",
+        lambda self, args, _out=reported, **kw: subprocess.CompletedProcess(args, 0, _out, ""),
+    )
+
+    assert live_frame.pane_wake_target("%0") is None
+    assert IdeWake.restart_renderer(live_frame, "%0") is False
+
+
+# -- upgrading a frame that was already running -----------------------------------
+
+
+@requires_tmux
+def test_a_pre_marker_wrapper_is_reported_stale_so_it_upgrades(live_frame, tmp_path):
+    """The upgrade path. Without this, an old frame polls once a second forever.
+
+    Installing a new hive-ide does not replace a command already running in a
+    pane, so a pane built before the marker existed keeps a wrapper `wake` must
+    refuse to signal. Reporting it stale routes it to the respawn gate that
+    already exists for a changed source marker.
+    """
+    ticks = tmp_path / "old"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=False)
+                      .replace("while :;", 'out="#{window_active}"; while :;'))
+
+    assert live_frame._sidebar_wrapper_is_stale(pane) is True
+
+
+@requires_tmux
+def test_the_new_wrapper_is_not_stale_so_it_is_not_respawned_forever(live_frame, tmp_path):
+    """The other half, and the dangerous one to get wrong.
+
+    If the wrapper this version builds read as stale, every refresh would respawn
+    the sidebar, and a respawn CLEARS the pane — turning the upgrade check into a
+    permanent blank-pane generator.
+    """
+    ticks = tmp_path / "new"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=True)
+                      .replace("while :;", 'out="#{window_active}"; while :;'))
+
+    assert live_frame._sidebar_wrapper_is_stale(pane) is False
+
+
+@requires_tmux
+def test_an_unrecognisable_start_command_is_left_alone(live_frame):
+    """Conservative by design: not a keep-alive, so not our business to respawn."""
+    pane = _pane_with(live_frame, "sleep 60")
+
+    assert live_frame._sidebar_wrapper_is_stale(pane) is False
+
+
+# -- the idle cost this change exists to remove -----------------------------------
+
+
+@requires_tmux
+def test_the_idle_cost_drops_by_at_least_ninety_percent(live_frame, tmp_path):
+    """Measured, not asserted structurally. The gate for this task was a number.
+
+    Each loop writes a tick per iteration, and an iteration is what costs four
+    processes (tmux client, guard subshell, its sleep, a kill). Counting ticks
+    over the same wall-clock window on the same machine is therefore a direct
+    count of the work being removed, and the shipped 1s loop is the baseline in
+    the same run rather than a figure quoted from a previous one.
+    """
+    old_ticks = tmp_path / "old-ticks"
+    new_ticks = tmp_path / "new-ticks"
+    window = 3.0
+
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c",
+          f"while :; do echo tick >> {old_ticks}; sleep 1; done")
+    _tmux(live_frame, "new-window", "-d", "-t", f"={live_frame.target}:", "sh", "-c",
+          f"{Frame.SIDEBAR_WAKE_MARKER}; trap ':' USR1; "
+          f"while :; do echo tick >> {new_ticks}; "
+          f"sleep {Frame.SIDEBAR_NAP_SECONDS} & s=$!; wait $s 2>/dev/null; "
+          "kill $s 2>/dev/null; done")
+
+    # BOTH loops must prove they are alive first. Zero work from a loop that never
+    # started is not a 100% improvement, and that is exactly how this test would
+    # have scored it.
+    assert _wait_for_tick(old_ticks, 0, timeout=5.0) >= 1, "baseline loop never started"
+    assert _wait_for_tick(new_ticks, 0, timeout=5.0) >= 1, "wakeable loop never started"
+    old_before, new_before = _ticks(old_ticks), _ticks(new_ticks)
+    time.sleep(window)
+    old_work = _ticks(old_ticks) - old_before
+    new_work = _ticks(new_ticks) - new_before
+
+    assert old_work >= 2, f"the baseline loop did not run ({old_work} ticks in {window}s)"
+    # Not a ratio against a hardcoded number: the baseline is measured here too,
+    # so this holds on a slow machine and in a loaded suite.
+    assert new_work <= old_work * 0.1, (
+        f"idle work only fell from {old_work} to {new_work} ticks in {window}s "
+        f"— under the 90% the task set as its gate"
+    )
+
+
+# -- the two races review found in the loop itself ---------------------------------
+
+
+@requires_tmux
+def test_a_wake_delivered_before_the_sleep_is_not_lost(live_frame, tmp_path):
+    """A signal that lands while the probe is still running must still wake it.
+
+    SIGUSR1 is consumed by the trap whenever it arrives. If the trap only
+    interrupts the `wait`, a signal delivered microseconds EARLIER — while the
+    probe was running — is swallowed, and the shell then sleeps out the whole
+    backstop: the window the user just switched to waits 30s for a wake that was
+    already delivered. The loop therefore records the wake in a flag and checks it
+    immediately before napping.
+
+    The probe here sleeps, which makes the race deterministic instead of a
+    microsecond window to hit by luck.
+    """
+    ticks = tmp_path / "race"
+    loop = (
+        f"{Frame.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+        "trap 'hive_ide_woke=1' USR1; "
+        f"while :; do echo tick >> {ticks}; "
+        "sleep 0.4; "                       # stands in for the probe
+        'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi; '
+        "sleep 30 & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; "
+        "hive_ide_woke=0; done"
+    )
+    pane = _pane_with(live_frame, loop)
+    started = _wait_for_tick(ticks, 0, timeout=5.0)
+    assert started >= 1
+    pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+    time.sleep(0.05)                        # now inside the stand-in probe
+    os.kill(pid, signal.SIGUSR1)
+
+    # Without the flag the shell naps 30s here and this times out.
+    assert _wait_for_tick(ticks, started, timeout=3.0) > started, (
+        "a wake delivered during the probe was dropped, and the loop slept out "
+        "the whole backstop"
+    )
+
+
+@requires_tmux
+def test_an_unreadable_probe_retries_soon_instead_of_napping(live_frame, tmp_path):
+    """Could-not-tell is not the same answer as hidden, and they want opposite naps.
+
+    The probe kills its own tmux client after 250ms, so a transient stall is a
+    reachable way to fail rather than a theoretical one. Treating that failure as
+    "hidden" strands a VISIBLE sidebar for the length of the backstop, with no
+    further switch hook coming to rescue it. Same mistake as collapsing a failed
+    window listing into "no window"; the inert outcome here is to look again.
+    """
+    ticks = tmp_path / "unreadable"
+    loop = (
+        f"{Frame.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+        "trap 'hive_ide_woke=1' USR1; "
+        f"while :; do echo tick >> {ticks}; "
+        "out=$(exit 7); hive_ide_rc=$?; "          # the probe could not be read
+        f'if [ "$hive_ide_rc" != 0 ]; then hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}; '
+        f'elif [ "$out" = 1 ]; then hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}; '
+        f"else hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}; fi; "
+        'sleep "$hive_ide_nap" & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; done'
+    )
+    _pane_with(live_frame, loop)
+    first = _wait_for_tick(ticks, 0, timeout=5.0)
+    assert first >= 1
+
+    # Retry is 1s, backstop is 30s: a second iteration inside 3s can only mean the
+    # failure took the retry branch.
+    assert _wait_for_tick(ticks, first, timeout=3.0) > first, (
+        "an unreadable probe napped the full backstop, so a visible sidebar would "
+        "sit dead that long"
+    )
+
+
+@requires_tmux
+def test_the_built_loop_separates_unreadable_from_hidden(live_frame):
+    """The three states, pinned in what the builder emits."""
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+
+    assert 'hive_ide_rc=$?' in command, "the probe's exit status is not captured"
+    assert f'if [ "$hive_ide_rc" != 0 ]; then hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}' \
+        in command, "an unreadable probe does not take the retry branch"
+    assert f"else hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in command, \
+        "a confirmed-hidden window does not take the backstop"
+    assert 'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi' in command, \
+        "a wake delivered before the sleep would be dropped"
+
+
+@requires_tmux
+def test_the_builder_uses_the_visibility_seam(live_frame, monkeypatch):
+    """A patched seam must actually reach the built command.
+
+    This exists because it did not. The integration test freezes the keep-alive by
+    patching the visibility probe, and when the probe was split so its exit status
+    could survive, the loop stopped calling the patched method — so the freeze went
+    inert, the keep-alive was built unfrozen, and a test that assumed no renderer
+    could start began failing intermittently. Nothing was wrong in production, and
+    nothing pointed at the cause.
+
+    A monkeypatch against a seam nothing calls still looks applied. So assert the
+    coupling directly: whatever the seam returns has to appear in what the builder
+    emits.
+    """
+    monkeypatch.setattr(
+        Frame, "_sidebar_visibility_capture", staticmethod(lambda: "SEAM_WAS_HERE")
+    )
+
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+
+    assert "SEAM_WAS_HERE" in command, (
+        "the builder no longer uses _sidebar_visibility_capture, so every test "
+        "that patches it is silently testing nothing"
+    )
+
+
+# -- the SHIPPED loop, driven through its seams -----------------------------------
+#
+# The two tests above this section run loops written by hand, so a regression in
+# the production control flow leaves them green — review's words, and correct.
+# These drive `_sidebar_command`'s actual output, substituting only the two things
+# that would otherwise need a real frame: the visibility capture and the renderer.
+
+
+def _driven_loop(live_frame, monkeypatch, tmp_path, vis: str = "0"):
+    """The real generated command, with a file-backed probe and a cheap renderer."""
+    visfile = tmp_path / "visible"
+    visfile.write_text(vis, encoding="utf-8")
+    renders = tmp_path / "renders"
+    monkeypatch.setattr(
+        Frame,
+        "_sidebar_visibility_capture",
+        staticmethod(lambda: f'out=$(cat {visfile} 2>/dev/null)'),
+    )
+    monkeypatch.setattr(
+        Frame, "_module",
+        lambda self, name, args, interpreter=None: f"sh -c 'echo render >> {renders}'",
+    )
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+    assert str(visfile) in command and str(renders) in command, "seams did not reach the loop"
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c", command)
+    return visfile, renders
+
+
+@requires_tmux
+def test_the_real_loop_renders_when_woken_and_not_before(live_frame, monkeypatch, tmp_path):
+    """Hidden means no render; a wake after it becomes visible renders promptly."""
+    visfile, renders = _driven_loop(live_frame, monkeypatch, tmp_path, vis="0")
+    pane = _tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:", "-F", "#{pane_id}")
+    time.sleep(0.6)
+    assert _ticks(renders) == 0, "the loop rendered while its window was hidden"
+
+    visfile.write_text("1", encoding="utf-8")
+    assert IdeWake.restart_renderer(live_frame, pane) is True
+
+    assert _wait_for_tick(renders, 0, timeout=5.0) >= 1, (
+        "the real loop did not render after being woken, so the wake never "
+        "reached the shipped control flow"
+    )
+
+
+@requires_tmux
+def test_the_real_loop_retries_an_unreadable_probe(live_frame, monkeypatch, tmp_path):
+    """And the three-state branch, in the shipped loop rather than a copy."""
+    visfile = tmp_path / "visible"
+    renders = tmp_path / "renders"
+    probes = tmp_path / "probes"
+    monkeypatch.setattr(
+        Frame,
+        "_sidebar_visibility_capture",
+        # Records that it ran, then fails: "could not be read", not "hidden".
+        staticmethod(lambda: f"out=$(echo probe >> {probes}; exit 7)"),
+    )
+    monkeypatch.setattr(
+        Frame, "_module",
+        lambda self, name, args, interpreter=None: f"sh -c 'echo render >> {renders}'",
+    )
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c", command)
+
+    first = _wait_for_tick(probes, 0, timeout=5.0)
+    assert first >= 1, "the loop never probed"
+    # Retry is 1s and the backstop is 30s, so a second probe inside 4s can only
+    # mean the unreadable answer took the retry branch.
+    assert _wait_for_tick(probes, first, timeout=4.0) > first, (
+        "an unreadable probe slept the full backstop in the shipped loop"
+    )
+    assert _ticks(renders) == 0, "an unreadable probe must never render"

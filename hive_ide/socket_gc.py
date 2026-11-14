@@ -331,7 +331,7 @@ class OrphanSweeper:
     #: The keep-alive's own SIGNATURE, as one ordered string rather than a few
     #: loose words. Three substrings "somewhere in argv" matched a `grep` whose
     #: pattern happened to contain all three; this is the literal shape
-    #: `Frame._sidebar_visible_probe` emits, so a false positive has to reproduce
+    #: `Frame._sidebar_visibility_capture` emits, so a false positive has to reproduce
     #: the probe verbatim. Kept in sync by
     #: `test_the_keepalive_signature_still_matches_what_frame_builds`, which
     #: compares it against the real builder — socket_gc cannot import frame,
@@ -346,7 +346,35 @@ class OrphanSweeper:
     #: every substring above, and was condemned on that alone. `Frame` builds the
     #: command as `unset <names>; while :; do if <probe>; ...`, so the command
     #: must START that way — an `echo` wrapper starts with `echo`.
-    _KEEPALIVE_SHAPE = re.compile(r"\Aunset [A-Za-z0-9_ ]+; while :; do if ")
+    #:
+    #: TWO GENERATIONS, both recognised. The wakeable wrapper puts a preamble
+    #: between the `unset` and the loop — a marker assignment, a `woke` flag and a
+    #: `trap` — and requiring `while` immediately after `unset` stopped matching it
+    #: at all. An orphaned wrapper the sweeper cannot SEE is never cleaned and polls
+    #: on forever, which is the opposite of what the wake work is for; and a pane
+    #: built before the upgrade still carries the old shape, so both must match.
+    #: The preamble is bounded on purpose: only `name=value` assignments and
+    #: `trap ...`, each `;`-terminated, never arbitrary commands, so a wrapper
+    #: carrying the loop as DATA still fails to match.
+    #: EXACT literal, not a general pattern. A `name=[^;]*;` preamble looked
+    #: bounded and was not: `[^;]*` accepts an opening quote, so a `;` INSIDE a
+    #: quoted string reads as a command separator and
+    #: `unset NO_COLOR; payload='ignored; while :; do ... done'; sleep 100000`
+    #: matched — a shell merely STORING the loop as data, selected for SIGTERM.
+    #: That is the precise failure this whole pattern exists to prevent, and the
+    #: widened version reopened it while a test named for rejecting
+    #: loop-as-data went on passing, because it only tried `echo` and a bare
+    #: command. Found by review. So the preamble is spelled out: either nothing
+    #: (the generation before the wake marker) or exactly what `Frame` emits now.
+    #: Coupled to the builder by
+    #: `test_the_real_keep_alive_still_matches_the_required_shape`, which calls
+    #: `_sidebar_command` rather than reconstructing it.
+    _KEEPALIVE_SHAPE = re.compile(
+        r"\Aunset [A-Za-z0-9_ ]+; "
+        r"(?:HIVE_IDE_SIDEBAR_WAKEABLE=1; hive_ide_woke=0; "
+        r"trap 'hive_ide_woke=1' USR1; )?"
+        r"while :; do "
+    )
 
     def __init__(
         self,

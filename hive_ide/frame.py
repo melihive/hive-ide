@@ -60,6 +60,26 @@ class Frame:
         "gvim": ["-R", "-c", "set mouse="],
     }
     INTERACTIVE_ENV_UNSET = ("NO_COLOR",)
+    #: What `wake` must see in a pane's start command before it signals that pane.
+    #: A keep-alive WITHOUT the trap below dies on SIGUSR1 — the default action —
+    #: and takes its pane with it; if that was the last pane, the session goes too
+    #: (reproduced on tmux 3.8: panes 1 -> 0, session GONE). Installing new hooks
+    #: does NOT replace a command already running in a pane, so after an upgrade
+    #: every live frame is still running the old untrapped loop. This marker is the
+    #: only thing standing between `wake` and killing it.
+    SIDEBAR_WAKE_MARKER = "HIVE_IDE_SIDEBAR_WAKEABLE=1"
+    #: The hidden-window backstop, not the activation path. The hook wakes the loop
+    #: in 4–5 ms, so this only has to cover a MISSED hook and can be long. At one
+    #: second it cost four processes per hidden window per second: 276 process
+    #: creations a second across 43 windows, measured idle, so that 42 of them could
+    #: learn they were still hidden.
+    SIDEBAR_NAP_SECONDS = 30
+    #: The retry after the renderer exits while its window is STILL current, which
+    #: is a designed path rather than a crash: `sidebar` deliberately exits when the
+    #: installed package version changes so the wrapper restarts it on fresh code.
+    #: Napping the full backstop there would leave a VISIBLE sidebar stale through
+    #: every upgrade, which is the regression the reverted 15 s backoff shipped.
+    SIDEBAR_RETRY_SECONDS = 1
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
 
     def __init__(self, store: StateStore, *, socket: str | None = None):
@@ -268,9 +288,15 @@ class Frame:
         # absence and failure collapse exactly as they did before. That
         # collapsing is itself a known weakness — a transient failure reads as
         # "no window", and a caller that builds on absence would build a
-        # duplicate — but it predates this change and is owned by the
-        # observation-model task, which has to decide what unknown means at
-        # every one of the dozen call sites rather than here.
+        # duplicate — but it predates this change and is ACCEPTED DEBT, owned
+        # by nobody on purpose. The observation-model rebuild that would have
+        # answered it at every call site at once was dropped on 2026-11-14: the
+        # warm-open programme it belonged to finished, and a repair-framework
+        # rewrite could not earn its migration and race-testing cost for the
+        # ~1.2s of spawn overhead left. If an incident ever demonstrates this,
+        # the fix is a narrow correctness change at the affected call site, not
+        # a revived performance programme. Recorded under "Accepted debt" in the
+        # hive-ide package plan.
         result = self.tmux(
             [
                 "list-windows",
@@ -331,11 +357,13 @@ class Frame:
         licenses a rebuild, unknown must defer -- so a single failed listing
         cannot tell them apart. The old path could: `windows()` reports absence,
         and the per-window pane listing reports unknown. Collapsing them is a
-        real weakness, but it is the SHIPPED one, and deciding what unknown means
-        belongs to the observation-model work that has to answer it at every one
-        of the dozen call sites at once, not to a change whose whole purpose is
-        to spend fewer subprocesses. The fallback costs its two calls only when
-        the fast path has already failed.
+        real weakness, but it is the SHIPPED one, and this method deliberately
+        does not invent a better answer for itself while a dozen other call
+        sites keep the old one. It is accepted debt rather than assigned work:
+        the rebuild that would have answered it everywhere at once was dropped
+        on 2026-11-14 as not worth its cost, so an incident -- not a hunch --
+        reopens it, narrowly, where it bites. The fallback costs its two calls
+        only when the fast path has already failed.
         """
         if not session_id:
             return {}
@@ -1015,19 +1043,72 @@ class Frame:
             ],
             interpreter=self._record_python(record),
         )
-        visible = self._sidebar_visible_probe()
+        capture = self._sidebar_visibility_capture()
+        # The nap is a BACKGROUND sleep that is waited on, not a plain `sleep`: a
+        # trapped signal cuts a `wait` short, and that is what makes one loop both
+        # a cheap backstop and an instant activation path. Verified standalone
+        # under bash 5.3, dash and busybox ash 1.37 — tmux runs this command as
+        # `sh -c`, never through `default-shell`, so per-distro /bin/sh is the
+        # whole portability surface (this fleet's default-shell is fish, which has
+        # no `trap` at all and never sees this).
+        nap = (
+            'sleep "$hive_ide_nap" & hive_ide_sleeper=$!; '
+            'wait "$hive_ide_sleeper" 2>/dev/null; '
+            'kill "$hive_ide_sleeper" 2>/dev/null'
+        )
+        # A wake that arrives between the probe and the `wait` must not be lost.
+        # The trap records it instead of only interrupting a sleep, and the flag is
+        # checked immediately before napping: otherwise a signal delivered while
+        # the probe was still running is consumed by the handler and the shell then
+        # sleeps out the whole backstop, so the window the user just switched to
+        # waits 30s for a wake that was already delivered. Reproduced by review.
+        # The remaining window is the two instructions between the flag test and
+        # `wait`; POSIX sh has no sigsuspend, so that is the floor without
+        # introducing a second process per iteration.
         return self._interactive_command(
-            f"while :; do if {visible}; then {command}; sleep 1; "
-            "else sleep 1; fi; done"
+            f"{self.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+            "trap 'hive_ide_woke=1' USR1; "
+            "while :; do "
+            f"{capture}; hive_ide_rc=$?; "
+            f'if [ "$hive_ide_rc" != 0 ]; then hive_ide_nap={self.SIDEBAR_RETRY_SECONDS}; '
+            'elif [ "$out" = 1 ]; then '
+            f"{command}; "
+            f"{capture}; hive_ide_rc=$?; "
+            'if [ "$hive_ide_rc" != 0 ] || [ "$out" = 1 ]; '
+            f"then hive_ide_nap={self.SIDEBAR_RETRY_SECONDS}; "
+            f"else hive_ide_nap={self.SIDEBAR_NAP_SECONDS}; fi; "
+            f"else hive_ide_nap={self.SIDEBAR_NAP_SECONDS}; fi; "
+            'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi; '
+            f"{nap}; hive_ide_woke=0; done"
         )
 
-    @staticmethod
-    def _sidebar_visible_probe() -> str:
-        """Bound the tmux visibility poll used by the sidebar keep-alive shell.
+    def pane_wake_target(self, pane_id: str) -> tuple[int, str] | None:
+        """`(pid, start command)` for a pane in ONE tmux call, or None.
 
-        A wedged tmux server must not leave one `display-message` client per sidebar
-        stuck forever. Keep this POSIX-sh compatible; the package runs on Linux and
-        macOS, where GNU `timeout` is not guaranteed.
+        Both fields in one listing because the decision needs them together: the
+        pid is who to signal and the start command is whether signalling is safe.
+        """
+        result = self.tmux(
+            ["display-message", "-p", "-t", pane_id, "#{pane_pid}\t#{pane_start_command}"]
+        )
+        if result.returncode != 0:
+            return None
+        pid, _, start = result.stdout.strip().partition("\t")
+        if not pid.isdigit() or int(pid) <= 1:
+            return None
+        return int(pid), start
+
+    @staticmethod
+    def _sidebar_visibility_capture() -> str:
+        """Read `window_active` into `$out`, exiting non-zero when it could not be read.
+
+        Split out from the boolean probe because the loop needs THREE answers, not
+        two: visible, confirmed hidden, and could-not-tell. The boolean collapses
+        the last two, and they want opposite naps — a confirmed-hidden window
+        should sleep out the backstop, while a failed observation must be retried
+        promptly or a VISIBLE sidebar sits dead for the length of the backstop.
+        The probe kills its own tmux client after 250ms, so a transient stall is a
+        reachable way to get there, not a theoretical one.
         """
         return (
             'out=$(tmux display-message -p -t "$TMUX_PANE" "#{window_active}" '
@@ -1035,8 +1116,20 @@ class Frame:
             '(sleep 0.25; kill "$pid" 2>/dev/null) & guard=$!; '
             'wait "$pid" 2>/dev/null; rc=$?; '
             'kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; '
-            'exit "$rc") && [ "$out" = 1 ]'
+            'exit "$rc")'
         )
+
+    # `_sidebar_visible_probe` was REMOVED, not renamed. It returned the capture
+    # plus `&& [ "$out" = 1 ]`, and once the loop needed the probe's exit status it
+    # stopped calling it — leaving a method with no production caller that tests
+    # were still monkeypatching. The integration test freezes the keep-alive by
+    # patching that seam, so the freeze silently became inert: the keep-alive was
+    # built unfrozen, started a renderer, and the test's final assertion failed
+    # intermittently with nothing wrong in production. A seam nothing calls is
+    # worse than no seam, because a patch against it still LOOKS applied.
+    # `_sidebar_visibility_capture` is now the only seam, and
+    # `test_the_builder_uses_the_visibility_seam` fails if the builder stops using
+    # it.
 
     @classmethod
     def _interactive_command(cls, command: str) -> str:
@@ -2098,6 +2191,31 @@ class Frame:
         )
 
     def _sidebar_wrapper_is_stale(self, pane_id: str) -> bool:
+        """True when this pane's sidebar wrapper has to be respawned to be current.
+
+        Two separate staleness questions, and the first one is why upgrades reach
+        running frames at all. Installing a new hive-ide does not replace a command
+        already running in a pane, so a frame that was up before the wake marker
+        existed keeps a wrapper `wake` must refuse to signal — and would poll once a
+        second forever, which is the cost this whole change removes. Reporting it
+        stale hands it to `refresh_sidebar_if_needed`, the respawn path that already
+        exists for a changed source marker and already carries the caller-pane
+        guard, so an old pane upgrades ONCE at a point the package already treats as
+        safe to respawn. No new respawn site, and nothing respawns on a window
+        switch (that is what blanked the pane and got the respawn approach
+        reverted).
+
+        Read from the pane's START COMMAND, which is portable, and deliberately
+        conservative: a start command that does not look like a keep-alive at all is
+        left alone rather than respawned on a guess. The `/proc` check below answers
+        the OTHER question — a pane running the sidebar with no wrapper around it —
+        and is unchanged, Linux-only as it always was.
+        """
+        target = self.pane_wake_target(pane_id)
+        if target is not None:
+            start = target[1]
+            if "window_active" in start and self.SIDEBAR_WAKE_MARKER not in start:
+                return True
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
         if result.returncode != 0:
             return False
