@@ -34,8 +34,8 @@ and the new socket address applies only to frames created from now on.
 
 ### Fixed
 
-- An agent driving a release can open the supervisory board. `release monitor`
-  and `sop monitor` refused with `409 caller_pane` on every run started from
+- An agent driving a long operation can open the supervisory board. The
+  progress monitors refused with `409 caller_pane` on every run started from
   inside an ide session, because the environment could not prove the caller was
   not the pane being targeted — an agent has the markers but no `$TMUX` and no
   `$TMUX_PANE`, and a marker can be inherited from anywhere. The guard was right
