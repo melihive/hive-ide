@@ -1043,7 +1043,7 @@ class Frame:
             ],
             interpreter=self._record_python(record),
         )
-        visible = self._sidebar_visible_probe()
+        capture = self._sidebar_visibility_capture()
         # The nap is a BACKGROUND sleep that is waited on, not a plain `sleep`: a
         # trapped signal cuts a `wait` short, and that is what makes one loop both
         # a cheap backstop and an instant activation path. Verified standalone
@@ -1056,14 +1056,30 @@ class Frame:
             'wait "$hive_ide_sleeper" 2>/dev/null; '
             'kill "$hive_ide_sleeper" 2>/dev/null'
         )
+        # A wake that arrives between the probe and the `wait` must not be lost.
+        # The trap records it instead of only interrupting a sleep, and the flag is
+        # checked immediately before napping: otherwise a signal delivered while
+        # the probe was still running is consumed by the handler and the shell then
+        # sleeps out the whole backstop, so the window the user just switched to
+        # waits 30s for a wake that was already delivered. Reproduced by review.
+        # The remaining window is the two instructions between the flag test and
+        # `wait`; POSIX sh has no sigsuspend, so that is the floor without
+        # introducing a second process per iteration.
         return self._interactive_command(
-            f"{self.SIDEBAR_WAKE_MARKER}; trap ':' USR1; "
+            f"{self.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+            "trap 'hive_ide_woke=1' USR1; "
             "while :; do "
-            f"if {visible}; then {command}; "
-            f"if {visible}; then hive_ide_nap={self.SIDEBAR_RETRY_SECONDS}; "
+            f"{capture}; hive_ide_rc=$?; "
+            f'if [ "$hive_ide_rc" != 0 ]; then hive_ide_nap={self.SIDEBAR_RETRY_SECONDS}; '
+            'elif [ "$out" = 1 ]; then '
+            f"{command}; "
+            f"{capture}; hive_ide_rc=$?; "
+            'if [ "$hive_ide_rc" != 0 ] || [ "$out" = 1 ]; '
+            f"then hive_ide_nap={self.SIDEBAR_RETRY_SECONDS}; "
             f"else hive_ide_nap={self.SIDEBAR_NAP_SECONDS}; fi; "
             f"else hive_ide_nap={self.SIDEBAR_NAP_SECONDS}; fi; "
-            f"{nap}; done"
+            'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi; '
+            f"{nap}; hive_ide_woke=0; done"
         )
 
     def pane_wake_target(self, pane_id: str) -> tuple[int, str] | None:
@@ -1083,12 +1099,16 @@ class Frame:
         return int(pid), start
 
     @staticmethod
-    def _sidebar_visible_probe() -> str:
-        """Bound the tmux visibility poll used by the sidebar keep-alive shell.
+    def _sidebar_visibility_capture() -> str:
+        """Read `window_active` into `$out`, exiting non-zero when it could not be read.
 
-        A wedged tmux server must not leave one `display-message` client per sidebar
-        stuck forever. Keep this POSIX-sh compatible; the package runs on Linux and
-        macOS, where GNU `timeout` is not guaranteed.
+        Split out from the boolean probe because the loop needs THREE answers, not
+        two: visible, confirmed hidden, and could-not-tell. The boolean collapses
+        the last two, and they want opposite naps — a confirmed-hidden window
+        should sleep out the backstop, while a failed observation must be retried
+        promptly or a VISIBLE sidebar sits dead for the length of the backstop.
+        The probe kills its own tmux client after 250ms, so a transient stall is a
+        reachable way to get there, not a theoretical one.
         """
         return (
             'out=$(tmux display-message -p -t "$TMUX_PANE" "#{window_active}" '
@@ -1096,8 +1116,18 @@ class Frame:
             '(sleep 0.25; kill "$pid" 2>/dev/null) & guard=$!; '
             'wait "$pid" 2>/dev/null; rc=$?; '
             'kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; '
-            'exit "$rc") && [ "$out" = 1 ]'
+            'exit "$rc")'
         )
+
+    @staticmethod
+    def _sidebar_visible_probe() -> str:
+        """Bound the tmux visibility poll used by the sidebar keep-alive shell.
+
+        A wedged tmux server must not leave one `display-message` client per sidebar
+        stuck forever. Keep this POSIX-sh compatible; the package runs on Linux and
+        macOS, where GNU `timeout` is not guaranteed.
+        """
+        return f'{Frame._sidebar_visibility_capture()} && [ "$out" = 1 ]'
 
     @classmethod
     def _interactive_command(cls, command: str) -> str:

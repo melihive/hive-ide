@@ -1647,16 +1647,50 @@ def test_a_shell_merely_CARRYING_the_loop_text_is_not_the_loop():
     assert kills.sent == []
 
 
-def test_the_real_keep_alive_still_matches_the_required_shape():
-    """And the falsifying half, against the real builder rather than a copy."""
+def test_the_real_keep_alive_still_matches_the_required_shape(tmp_path):
+    """And the falsifying half — from the REAL builder, not a reconstruction.
+
+    This test used to hand-build `unset ...; while :; do if <probe>; ...` and
+    assert the pattern matched that, which is a copy of the shape the pattern
+    already encodes: it agreed with itself while the actual `_sidebar_command`
+    output stopped matching entirely, so an orphaned wrapper of the current
+    generation would never have been cleaned up. Found by review, not by this
+    test, which is the whole lesson. Call the builder.
+    """
+    from hive_ide.frame import Frame
+    from hive_ide.store import StateStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    built = Frame(StateStore(tmp_path / "state", workspace))._sidebar_command(
+        {"id": "abc", "source": {}}
+    )
+
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(built) is not None, (
+        "the shape check no longer matches what Frame builds, so an orphaned "
+        "keep-alive of this generation would escape cleanup and poll forever"
+    )
+
+
+def test_the_previous_keep_alive_generation_is_still_recognised():
+    """A pane built before the wake marker keeps the old shape until it respawns."""
     from hive_ide.frame import Frame
 
     built = Frame._interactive_command(
-        f"while :; do if {Frame._sidebar_visible_probe()}; then x; sleep 1; "
-        "else sleep 1; fi; done")
-    assert OrphanSweeper._KEEPALIVE_SHAPE.match(built) is not None, (
-        "the shape check no longer matches what Frame builds"
+        "while :; do if probe; then x; sleep 1; else sleep 1; fi; done"
     )
+
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(built) is not None
+
+
+def test_the_shape_check_still_rejects_a_wrapper_carrying_the_loop_as_data():
+    """The preamble is optional, not a hole."""
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(
+        "echo 'unset NO_COLOR; while :; do if probe; then x; fi; done'"
+    ) is None
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(
+        "unset NO_COLOR; rm -rf /tmp/x; while :; do x; done"
+    ) is None, "an arbitrary command must not pass as a preamble"
 
 
 # -- the sixteenth review round -------------------------------------------------

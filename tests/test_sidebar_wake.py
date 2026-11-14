@@ -379,13 +379,19 @@ def live_frame(tmp_path):
 
 def _loop(ticks, *, wakeable: bool) -> str:
     """A keep-alive of the shipped shape, or of the shape already running out there."""
-    body = (
-        f"while :; do echo tick >> {ticks}; "
-        'sleep 30 & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; done'
-    )
     if not wakeable:
         return f"while :; do echo tick >> {ticks}; sleep 30; done"
-    return f"{Frame.SIDEBAR_WAKE_MARKER}; trap ':' USR1; {body}"
+    # Mirrors the shipped loop's wake handling: the trap RECORDS the wake, and the
+    # flag is checked before napping, so a signal that lands between iterations is
+    # not dropped. A `trap ':'` here would test a loop the package no longer builds.
+    return (
+        f"{Frame.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+        "trap 'hive_ide_woke=1' USR1; "
+        f"while :; do echo tick >> {ticks}; "
+        'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi; '
+        "sleep 30 & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; "
+        "hive_ide_woke=0; done"
+    )
 
 
 def _pane_with(live_frame, command: str) -> str:
@@ -473,12 +479,23 @@ def test_rapid_duplicate_wakes_leave_one_loop(live_frame, tmp_path):
     assert _wait_for_tick(ticks, 0) >= 1
     pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
 
+    before = _ticks(ticks)
     for _ in range(8):
         IdeWake.restart_renderer(live_frame, pane)
         time.sleep(0.01)
     time.sleep(0.3)
+    after = _ticks(ticks)
 
     assert live_frame.exists() is True, "rapid wakes killed the frame"
+    # CONVERGENCE, not just survival: this test used to assert only that the pane
+    # and pid lived, so it passed with waking disabled entirely. The loop must
+    # actually have advanced, and must not have run away either — eight wakes in
+    # 80ms must not become dozens of iterations.
+    assert after > before, "rapid wakes did not advance the loop at all"
+    assert after - before <= 16, (
+        f"eight wakes produced {after - before} iterations: the loop is spinning, "
+        "not converging"
+    )
     assert int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}")) == pid, \
         "the keep-alive was replaced rather than woken"
     assert len(_tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:",
@@ -504,7 +521,8 @@ def test_the_marker_is_in_what_frame_actually_builds(live_frame):
     command = live_frame._sidebar_command(record)
 
     assert Frame.SIDEBAR_WAKE_MARKER in command
-    assert "trap ':' USR1" in command, "the loop would die on the signal it is sent"
+    assert "trap 'hive_ide_woke=1' USR1" in command, \
+        "the loop would die on the signal it is sent, or would drop a delivered wake"
     assert f"hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in command
     assert f"hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}" in command, \
         "no fast retry: a renderer that exits on a version change leaves a visible pane stale"
@@ -601,7 +619,11 @@ def test_the_idle_cost_drops_by_at_least_ninety_percent(live_frame, tmp_path):
           f"sleep {Frame.SIDEBAR_NAP_SECONDS} & s=$!; wait $s 2>/dev/null; "
           "kill $s 2>/dev/null; done")
 
-    time.sleep(0.5)                      # let both reach their first sleep
+    # BOTH loops must prove they are alive first. Zero work from a loop that never
+    # started is not a 100% improvement, and that is exactly how this test would
+    # have scored it.
+    assert _wait_for_tick(old_ticks, 0, timeout=5.0) >= 1, "baseline loop never started"
+    assert _wait_for_tick(new_ticks, 0, timeout=5.0) >= 1, "wakeable loop never started"
     old_before, new_before = _ticks(old_ticks), _ticks(new_ticks)
     time.sleep(window)
     old_work = _ticks(old_ticks) - old_before
@@ -614,3 +636,92 @@ def test_the_idle_cost_drops_by_at_least_ninety_percent(live_frame, tmp_path):
         f"idle work only fell from {old_work} to {new_work} ticks in {window}s "
         f"— under the 90% the task set as its gate"
     )
+
+
+# -- the two races review found in the loop itself ---------------------------------
+
+
+@requires_tmux
+def test_a_wake_delivered_before_the_sleep_is_not_lost(live_frame, tmp_path):
+    """A signal that lands while the probe is still running must still wake it.
+
+    SIGUSR1 is consumed by the trap whenever it arrives. If the trap only
+    interrupts the `wait`, a signal delivered microseconds EARLIER — while the
+    probe was running — is swallowed, and the shell then sleeps out the whole
+    backstop: the window the user just switched to waits 30s for a wake that was
+    already delivered. The loop therefore records the wake in a flag and checks it
+    immediately before napping.
+
+    The probe here sleeps, which makes the race deterministic instead of a
+    microsecond window to hit by luck.
+    """
+    ticks = tmp_path / "race"
+    loop = (
+        f"{Frame.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+        "trap 'hive_ide_woke=1' USR1; "
+        f"while :; do echo tick >> {ticks}; "
+        "sleep 0.4; "                       # stands in for the probe
+        'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi; '
+        "sleep 30 & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; "
+        "hive_ide_woke=0; done"
+    )
+    pane = _pane_with(live_frame, loop)
+    started = _wait_for_tick(ticks, 0, timeout=5.0)
+    assert started >= 1
+    pid = int(_tmux(live_frame, "display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+    time.sleep(0.05)                        # now inside the stand-in probe
+    os.kill(pid, signal.SIGUSR1)
+
+    # Without the flag the shell naps 30s here and this times out.
+    assert _wait_for_tick(ticks, started, timeout=3.0) > started, (
+        "a wake delivered during the probe was dropped, and the loop slept out "
+        "the whole backstop"
+    )
+
+
+@requires_tmux
+def test_an_unreadable_probe_retries_soon_instead_of_napping(live_frame, tmp_path):
+    """Could-not-tell is not the same answer as hidden, and they want opposite naps.
+
+    The probe kills its own tmux client after 250ms, so a transient stall is a
+    reachable way to fail rather than a theoretical one. Treating that failure as
+    "hidden" strands a VISIBLE sidebar for the length of the backstop, with no
+    further switch hook coming to rescue it. Same mistake as collapsing a failed
+    window listing into "no window"; the inert outcome here is to look again.
+    """
+    ticks = tmp_path / "unreadable"
+    loop = (
+        f"{Frame.SIDEBAR_WAKE_MARKER}; hive_ide_woke=0; "
+        "trap 'hive_ide_woke=1' USR1; "
+        f"while :; do echo tick >> {ticks}; "
+        "out=$(exit 7); hive_ide_rc=$?; "          # the probe could not be read
+        f'if [ "$hive_ide_rc" != 0 ]; then hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}; '
+        f'elif [ "$out" = 1 ]; then hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}; '
+        f"else hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}; fi; "
+        'sleep "$hive_ide_nap" & s=$!; wait $s 2>/dev/null; kill $s 2>/dev/null; done'
+    )
+    _pane_with(live_frame, loop)
+    first = _wait_for_tick(ticks, 0, timeout=5.0)
+    assert first >= 1
+
+    # Retry is 1s, backstop is 30s: a second iteration inside 3s can only mean the
+    # failure took the retry branch.
+    assert _wait_for_tick(ticks, first, timeout=3.0) > first, (
+        "an unreadable probe napped the full backstop, so a visible sidebar would "
+        "sit dead that long"
+    )
+
+
+@requires_tmux
+def test_the_built_loop_separates_unreadable_from_hidden(live_frame):
+    """The three states, pinned in what the builder emits."""
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+
+    assert 'hive_ide_rc=$?' in command, "the probe's exit status is not captured"
+    assert f'if [ "$hive_ide_rc" != 0 ]; then hive_ide_nap={Frame.SIDEBAR_RETRY_SECONDS}' \
+        in command, "an unreadable probe does not take the retry branch"
+    assert f"else hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in command, \
+        "a confirmed-hidden window does not take the backstop"
+    assert 'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi' in command, \
+        "a wake delivered before the sleep would be dropped"

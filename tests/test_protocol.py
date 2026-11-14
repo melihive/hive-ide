@@ -1622,7 +1622,7 @@ def test_frame_internal_commands_use_selected_environment_modules(tmp_path):
     # that keeps SIGUSR1 from killing the shell, and a waited-on background sleep
     # so the trap can interrupt it.
     assert f"else hive_ide_nap={Frame.SIDEBAR_NAP_SECONDS}" in sidebar
-    assert "trap ':' USR1" in sidebar
+    assert "trap 'hive_ide_woke=1' USR1" in sidebar
     assert 'wait "$hive_ide_sleeper"' in sidebar
     assert "sleep 1;" not in sidebar, "the one-second hidden poll is back"
 

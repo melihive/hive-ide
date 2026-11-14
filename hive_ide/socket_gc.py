@@ -346,7 +346,21 @@ class OrphanSweeper:
     #: every substring above, and was condemned on that alone. `Frame` builds the
     #: command as `unset <names>; while :; do if <probe>; ...`, so the command
     #: must START that way — an `echo` wrapper starts with `echo`.
-    _KEEPALIVE_SHAPE = re.compile(r"\Aunset [A-Za-z0-9_ ]+; while :; do if ")
+    #:
+    #: TWO GENERATIONS, both recognised. The wakeable wrapper puts a preamble
+    #: between the `unset` and the loop — a marker assignment, a `woke` flag and a
+    #: `trap` — and requiring `while` immediately after `unset` stopped matching it
+    #: at all. An orphaned wrapper the sweeper cannot SEE is never cleaned and polls
+    #: on forever, which is the opposite of what the wake work is for; and a pane
+    #: built before the upgrade still carries the old shape, so both must match.
+    #: The preamble is bounded on purpose: only `name=value` assignments and
+    #: `trap ...`, each `;`-terminated, never arbitrary commands, so a wrapper
+    #: carrying the loop as DATA still fails to match.
+    _KEEPALIVE_SHAPE = re.compile(
+        r"\Aunset [A-Za-z0-9_ ]+; "
+        r"(?:[A-Za-z_][A-Za-z0-9_]*=[^;]*; |trap [^;]*; )*"
+        r"while :; do "
+    )
 
     def __init__(
         self,
