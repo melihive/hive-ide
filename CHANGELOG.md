@@ -4,6 +4,33 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- A warm `open` spawns 628 tmux processes instead of 769. `role_panes()` listed
+  EVERY window in the frame just to turn a session id into a window id, then
+  listed that window's panes — 141 calls in one `open`, so 282 subprocesses for
+  this method alone. `list-panes -s` lists the whole session's panes at once,
+  and a pane resolves its own window's `@hive_ide_session_id` through tmux's
+  option hierarchy, so one listing answers both questions.
+
+  Listing the session at once means panes arrive without window identity, so
+  the format carries `window_id` and the panes are grouped by it: only the
+  selected window's roles are returned, and the selection is the window
+  `windows()` keeps when it collapses duplicates. Two windows carrying the same
+  session tag would otherwise be merged, reporting a window as holding roles
+  that live in the other one — which hides a missing pane from repair and aims
+  a mutation at a window nobody selected.
+
+  A failed listing now asks `has-session` before it answers, because tmux exits
+  non-zero both when the window is genuinely gone and when it could not be
+  looked at, and those want opposite outcomes. Confirmed absence (no server, no
+  session) stays `{}`, so a plan lease persisted across a reboot still reaches
+  its reconstruction path instead of refusing with `pane_unobservable`. A
+  listing that fails while the session IS there answers `None`: deferring costs
+  a retry, rebuilding on a misread destroys a live window, so the unknown
+  routes to the inert outcome. The probe costs a subprocess only when something
+  is already wrong, which leaves the happy path at one call.
+
 ## [1.0.121] - 2026-11-14
 
 ### Changed

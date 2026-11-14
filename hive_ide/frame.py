@@ -293,13 +293,64 @@ class Frame:
         """Role -> pane id for the session's window.
 
         `{}` means the window is absent or carries no tagged panes. `None` means the
-        panes could not be observed (`list-panes` failed); callers must treat that as
-        unknown and never destroy anything on the strength of it.
+        panes could not be observed; callers must treat that as unknown and never
+        destroy anything on the strength of it.
+
+        ONE tmux call on the happy path, not two. This used to list every window
+        in the frame just to turn a session id into a window id, then list that
+        window's panes -- 141 times in a warm `open`, so 282 of its subprocesses
+        were this method alone. `list-panes -s` lists the whole session's panes at
+        once, and a pane resolves its own window's `@hive_ide_session_id` through
+        tmux's option hierarchy, so the single listing answers both questions.
+
+        ONE WINDOW, even when two carry the same tag. Listing the session at once
+        means panes arrive with no window identity unless the format carries it,
+        and merging them would report a window as having roles that live in some
+        OTHER window -- masking a missing pane during repair and aiming mutations
+        at the wrong window. So panes are grouped by window and only the selected
+        window's roles are returned. The selection is the last tagged window in
+        listing order, which is the one `windows()` keeps when it collapses
+        duplicates into a single mapping.
+
+        A FAILED listing asks `has-session` before it answers, because tmux exits
+        non-zero both when the window is genuinely gone and when it could not be
+        looked at, and those two want opposite outcomes. Confirmed absence (no
+        server, no session) is `{}`, exactly as the old `windows()` call reported
+        it -- a persisted lease left by a reboot still reaches its reconstruction
+        path. A listing that fails while the session IS there is `None`: deferring
+        costs a retry, rebuilding on a misread destroys a live window, so the
+        unknown routes to the inert outcome. A wedged server reads as absent, as
+        it did before. The probe costs a subprocess only when something is
+        already wrong.
         """
-        window_id = self.windows().get(session_id)
-        if not window_id:
+        if not session_id:
             return {}
-        return self._role_panes_in_window(window_id)
+        result = self.tmux(
+            [
+                "list-panes",
+                "-s",
+                "-t",
+                self.target,
+                "-F",
+                "#{@hive_ide_session_id}\t#{window_id}\t#{@hive_ide_pane}\t#{pane_id}",
+            ]
+        )
+        if result.returncode != 0:
+            return {} if not self.exists() else None
+        by_window: dict[str, dict[str, str]] = {}
+        selected: str | None = None
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 4:
+                continue
+            window_session, window_id, role, pane_id = fields
+            if window_session != session_id or not window_id:
+                continue
+            selected = window_id
+            roles = by_window.setdefault(window_id, {})
+            if role and pane_id:
+                roles[role] = pane_id
+        return by_window.get(selected, {}) if selected else {}
 
     # -- caller identity ---------------------------------------------------
     #
