@@ -4,6 +4,47 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- A warm `open` spawns 628 tmux processes instead of 769. `role_panes()` listed
+  EVERY window in the frame just to turn a session id into a window id, then
+  listed that window's panes — 141 calls in one `open`, so 282 subprocesses for
+  this method alone. `list-panes -s` lists the whole session's panes at once,
+  and a pane resolves its own window's `@hive_ide_session_id` through tmux's
+  option hierarchy, so one listing answers both questions.
+
+  Behaviour is unchanged, including on failure: a failed listing falls back to
+  the two calls this method used to make. tmux exits non-zero both when the
+  window is gone and when it could not be looked at, and those want opposite
+  outcomes — absence licenses a rebuild, unknown must defer — so one failed
+  listing cannot tell them apart while `windows()` plus the per-window pane
+  listing can. Collapsing them remains a known weakness, and it stays owned by
+  the observation-model work that has to answer it at every call site at once.
+  The fallback spends its two calls only after the fast path has failed.
+
+  The target is `={session}:`, not a bare name: `-s` lists the session of
+  whatever `-t` resolves to, but `-t` is still resolved as a WINDOW target
+  first, so a bare name matches a window of that name in whatever session tmux
+  considers current. Reproduced on tmux 3.8 — with a decoy session holding a
+  window named like the frame's session, the bare form returned the decoy's
+  panes, and a successful listing of the wrong session reads as "no roles
+  here", which would license rebuilding a healthy window.
+
+  Panes also arrive without window identity, so the format carries `window_id`
+  and they are grouped by it; only the selected window's roles are returned,
+  and the selection is the window `windows()` keeps. Two windows sharing a
+  session tag would otherwise be merged, reporting a window as holding roles
+  that live in the other one — hiding a missing pane from repair and aiming a
+  mutation at a window nobody selected.
+
+  The session tag is read from each window's ACTIVE pane, because `@name` in a
+  pane's format context resolves pane → window → session: a pane-local override
+  is visible to `list-panes` but not to `list-windows`, whose context is the
+  window and its active pane. Without that, an inactive pane in another window
+  can claim the session and the two lookups disagree about which window owns
+  it. Nothing in this package writes a pane-local session id, so this needs
+  metadata introduced from outside it.
+
 ## [1.0.121] - 2026-11-14
 
 ### Changed

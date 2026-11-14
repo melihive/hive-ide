@@ -482,14 +482,27 @@ def test_marker_is_kept_when_the_outside_run_cannot_observe_the_panes(live, monk
     live.outside()
     original = Frame.tmux
 
+    intercepted: list[list[str]] = []
+
     def failing_role_listing(args, **kwargs):
-        if args[:1] == ["list-panes"] and args[-1] == "#{@hive_ide_pane}\t#{pane_id}":
+        # EVERY role listing fails, fast path and fallback alike -- the
+        # premise is that the panes cannot be observed at all, and
+        # `role_panes()` falls back to a second listing when the first
+        # fails. Matched by WHAT IT ASKS FOR, not by one exact format string: the
+        # previous exact matcher stopped intercepting the moment `role_panes()`
+        # added a field, which left this test asserting against a real, healthy
+        # listing and passing for the wrong reason. `intercepted` below is the
+        # part that cannot rot quietly.
+        if args[:1] == ["list-panes"] and "@hive_ide_pane" in args[-1]:
+            intercepted.append(args)
             return SimpleNamespace(returncode=1, stdout="", stderr="no server running")
         return original(live.frame, args, **kwargs)
 
     monkeypatch.setattr(live.frame, "tmux", failing_role_listing)
 
     result = live.repair()
+
+    assert intercepted, "the role listing was never intercepted; this test proves nothing"
 
     assert result["ok"] is True
     assert result["rebuilt"] is False
@@ -873,13 +886,21 @@ def test_unobservable_panes_never_authorize_a_rebuild(live, monkeypatch):
     original = Frame.tmux
     roles_before = live.frame.role_panes(live.record["id"])
 
+    intercepted: list[list[str]] = []
+
     def failing_list_panes(args, **kwargs):
-        if args[:1] == ["list-panes"] and args[-1] == "#{@hive_ide_pane}\t#{pane_id}":
+        # See the matcher note in the deferred-marker test above: asking what the
+        # listing is FOR survives a format change, and `intercepted` fails loudly
+        # if it ever stops matching.
+        if args[:1] == ["list-panes"] and "@hive_ide_pane" in args[-1]:
+            intercepted.append(args)
             return SimpleNamespace(returncode=1, stdout="", stderr="no server running")
         return original(live.frame, args, **kwargs)
 
     monkeypatch.setattr(live.frame, "tmux", failing_list_panes)
+    # The session is alive, so a listing that fails is unknown, never absence.
     assert live.frame.role_panes(live.record["id"]) is None
+    assert intercepted, "the role listing was never intercepted; this test proves nothing"
 
     result = live.repair()
 

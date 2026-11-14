@@ -293,13 +293,91 @@ class Frame:
         """Role -> pane id for the session's window.
 
         `{}` means the window is absent or carries no tagged panes. `None` means the
-        panes could not be observed (`list-panes` failed); callers must treat that as
-        unknown and never destroy anything on the strength of it.
+        panes could not be observed; callers must treat that as unknown and never
+        destroy anything on the strength of it.
+
+        ONE tmux call on the happy path, not two. This used to list every window
+        in the frame just to turn a session id into a window id, then list that
+        window's panes -- 141 times in a warm `open`, so 282 of its subprocesses
+        were this method alone. `list-panes -s` lists the whole session's panes at
+        once, and a pane resolves its own window's `@hive_ide_session_id` through
+        tmux's option hierarchy, so the single listing answers both questions.
+
+        The target is `={target}:`, NOT a bare session name. `-s` makes tmux list
+        the session of whatever `-t` resolves to, but it still resolves `-t` as a
+        WINDOW target first -- so a bare name matches a window of that name in
+        whatever session tmux considers current, and lists THAT session's panes.
+        Reproduced on tmux 3.8: with a decoy session holding a window named like
+        this frame's session, the bare form returned the decoy's panes. A
+        successful listing of the wrong session reads as "no roles here", which
+        licenses a rebuild of a perfectly healthy window. `=` forces an exact
+        name match and the trailing `:` forces a session target, which is what
+        `list-windows` has always done.
+
+        ONE WINDOW, even when two carry the same tag. Listing the session at once
+        means panes arrive with no window identity unless the format carries it,
+        and merging them would report a window as having roles that live in some
+        OTHER window -- masking a missing pane during repair and aiming mutations
+        at the wrong window. So panes are grouped by window and only the selected
+        window's roles are returned. The selection is the last tagged window in
+        listing order, which is the one `windows()` keeps when it collapses
+        duplicates into a single mapping; both commands walk the session's
+        windows in the same order.
+
+        NO SEMANTIC CHANGE: a failed listing falls back to the two calls this
+        method used to make, rather than inventing an answer from one failure.
+        tmux exits non-zero both when the window is genuinely gone and when it
+        could not be looked at, and those two want opposite outcomes -- absence
+        licenses a rebuild, unknown must defer -- so a single failed listing
+        cannot tell them apart. The old path could: `windows()` reports absence,
+        and the per-window pane listing reports unknown. Collapsing them is a
+        real weakness, but it is the SHIPPED one, and deciding what unknown means
+        belongs to the observation-model work that has to answer it at every one
+        of the dozen call sites at once, not to a change whose whole purpose is
+        to spend fewer subprocesses. The fallback costs its two calls only when
+        the fast path has already failed.
         """
-        window_id = self.windows().get(session_id)
-        if not window_id:
+        if not session_id:
             return {}
-        return self._role_panes_in_window(window_id)
+        result = self.tmux(
+            [
+                "list-panes",
+                "-s",
+                "-t",
+                f"={self.target}:",
+                "-F",
+                "#{@hive_ide_session_id}\t#{window_id}\t#{pane_active}\t#{@hive_ide_pane}\t#{pane_id}",
+            ]
+        )
+        if result.returncode != 0:
+            window_id = self.windows().get(session_id)
+            if not window_id:
+                return {}
+            return self._role_panes_in_window(window_id)
+        by_window: dict[str, dict[str, str]] = {}
+        selected: str | None = None
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 5:
+                continue
+            pane_session, window_id, active, role, pane_id = fields
+            if not window_id:
+                continue
+            # The tag is read from the window's ACTIVE pane only. `@name` in a
+            # pane's format context resolves pane -> window -> session, so a
+            # pane-local override is visible here but NOT to `list-windows`,
+            # whose context is the window and its active pane. Taking any pane's
+            # tag therefore lets an inactive pane in some other window claim the
+            # session, and the two lookups then disagree about which window owns
+            # it -- aiming an agent or plan mutation at a window nobody selected.
+            # Reproduced on tmux 3.8. Nothing in this package writes a pane-local
+            # session id, so this needs metadata from outside it.
+            if active == "1" and pane_session == session_id:
+                selected = window_id
+            roles = by_window.setdefault(window_id, {})
+            if role and pane_id:
+                roles[role] = pane_id
+        return by_window.get(selected, {}) if selected else {}
 
     # -- caller identity ---------------------------------------------------
     #
