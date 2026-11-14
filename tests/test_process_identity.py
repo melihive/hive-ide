@@ -261,3 +261,100 @@ def test_a_process_table_that_fails_midway_is_unknown_not_truncated(tmp_path, mo
     assert frame.caller_ancestry() is None, (
         "a failed ps left a truncated ancestry that reads as a complete one"
     )
+
+
+@pytest.mark.parametrize(
+    "name,result",
+    [
+        ("nonzero exit", subprocess.CompletedProcess(["ps"], 1, "", "no such process")),
+        ("empty output", subprocess.CompletedProcess(["ps"], 0, "", "")),
+        ("ppid is not a number", subprocess.CompletedProcess(["ps"], 0, "nope pts/7\n", "")),
+    ],
+)
+def test_every_incomplete_ancestry_is_unknown(tmp_path, monkeypatch, name, result):
+    """Four ways the walk can end early; all of them are unknown.
+
+    `caller_outside_panes` answers "outside" partly BECAUSE no ancestor was a
+    pane's own process — which only means anything if every ancestor was read. An
+    earlier version returned partial evidence for a nonzero exit, empty output and
+    a malformed ppid, and only the raised exception was covered by a test. Review
+    reproduced `pane_is_caller()` answering False after a failed `ps`, and False
+    is the verdict that lets a helper replace the caller's own pane.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+    real_run = subprocess.run
+
+    def stub(args, **kwargs):
+        if args[:1] == ["ps"]:
+            return result
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", stub)
+
+    assert frame.caller_ancestry() is None, f"{name} produced a partial ancestry"
+
+
+def test_an_ancestry_deeper_than_the_hop_budget_is_unknown(tmp_path, monkeypatch):
+    """The fourth way: a chain longer than the budget leaves ancestors unread."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    frame = Frame(StateStore(tmp_path / "state", workspace))
+    real_run = subprocess.run
+
+    def endless(args, **kwargs):
+        if args[:1] == ["ps"]:
+            # Always one more parent, never reaching init.
+            return subprocess.CompletedProcess(args, 0, "4242 pts/7\n", "")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", endless)
+
+    assert frame.caller_ancestry() is None
+
+
+def test_the_interactive_attach_carries_the_pinned_socket_directory(tmp_path, monkeypatch):
+    """`tmux()` passes it per subprocess; `execvp` would inherit the ambient one.
+
+    A pinned frame could be built successfully and then attach to nothing — or to
+    a different server sharing the name — because the attach replaces this process
+    and never goes through `tmux()`. Reaching that path the way
+    `test_attach_clients.py` does, since it lives inside `open()`.
+    """
+    class _Result:
+        def __init__(self, out=""):
+            self.returncode = 0
+            self.stdout = out
+            self.stderr = ""
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    frame = Frame(store, socket="hive-ide-test-pin")
+    frame.socket_tmpdir = "/pinned/base"
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    seen: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        "hive_ide.frame.os.execvp",
+        lambda file, argv: seen.update(
+            tmpdir=os.environ.get("TMUX_TMPDIR", ""), argv=" ".join(argv)
+        ),
+    )
+    monkeypatch.setattr(Frame, "require_tmux", lambda self: None)
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "ensure", lambda self, record, **_kw: False)
+    monkeypatch.setattr(Frame, "bind_keys", lambda self: None)
+    monkeypatch.setattr(Frame, "windows", lambda self: {"s1": "@1"})
+    monkeypatch.setattr(
+        Frame, "tmux", lambda self, args, **kw: _Result("@1")
+    )
+    monkeypatch.setattr(store, "list", lambda collection: [{"id": "s1", "name": "ONE"}])
+
+    frame.open()
+
+    assert seen.get("argv"), "open() never attached"
+    assert seen["tmpdir"] == "/pinned/base", (
+        "the attach would have looked for the server in the wrong directory"
+    )

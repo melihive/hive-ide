@@ -664,8 +664,10 @@ class Frame:
         pids: list[int] = []
         tty: str | None = None
         pid = os.getpid()
+        reached_init = False
         for _hop in range(self.CALLER_ANCESTRY_HOPS):
             if pid <= 1:
+                reached_init = True
                 break
             pids.append(pid)
             try:
@@ -676,13 +678,24 @@ class Frame:
             except (OSError, subprocess.SubprocessError):
                 return None
             fields = out.stdout.split()
+            # EVERY incomplete walk is unknown, not a shorter answer. A nonzero
+            # exit, empty output, a ppid that is not a number, or exhausting the
+            # hop budget all leave ancestors unread — and `caller_outside_panes`
+            # says "outside" partly BECAUSE no ancestor was a pane's process,
+            # which is only meaningful if they were all seen. Review reproduced
+            # pane_is_caller() answering False after a failed `ps`, which is the
+            # verdict that lets a helper replace the caller's own pane. The
+            # earlier version returned partial evidence for three of these four
+            # paths; only the raised exception was covered.
             if out.returncode != 0 or not fields:
-                break
+                return None
             if tty is None and len(fields) > 1 and fields[1] not in ("?", "-", "??"):
                 tty = fields[1]
             if not fields[0].isdigit():
-                break
+                return None
             pid = int(fields[0])
+        if not reached_init:
+            return None
         return pids, tty
 
     @staticmethod
@@ -4214,6 +4227,14 @@ class Frame:
             # also unnecessary — the client this attach creates is the newest,
             # and `_intended_controller` picks the newest, so it takes control
             # through the ordinary `client-attached` election.
+            # The pinned socket directory has to reach THIS call as well. `tmux()`
+            # passes it per subprocess, but `execvp` inherits the ambient
+            # environment, so a pinned frame could be built successfully and then
+            # attach to nothing — or to a different server that happens to share
+            # the name. Set it in our own environment first, since `execvp`
+            # replaces the process and there is nothing to restore.
+            if self.socket_tmpdir:
+                os.environ["TMUX_TMPDIR"] = self.socket_tmpdir
             os.execvp("tmux", ["tmux", "-L", self.socket, "attach", "-t", self.target])
         return {
             "tmux_socket": self.socket,

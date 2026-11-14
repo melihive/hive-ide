@@ -58,20 +58,35 @@ def test_an_address_already_pinned_is_kept(tmp_path):
     ) == "/already/here"
 
 
-def test_a_listening_legacy_server_keeps_its_address(tmp_path):
-    """The hazard: re-deciding the address of a server that is already running."""
+def test_a_listening_legacy_server_keeps_its_address(tmp_path, monkeypatch):
+    """The hazard: re-deciding the address of a server that is already running.
+
+    The legacy socket has to EXIST for this to be the scenario it describes —
+    the chooser checks for the file before asking whether anything answers,
+    because `is_listening` cannot distinguish "no file" from "cannot tell".
+    """
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    (legacy_dir / "s").touch()
+    monkeypatch.setattr(SocketReaper, "default_directory", staticmethod(lambda: legacy_dir))
+
     assert durable_socket_tmpdir(
         state_home=tmp_path, socket="s", previous=None, listening=lambda p: True,
     ) is None
 
 
-def test_a_legacy_address_that_cannot_be_probed_keeps_it_too(tmp_path):
+def test_a_legacy_address_that_cannot_be_probed_keeps_it_too(tmp_path, monkeypatch):
     """Only a definite "nothing is there" frees an address.
 
     `is_listening` answers None for a permission error or a timeout — unknown,
     not empty. Treating that as free would relocate a server that is very
     probably running and merely unreachable for a moment.
     """
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir(exist_ok=True)
+    (legacy_dir / "s").touch()
+    monkeypatch.setattr(SocketReaper, "default_directory", staticmethod(lambda: legacy_dir))
+
     assert durable_socket_tmpdir(
         state_home=tmp_path, socket="s", previous=None, listening=lambda p: None,
     ) is None
@@ -191,3 +206,40 @@ def test_the_pinned_directory_is_private(tmp_path):
     assert (base.stat().st_mode & 0o777) == 0o700, (
         f"pinned socket directory is {oct(base.stat().st_mode & 0o777)}, not 0700"
     )
+
+
+def test_a_genuinely_new_frame_adopts_the_durable_directory_with_the_real_probe(tmp_path):
+    """With `is_listening` itself, not an injected answer.
+
+    `is_listening` reports whether a server ANSWERS, and only an explicit refusal
+    proves one is dead — so it returns None for a path with no socket file at all,
+    which is the commonest case this feature exists for. Asking it first meant a
+    brand-new frame never adopted the durable directory: the feature was inert in
+    production, and the fresh-frame test above hid it by injecting False. So the
+    chooser checks whether the path EXISTS before asking whether anything answers.
+    """
+    # Short base and short name: pytest's tmp_path plus a long socket name came
+    # to 118 bytes, over the budget, so the chooser declined for the RIGHT reason
+    # and the test failed for the wrong one.
+    short = Path(tempfile.mkdtemp(prefix="hn-", dir="/tmp"))
+    chosen = durable_socket_tmpdir(
+        state_home=short,
+        socket="hive-ide-new1",
+        previous=None,
+        listening=SocketReaper.is_listening,
+    )
+
+    assert chosen == str(short / "sockets")
+
+
+def test_the_budget_is_measured_in_bytes_not_characters(tmp_path):
+    """`sun_path` is a byte buffer.
+
+    A path of 51 characters can occupy 111 bytes once filesystem-encoded, which
+    both supported platforms refuse while a character count waves it through.
+    """
+    multibyte = Path("/" + "é" * 45)
+
+    assert durable_socket_tmpdir(
+        state_home=multibyte, socket="s", previous=None, listening=lambda p: False,
+    ) is None, "a multibyte path over the byte budget was accepted"

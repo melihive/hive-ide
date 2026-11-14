@@ -325,13 +325,25 @@ def durable_socket_tmpdir(
     if previous:
         return previous
     legacy = SocketReaper.default_directory() / socket
-    if listening(legacy) is not False:
-        # True (a server answers) or None (cannot tell) both mean: do not move it.
-        # Only a definite "nothing is there" frees the address.
-        return None
+    # A path with NO SOCKET FILE is a genuinely new frame, and that is the common
+    # case this exists for. `is_listening` cannot say so: it answers None for
+    # ENOENT, because it reports whether a server ANSWERS and only an explicit
+    # refusal proves one is dead. Asking it first therefore meant a brand-new
+    # frame got `None` and never adopted the durable directory at all — the
+    # feature was inert in production, and the test that was supposed to cover it
+    # injected `False` and hid that. Review caught it; the test did not.
+    if legacy.exists():
+        if listening(legacy) is not False:
+            # Answering (True) or unreadable (None) both mean: do not move it.
+            # Only a definite "nothing is there" frees an address in use.
+            return None
     base = Path(state_home) / "sockets"
     candidate = base / f"tmux-{os.getuid()}" / socket
-    if len(str(candidate)) > SOCKET_PATH_BUDGET:
+    # BYTES, not characters. `sun_path` is a byte buffer, so a path of 51
+    # characters can occupy 111 bytes once filesystem-encoded and be refused by
+    # both supported platforms while passing a character count. Review
+    # reproduced exactly that.
+    if len(os.fsencode(str(candidate))) > SOCKET_PATH_BUDGET:
         return None
     return str(base)
 
