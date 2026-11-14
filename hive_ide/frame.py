@@ -346,7 +346,7 @@ class Frame:
                 "-t",
                 f"={self.target}:",
                 "-F",
-                "#{@hive_ide_session_id}\t#{window_id}\t#{@hive_ide_pane}\t#{pane_id}",
+                "#{@hive_ide_session_id}\t#{window_id}\t#{pane_active}\t#{@hive_ide_pane}\t#{pane_id}",
             ]
         )
         if result.returncode != 0:
@@ -358,12 +358,22 @@ class Frame:
         selected: str | None = None
         for line in result.stdout.splitlines():
             fields = line.split("\t")
-            if len(fields) != 4:
+            if len(fields) != 5:
                 continue
-            window_session, window_id, role, pane_id = fields
-            if window_session != session_id or not window_id:
+            pane_session, window_id, active, role, pane_id = fields
+            if not window_id:
                 continue
-            selected = window_id
+            # The tag is read from the window's ACTIVE pane only. `@name` in a
+            # pane's format context resolves pane -> window -> session, so a
+            # pane-local override is visible here but NOT to `list-windows`,
+            # whose context is the window and its active pane. Taking any pane's
+            # tag therefore lets an inactive pane in some other window claim the
+            # session, and the two lookups then disagree about which window owns
+            # it -- aiming an agent or plan mutation at a window nobody selected.
+            # Reproduced on tmux 3.8. Nothing in this package writes a pane-local
+            # session id, so this needs metadata from outside it.
+            if active == "1" and pane_session == session_id:
+                selected = window_id
             roles = by_window.setdefault(window_id, {})
             if role and pane_id:
                 roles[role] = pane_id

@@ -37,6 +37,14 @@ All notable changes to `hive-ide` will be documented in this file.
   that live in the other one — hiding a missing pane from repair and aiming a
   mutation at a window nobody selected.
 
+  The session tag is read from each window's ACTIVE pane, because `@name` in a
+  pane's format context resolves pane → window → session: a pane-local override
+  is visible to `list-panes` but not to `list-windows`, whose context is the
+  window and its active pane. Without that, an inactive pane in another window
+  can claim the session and the two lookups disagree about which window owns
+  it. Nothing in this package writes a pane-local session id, so this needs
+  metadata introduced from outside it.
+
 ## [1.0.121] - 2026-11-14
 
 ### Changed

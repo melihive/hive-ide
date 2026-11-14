@@ -135,6 +135,39 @@ def test_only_the_selected_windows_roles_are_reported(frame):
     )
 
 
+def test_a_pane_local_tag_cannot_steal_the_selection(frame):
+    """The fast path and the fallback must never pick different windows.
+
+    `@name` in a PANE's format context resolves pane -> window -> session, so a
+    pane-local override is visible to `list-panes` but not to `list-windows`,
+    whose context is the window and its active pane. Without reading the tag
+    from the active pane only, an INACTIVE pane in another window claims the
+    session, and an agent or plan mutation lands in a window nobody selected.
+    Nothing in this package writes a pane-local session id; this is metadata
+    from outside it.
+    """
+    expected = _window(frame, "s1", {"agent": ""})
+    _window(frame, "other", {})
+    other_window = frame.windows()["other"]
+    stolen = _tmux(
+        frame, "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", other_window, "sh"
+    )
+    _tmux(frame, "set-option", "-p", "-t", stolen, "@hive_ide_session_id", "s1")
+    _tmux(frame, "set-option", "-p", "-t", stolen, "@hive_ide_pane", "agent")
+
+    # The premise, pinned: the raw listing really does surface the override on
+    # an inactive pane. If tmux stops doing that, this fails rather than the
+    # test passing for a new reason.
+    raw = _tmux(
+        frame, "list-panes", "-s", "-t", f"={frame.target}:", "-F",
+        "#{@hive_ide_session_id}|#{window_id}|#{pane_active}",
+    )
+    assert f"s1|{other_window}|0" in raw, f"tmux no longer resolves pane-local options: {raw}"
+
+    assert frame.role_panes("s1") == expected
+    assert frame.windows()["s1"] != other_window
+
+
 def test_a_colliding_window_name_cannot_hijack_the_listing(frame):
     """`-s` does not make `-t` a session target. It still resolves a WINDOW first.
 
