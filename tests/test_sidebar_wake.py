@@ -532,3 +532,85 @@ def test_a_nonsense_pid_is_never_signalled(live_frame, monkeypatch, reported):
 
     assert live_frame.pane_wake_target("%0") is None
     assert IdeWake.restart_renderer(live_frame, "%0") is False
+
+
+# -- upgrading a frame that was already running -----------------------------------
+
+
+@requires_tmux
+def test_a_pre_marker_wrapper_is_reported_stale_so_it_upgrades(live_frame, tmp_path):
+    """The upgrade path. Without this, an old frame polls once a second forever.
+
+    Installing a new hive-ide does not replace a command already running in a
+    pane, so a pane built before the marker existed keeps a wrapper `wake` must
+    refuse to signal. Reporting it stale routes it to the respawn gate that
+    already exists for a changed source marker.
+    """
+    ticks = tmp_path / "old"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=False)
+                      .replace("while :;", 'out="#{window_active}"; while :;'))
+
+    assert live_frame._sidebar_wrapper_is_stale(pane) is True
+
+
+@requires_tmux
+def test_the_new_wrapper_is_not_stale_so_it_is_not_respawned_forever(live_frame, tmp_path):
+    """The other half, and the dangerous one to get wrong.
+
+    If the wrapper this version builds read as stale, every refresh would respawn
+    the sidebar, and a respawn CLEARS the pane — turning the upgrade check into a
+    permanent blank-pane generator.
+    """
+    ticks = tmp_path / "new"
+    pane = _pane_with(live_frame, _loop(ticks, wakeable=True)
+                      .replace("while :;", 'out="#{window_active}"; while :;'))
+
+    assert live_frame._sidebar_wrapper_is_stale(pane) is False
+
+
+@requires_tmux
+def test_an_unrecognisable_start_command_is_left_alone(live_frame):
+    """Conservative by design: not a keep-alive, so not our business to respawn."""
+    pane = _pane_with(live_frame, "sleep 60")
+
+    assert live_frame._sidebar_wrapper_is_stale(pane) is False
+
+
+# -- the idle cost this change exists to remove -----------------------------------
+
+
+@requires_tmux
+def test_the_idle_cost_drops_by_at_least_ninety_percent(live_frame, tmp_path):
+    """Measured, not asserted structurally. The gate for this task was a number.
+
+    Each loop writes a tick per iteration, and an iteration is what costs four
+    processes (tmux client, guard subshell, its sleep, a kill). Counting ticks
+    over the same wall-clock window on the same machine is therefore a direct
+    count of the work being removed, and the shipped 1s loop is the baseline in
+    the same run rather than a figure quoted from a previous one.
+    """
+    old_ticks = tmp_path / "old-ticks"
+    new_ticks = tmp_path / "new-ticks"
+    window = 3.0
+
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c",
+          f"while :; do echo tick >> {old_ticks}; sleep 1; done")
+    _tmux(live_frame, "new-window", "-d", "-t", f"={live_frame.target}:", "sh", "-c",
+          f"{Frame.SIDEBAR_WAKE_MARKER}; trap ':' USR1; "
+          f"while :; do echo tick >> {new_ticks}; "
+          f"sleep {Frame.SIDEBAR_NAP_SECONDS} & s=$!; wait $s 2>/dev/null; "
+          "kill $s 2>/dev/null; done")
+
+    time.sleep(0.5)                      # let both reach their first sleep
+    old_before, new_before = _ticks(old_ticks), _ticks(new_ticks)
+    time.sleep(window)
+    old_work = _ticks(old_ticks) - old_before
+    new_work = _ticks(new_ticks) - new_before
+
+    assert old_work >= 2, f"the baseline loop did not run ({old_work} ticks in {window}s)"
+    # Not a ratio against a hardcoded number: the baseline is measured here too,
+    # so this holds on a slow machine and in a loaded suite.
+    assert new_work <= old_work * 0.1, (
+        f"idle work only fell from {old_work} to {new_work} ticks in {window}s "
+        f"— under the 90% the task set as its gate"
+    )

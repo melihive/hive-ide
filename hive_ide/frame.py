@@ -2159,6 +2159,31 @@ class Frame:
         )
 
     def _sidebar_wrapper_is_stale(self, pane_id: str) -> bool:
+        """True when this pane's sidebar wrapper has to be respawned to be current.
+
+        Two separate staleness questions, and the first one is why upgrades reach
+        running frames at all. Installing a new hive-ide does not replace a command
+        already running in a pane, so a frame that was up before the wake marker
+        existed keeps a wrapper `wake` must refuse to signal — and would poll once a
+        second forever, which is the cost this whole change removes. Reporting it
+        stale hands it to `refresh_sidebar_if_needed`, the respawn path that already
+        exists for a changed source marker and already carries the caller-pane
+        guard, so an old pane upgrades ONCE at a point the package already treats as
+        safe to respawn. No new respawn site, and nothing respawns on a window
+        switch (that is what blanked the pane and got the respawn approach
+        reverted).
+
+        Read from the pane's START COMMAND, which is portable, and deliberately
+        conservative: a start command that does not look like a keep-alive at all is
+        left alone rather than respawned on a guess. The `/proc` check below answers
+        the OTHER question — a pane running the sidebar with no wrapper around it —
+        and is unchanged, Linux-only as it always was.
+        """
+        target = self.pane_wake_target(pane_id)
+        if target is not None:
+            start = target[1]
+            if "window_active" in start and self.SIDEBAR_WAKE_MARKER not in start:
+                return True
         result = self.tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
         if result.returncode != 0:
             return False
