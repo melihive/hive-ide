@@ -411,15 +411,71 @@ def test_unknown_caller_location_defers_rebuild_and_skips_pane_helpers(
     assert _pane_pids(live.frame, roles) == pids_before
 
 
-def test_marker_names_this_server_without_a_pane_id_defers(live):
+def test_marker_names_this_server_without_a_pane_id_defers(live, monkeypatch):
+    """Marker, no `$TMUX`, no pane id — and the kernel cannot settle it either.
+
+    This test used to assert deferral from the ENVIRONMENT alone, which was the
+    only evidence `pane_is_caller` had. It now has a second source: a caller whose
+    controlling terminal belongs to no pane of this server, and none of whose
+    ancestors is a pane's own process, is provably outside. The property this test
+    protects is unchanged and is asserted below — an identity that cannot be
+    settled must never let a pane helper touch a pane — so the kernel reading is
+    pinned to "cannot tell" here, and the two cases where it CAN tell have their
+    own tests: the caller is provably outside (the next test) or provably inside
+    (the one after it).
+
+    `rebuild` still defers on `caller-location-unknown` regardless: that path asks
+    `caller_location`, which this change does not touch.
+    """
     roles = live.frame.role_panes(live.record["id"])
     pids_before = _pane_pids(live.frame, roles)
     live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
 
     assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
     assert live.frame.respawn_agent(live.record, roles["agent"]) is False
     assert _window_ids(live.frame) == [live.window]
     assert _pane_pids(live.frame, roles) == pids_before
+
+
+def test_a_caller_provably_outside_every_pane_may_act_on_one(live, monkeypatch):
+    """The refusal this fixes: an agent driving a release, marker but no `$TMUX`.
+
+    Seven consecutive ship and release runs recorded the supervisory-board step
+    skipped with `409 caller_pane`, because the environment could not prove the
+    caller was not the plan pane. It could not prove the opposite either — the
+    evidence simply was not in the environment. It is in the kernel.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: True)
+
+    assert live.frame.pane_is_caller(roles["agent"]) is False
+
+
+def test_a_caller_the_kernel_places_inside_a_pane_still_defers(live):
+    """The hazard the deferral exists for, asserted against real evidence.
+
+    A process that kept the marker but lost `$TMUX` and `$TMUX_PANE` while still
+    running under a pane must not act on that pane. Nothing is stubbed here: the
+    ancestry really does include this pane's own process, because the check runs
+    from a child of it.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    pane_pid = live.frame.tmux(
+        ["display-message", "-p", "-t", roles["agent"], "#{pane_pid}"]
+    ).stdout.strip()
+
+    # Stand in for "my ancestry includes the pane's shell" with the real pid.
+    assert pane_pid.isdigit()
+    original = Frame.caller_ancestry
+    try:
+        Frame.caller_ancestry = lambda self, p=int(pane_pid): ([os.getpid(), p], None)
+        assert live.frame.caller_outside_panes() is False
+        assert live.frame.pane_is_caller(roles["agent"]) is None
+    finally:
+        Frame.caller_ancestry = original
 
 
 def test_rebuild_from_outside_replaces_the_window_and_clears_the_marker(

@@ -583,9 +583,125 @@ class Frame:
             # ordinary environment variable that a process can inherit from
             # somewhere else, so marker-only evidence stays unknown.
             return False
+        if server is True and not pane:
+            # The environment could not settle this, but the kernel may. A caller
+            # with a controlling terminal belonging to no pane of this server, and
+            # no ancestor that is a pane's own process, is provably not in THIS
+            # pane either. Without it an agent driving a release could never open
+            # the supervisory board on the plan pane — seven consecutive runs
+            # recorded that step skipped — because a marker without `$TMUX` and
+            # without `$TMUX_PANE` reads as unknown and the guard rightly refuses
+            # unknown.
+            #
+            # DELIBERATELY NARROW. Only when the server evidence AGREES this is
+            # the server and the caller claims no pane at all:
+            #   - a caller that claims a pane id stays unknown, because that id
+            #     may be this very pane on a server we could not confirm;
+            #   - conflicting server evidence (`$TMUX` and the marker naming
+            #     different servers) stays unknown, because something is already
+            #     misreporting and the kernel reading cannot say which.
+            # Both cases have tests that predate this and assert deferral; the
+            # fix does not get to overrule them by being newer.
+            return False if self.caller_outside_panes() is True else None
         if server is None or not pane:
             return None
         return pane == pane_id
+
+    #: How far to walk the caller's ancestry before giving up. A process in a pane
+    #: is a child of that pane's shell, usually within two or three hops; a long
+    #: walk only adds chances to cross a reparent and read the wrong thing.
+    CALLER_ANCESTRY_HOPS = 12
+
+    def caller_ancestry(self) -> tuple[list[int], str | None] | None:
+        """The caller's ancestor pids and the nearest controlling terminal.
+
+        Read with `ps`, not `/proc`, because this package runs on macOS too.
+        `None` when the process table cannot be read at all: unknown, never an
+        empty answer.
+        """
+        pids: list[int] = []
+        tty: str | None = None
+        pid = os.getpid()
+        for _hop in range(self.CALLER_ANCESTRY_HOPS):
+            if pid <= 1:
+                break
+            pids.append(pid)
+            try:
+                out = subprocess.run(
+                    ["ps", "-o", "ppid=,tty=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
+            fields = out.stdout.split()
+            if out.returncode != 0 or not fields:
+                break
+            if tty is None and len(fields) > 1 and fields[1] not in ("?", "-", "??"):
+                tty = fields[1]
+            if not fields[0].isdigit():
+                break
+            pid = int(fields[0])
+        return pids, tty
+
+    @staticmethod
+    def _tty_names(value: str) -> set[str]:
+        """Every spelling of one terminal, so two sources can be compared.
+
+        `pane_tty` gives `/dev/pts/88` on Linux and `/dev/ttys001` on macOS, while
+        `ps -o tty=` gives `pts/88` and `s001` for the same two. Comparing the raw
+        strings would silently never match on macOS — and a comparison that can
+        never match reads exactly like "the caller is somewhere else", which is the
+        verdict that lets a destructive helper proceed.
+        """
+        name = value.strip()
+        if not name:
+            return set()
+        short = name[5:] if name.startswith("/dev/") else name
+        names = {name, short}
+        if short.startswith("tty"):
+            names.add(short[3:])
+        else:
+            names.add("tty" + short)
+        return names
+
+    def caller_outside_panes(self) -> bool | None:
+        """Is the caller provably in NO pane of this server? Tri-state.
+
+        The environment cannot settle this on its own: a marker is an ordinary
+        variable that an unrelated process can inherit, which is why marker-only
+        evidence stays unknown everywhere else in this file. The kernel's view
+        cannot be inherited, so this asks it two independent questions — is any
+        ancestor of mine the top process of a pane, and is the terminal I am
+        attached to one of this server's panes.
+
+        `True` needs a POSITIVE reading: the panes were listed, no ancestor is a
+        pane's process, and a controlling terminal was found that belongs to none
+        of them. No terminal anywhere in the ancestry is `None`, not `True` — a
+        process that double-forked out of a pane looks exactly like that, and
+        reading it as "outside" would let it replace the pane it is sitting in,
+        which is the incident the caller guard exists for.
+        """
+        listing = self.tmux(
+            ["list-panes", "-a", "-F", "#{pane_pid}\t#{pane_tty}"]
+        )
+        if listing.returncode != 0:
+            return None
+        pane_pids: set[int] = set()
+        pane_ttys: set[str] = set()
+        for line in listing.stdout.splitlines():
+            pid, _, tty = line.partition("\t")
+            if pid.strip().isdigit():
+                pane_pids.add(int(pid.strip()))
+            pane_ttys |= self._tty_names(tty)
+        ancestry = self.caller_ancestry()
+        if ancestry is None:
+            return None
+        pids, tty = ancestry
+        if any(pid in pane_pids for pid in pids):
+            return False
+        if tty is None:
+            return None
+        return not (self._tty_names(tty) & pane_ttys)
 
     def pane_ids(self, window_id: str) -> list[str] | None:
         """Every pane id in the window, or `None` when they cannot be observed."""
