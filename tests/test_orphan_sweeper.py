@@ -614,7 +614,7 @@ def test_the_keepalive_signature_still_matches_what_frame_builds():
     """
     from hive_ide.frame import Frame
 
-    probe = Frame._sidebar_visible_probe()
+    probe = Frame._sidebar_visibility_capture()
     assert OrphanSweeper._KEEPALIVE_SIGNATURE in probe, (
         "the keep-alive signature no longer appears in what frame.py builds"
     )
@@ -625,7 +625,7 @@ def test_the_test_fixture_matches_the_real_probe_too():
     against a shape production never emits."""
     from hive_ide.frame import Frame
 
-    assert Frame._sidebar_visible_probe() in SHELL_ARGV.format(socket=SOCKET), (
+    assert Frame._sidebar_visibility_capture() in SHELL_ARGV.format(socket=SOCKET), (
         "SHELL_ARGV has drifted from the probe frame.py actually emits"
     )
 
@@ -1691,6 +1691,17 @@ def test_the_shape_check_still_rejects_a_wrapper_carrying_the_loop_as_data():
     assert OrphanSweeper._KEEPALIVE_SHAPE.match(
         "unset NO_COLOR; rm -rf /tmp/x; while :; do x; done"
     ) is None, "an arbitrary command must not pass as a preamble"
+    # The case a "bounded" `[^;]*` preamble let through: a quoted assignment whose
+    # own semicolons read as command separators, so a shell merely STORING the
+    # loop matched and was selected for SIGTERM. Found by review, after a test
+    # named for rejecting loop-as-data passed anyway because it only tried `echo`.
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(
+        "unset NO_COLOR; payload='ignored; while :; do if probe; then x; fi; done'; "
+        "sleep 100000"
+    ) is None, "a quoted assignment must not open a path to the loop shape"
+    assert OrphanSweeper._KEEPALIVE_SHAPE.match(
+        'unset NO_COLOR; x="a; while :; do "; while :; do y; done'
+    ) is None, "a double-quoted assignment must not either"
 
 
 # -- the sixteenth review round -------------------------------------------------

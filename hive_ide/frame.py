@@ -1119,15 +1119,17 @@ class Frame:
             'exit "$rc")'
         )
 
-    @staticmethod
-    def _sidebar_visible_probe() -> str:
-        """Bound the tmux visibility poll used by the sidebar keep-alive shell.
-
-        A wedged tmux server must not leave one `display-message` client per sidebar
-        stuck forever. Keep this POSIX-sh compatible; the package runs on Linux and
-        macOS, where GNU `timeout` is not guaranteed.
-        """
-        return f'{Frame._sidebar_visibility_capture()} && [ "$out" = 1 ]'
+    # `_sidebar_visible_probe` was REMOVED, not renamed. It returned the capture
+    # plus `&& [ "$out" = 1 ]`, and once the loop needed the probe's exit status it
+    # stopped calling it — leaving a method with no production caller that tests
+    # were still monkeypatching. The integration test freezes the keep-alive by
+    # patching that seam, so the freeze silently became inert: the keep-alive was
+    # built unfrozen, started a renderer, and the test's final assertion failed
+    # intermittently with nothing wrong in production. A seam nothing calls is
+    # worse than no seam, because a patch against it still LOOKS applied.
+    # `_sidebar_visibility_capture` is now the only seam, and
+    # `test_the_builder_uses_the_visibility_seam` fails if the builder stops using
+    # it.
 
     @classmethod
     def _interactive_command(cls, command: str) -> str:

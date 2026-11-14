@@ -725,3 +725,104 @@ def test_the_built_loop_separates_unreadable_from_hidden(live_frame):
         "a confirmed-hidden window does not take the backstop"
     assert 'if [ "$hive_ide_woke" = 1 ]; then hive_ide_woke=0; continue; fi' in command, \
         "a wake delivered before the sleep would be dropped"
+
+
+@requires_tmux
+def test_the_builder_uses_the_visibility_seam(live_frame, monkeypatch):
+    """A patched seam must actually reach the built command.
+
+    This exists because it did not. The integration test freezes the keep-alive by
+    patching the visibility probe, and when the probe was split so its exit status
+    could survive, the loop stopped calling the patched method — so the freeze went
+    inert, the keep-alive was built unfrozen, and a test that assumed no renderer
+    could start began failing intermittently. Nothing was wrong in production, and
+    nothing pointed at the cause.
+
+    A monkeypatch against a seam nothing calls still looks applied. So assert the
+    coupling directly: whatever the seam returns has to appear in what the builder
+    emits.
+    """
+    monkeypatch.setattr(
+        Frame, "_sidebar_visibility_capture", staticmethod(lambda: "SEAM_WAS_HERE")
+    )
+
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+
+    assert "SEAM_WAS_HERE" in command, (
+        "the builder no longer uses _sidebar_visibility_capture, so every test "
+        "that patches it is silently testing nothing"
+    )
+
+
+# -- the SHIPPED loop, driven through its seams -----------------------------------
+#
+# The two tests above this section run loops written by hand, so a regression in
+# the production control flow leaves them green — review's words, and correct.
+# These drive `_sidebar_command`'s actual output, substituting only the two things
+# that would otherwise need a real frame: the visibility capture and the renderer.
+
+
+def _driven_loop(live_frame, monkeypatch, tmp_path, vis: str = "0"):
+    """The real generated command, with a file-backed probe and a cheap renderer."""
+    visfile = tmp_path / "visible"
+    visfile.write_text(vis, encoding="utf-8")
+    renders = tmp_path / "renders"
+    monkeypatch.setattr(
+        Frame,
+        "_sidebar_visibility_capture",
+        staticmethod(lambda: f'out=$(cat {visfile} 2>/dev/null)'),
+    )
+    monkeypatch.setattr(
+        Frame, "_module",
+        lambda self, name, args, interpreter=None: f"sh -c 'echo render >> {renders}'",
+    )
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+    assert str(visfile) in command and str(renders) in command, "seams did not reach the loop"
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c", command)
+    return visfile, renders
+
+
+@requires_tmux
+def test_the_real_loop_renders_when_woken_and_not_before(live_frame, monkeypatch, tmp_path):
+    """Hidden means no render; a wake after it becomes visible renders promptly."""
+    visfile, renders = _driven_loop(live_frame, monkeypatch, tmp_path, vis="0")
+    pane = _tmux(live_frame, "list-panes", "-t", f"={live_frame.target}:", "-F", "#{pane_id}")
+    time.sleep(0.6)
+    assert _ticks(renders) == 0, "the loop rendered while its window was hidden"
+
+    visfile.write_text("1", encoding="utf-8")
+    assert IdeWake.restart_renderer(live_frame, pane) is True
+
+    assert _wait_for_tick(renders, 0, timeout=5.0) >= 1, (
+        "the real loop did not render after being woken, so the wake never "
+        "reached the shipped control flow"
+    )
+
+
+@requires_tmux
+def test_the_real_loop_retries_an_unreadable_probe(live_frame, monkeypatch, tmp_path):
+    """And the three-state branch, in the shipped loop rather than a copy."""
+    visfile = tmp_path / "visible"
+    renders = tmp_path / "renders"
+    probes = tmp_path / "probes"
+    monkeypatch.setattr(
+        Frame,
+        "_sidebar_visibility_capture",
+        # Records that it ran, then fails: "could not be read", not "hidden".
+        staticmethod(lambda: f"out=$(echo probe >> {probes}; exit 7)"),
+    )
+    monkeypatch.setattr(
+        Frame, "_module",
+        lambda self, name, args, interpreter=None: f"sh -c 'echo render >> {renders}'",
+    )
+    command = live_frame._sidebar_command({"id": "s1", "source": {}})
+    _tmux(live_frame, "new-session", "-d", "-s", live_frame.target, "sh", "-c", command)
+
+    first = _wait_for_tick(probes, 0, timeout=5.0)
+    assert first >= 1, "the loop never probed"
+    # Retry is 1s and the backstop is 30s, so a second probe inside 4s can only
+    # mean the unreadable answer took the retry branch.
+    assert _wait_for_tick(probes, first, timeout=4.0) > first, (
+        "an unreadable probe slept the full backstop in the shipped loop"
+    )
+    assert _ticks(renders) == 0, "an unreadable probe must never render"
