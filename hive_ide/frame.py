@@ -268,9 +268,15 @@ class Frame:
         # absence and failure collapse exactly as they did before. That
         # collapsing is itself a known weakness — a transient failure reads as
         # "no window", and a caller that builds on absence would build a
-        # duplicate — but it predates this change and is owned by the
-        # observation-model task, which has to decide what unknown means at
-        # every one of the dozen call sites rather than here.
+        # duplicate — but it predates this change and is ACCEPTED DEBT, owned
+        # by nobody on purpose. The observation-model rebuild that would have
+        # answered it at every call site at once was dropped on 2026-11-14: the
+        # warm-open programme it belonged to finished, and a repair-framework
+        # rewrite could not earn its migration and race-testing cost for the
+        # ~1.2s of spawn overhead left. If an incident ever demonstrates this,
+        # the fix is a narrow correctness change at the affected call site, not
+        # a revived performance programme. Recorded under "Accepted debt" in the
+        # hive-ide package plan.
         result = self.tmux(
             [
                 "list-windows",
@@ -331,11 +337,13 @@ class Frame:
         licenses a rebuild, unknown must defer -- so a single failed listing
         cannot tell them apart. The old path could: `windows()` reports absence,
         and the per-window pane listing reports unknown. Collapsing them is a
-        real weakness, but it is the SHIPPED one, and deciding what unknown means
-        belongs to the observation-model work that has to answer it at every one
-        of the dozen call sites at once, not to a change whose whole purpose is
-        to spend fewer subprocesses. The fallback costs its two calls only when
-        the fast path has already failed.
+        real weakness, but it is the SHIPPED one, and this method deliberately
+        does not invent a better answer for itself while a dozen other call
+        sites keep the old one. It is accepted debt rather than assigned work:
+        the rebuild that would have answered it everywhere at once was dropped
+        on 2026-11-14 as not worth its cost, so an incident -- not a hunch --
+        reopens it, narrowly, where it bites. The fallback costs its two calls
+        only when the fast path has already failed.
         """
         if not session_id:
             return {}
