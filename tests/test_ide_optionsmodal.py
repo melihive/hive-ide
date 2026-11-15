@@ -502,3 +502,49 @@ def test_click_rows_are_physical_rows_even_when_lines_wrap(tmp_path):
                 f"interior {interior}: clicking row {screen_row} runs "
                 f"{label!r} but that row draws {occupies.get(screen_row)!r}"
             )
+
+
+def test_a_truncated_action_is_still_clickable(tmp_path):
+    """Found by a third cross-model review.
+
+    A screen too short for its own chrome gets ONE truncated line. That line is
+    a new string, so the identity-keyed map lost it — and it can be a visible,
+    selected action, which then looked clickable while clicking did nothing.
+    """
+    from hive_ide import modal_io
+
+    store, record = _session(tmp_path)
+    actions = IdeOptionsModal._actions(record)
+
+    lines, mouse_rows = IdeOptionsModal._lines(
+        record, store.workspace_key, 0, rows=6, width=38
+    )
+    shown = [modal_io.strip_ansi(line) for line in lines]
+    action_rows = [
+        i for i, text in enumerate(shown, start=1) if "\u25b8" in text
+    ]
+    assert action_rows, f"no action was drawn at all: {shown}"
+
+    for row in action_rows:
+        assert row in mouse_rows, (
+            f"row {row} draws an action ({shown[row - 1]!r}) but is not clickable"
+        )
+        label = actions[mouse_rows[row]][1]
+        # The drawn text is a prefix of the full action line, so the label may
+        # itself be cut — compare on the part that survived.
+        assert shown[row - 1].strip().lstrip("\u25b8 ").startswith(label[:4]), (
+            f"row {row} maps to {label!r} but draws {shown[row - 1]!r}"
+        )
+
+
+def test_an_ambiguous_truncation_is_left_unmapped():
+    """A prefix that two actions could own must not guess between them."""
+    body = ["  x same prefix A", "  x same prefix B"]
+    action_of_line = {id(body[0]): 0, id(body[1]): 1}
+    assert IdeOptionsModal._action_for_truncated(
+        "  x same prefix", body, action_of_line
+    ) is None
+    assert IdeOptionsModal._action_for_truncated(
+        "  x same prefix A", body, action_of_line
+    ) == 0
+    assert IdeOptionsModal._action_for_truncated("   ", body, action_of_line) is None

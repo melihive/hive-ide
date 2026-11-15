@@ -21,21 +21,55 @@ def strip_ansi(line: str) -> str:
     return _ANSI.sub("", line)
 
 
+#: Categories that take no cell at all: non-spacing and enclosing marks, and
+#: format characters. A nonzero combining CLASS does not catch them — U+FE0F,
+#: the variation selector that follows most emoji, has combining class 0 and
+#: category Mn, and U+200B/U+200D are Cf.
+_ZERO_WIDTH_CATEGORIES = frozenset({"Mn", "Me", "Cf"})
+
+
+def cell_width(char: str) -> int:
+    """Cells one character occupies: 0, 1 or 2."""
+    if unicodedata.combining(char) or unicodedata.category(char) in _ZERO_WIDTH_CATEGORIES:
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
+
+
 def printable_width(line: str) -> int:
     """CELLS `line` occupies — not characters, and ignoring colour escapes.
 
-    A character is not a cell: CJK and most emoji are double-width, combining
-    marks are zero-width. Counting characters under-reports the width, the line
-    wraps where nothing expected it to, and the modal is a row taller than it
-    asked for. These modals already carry emoji in every driver label, so this
-    is not a hypothetical.
+    A character is not a cell: CJK and most emoji are double-width, marks and
+    format characters are zero-width. Counting characters under-reports the
+    width, the line wraps where nothing expected it to, and the modal is a row
+    taller than it asked for. These modals already carry emoji in every driver
+    label, so this is not a hypothetical.
     """
-    width = 0
+    return sum(cell_width(char) for char in strip_ansi(line))
+
+
+def line_rows(line: str, width: int) -> int:
+    """Rows `line` occupies at `width`, by where the characters actually land.
+
+    Dividing total cells by the width is wrong at the wrap boundary: a
+    double-width character that cannot fit in the last cell of a row is pushed
+    whole onto the next one, and that unused cell is lost. `界界界` at width 3
+    takes three rows, not the two the division claims — and the modal then
+    draws past the bottom, which is the defect this module exists to stop.
+    """
+    if width <= 0:
+        return 1
+    rows = 1
+    used = 0
     for char in strip_ansi(line):
-        if unicodedata.combining(char):
+        cost = cell_width(char)
+        if cost == 0:
             continue
-        width += 2 if unicodedata.east_asian_width(char) in "WF" else 1
-    return width
+        if used + cost > width:
+            rows += 1
+            used = cost
+        else:
+            used += cost
+    return rows
 
 
 def wrapped_rows(lines: list[str], width: int) -> int:
@@ -49,11 +83,7 @@ def wrapped_rows(lines: list[str], width: int) -> int:
     """
     if width <= 0:
         return len(lines)
-    total = 0
-    for line in lines:
-        cells = printable_width(line)
-        total += max(1, -(-cells // width))
-    return total
+    return sum(line_rows(line, width) for line in lines)
 
 try:
     import termios
@@ -135,27 +165,33 @@ def cols_available(*, default: int = DEFAULT_COLS) -> int:
     return max(1, cols)
 
 
-def truncate_cells(line: str, cells: int) -> str:
-    """`line` cut to `cells` cells. Drops colour — it cuts the plain text.
+def truncate_to_rows(line: str, rows: int, width: int) -> str:
+    """`line` cut so it occupies at most `rows` rows at `width`.
 
-    Only for the degenerate case where a single line is wider than the entire
-    budget: keeping it whole would wrap past the bottom, and dropping it would
-    leave the modal blank. Cutting the plain text is the one option that both
-    shows something and stays inside the budget; cutting text with escapes in
-    it risks severing an escape sequence mid-flight.
+    Drops colour — it cuts the plain text. Only for the degenerate case where a
+    single line is wider than the entire budget: keeping it whole would wrap
+    past the bottom, and dropping it would leave the modal blank. Cutting plain
+    text is the one option that shows something and stays inside the budget;
+    cutting text with escapes in it risks severing an escape mid-flight. Cut by
+    PLACEMENT, so a double-width character straddling the last cell goes too.
     """
-    if cells <= 0:
+    if rows <= 0 or width <= 0:
         return ""
     out: list[str] = []
-    used = 0
+    row, used = 1, 0
     for char in strip_ansi(line):
-        cost = 0 if unicodedata.combining(char) else (
-            2 if unicodedata.east_asian_width(char) in "WF" else 1
-        )
-        if used + cost > cells:
-            break
+        cost = cell_width(char)
+        if cost == 0:
+            out.append(char)
+            continue
+        if used + cost > width:
+            if row + 1 > rows:
+                break
+            row += 1
+            used = cost
+        else:
+            used += cost
         out.append(char)
-        used += cost
     return "".join(out)
 
 
@@ -171,13 +207,13 @@ def clip_to_rows(lines: list[str], rows: int, width: int) -> list[str]:
     kept: list[str] = []
     used = 0
     for line in lines:
-        cost = max(1, -(-printable_width(line) // width)) if width > 0 else 1
+        cost = line_rows(line, width) if width > 0 else 1
         if used + cost > rows:
             break
         kept.append(line)
         used += cost
     if not kept and lines:
-        kept = [truncate_cells(lines[0], rows * max(1, width))]
+        kept = [truncate_to_rows(lines[0], rows, max(1, width))]
     return kept
 
 

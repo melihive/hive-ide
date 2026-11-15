@@ -340,12 +340,38 @@ class IdeOptionsModal:
         mouse_rows: dict[int, int] = {}
         screen_row = 1
         for line in lines:
-            cost = max(1, -(-modal_io.printable_width(line) // width))
-            if id(line) in action_of_line:
+            cost = modal_io.line_rows(line, width)
+            index = action_of_line.get(id(line))
+            if index is None:
+                # A screen too short for its own chrome gets ONE truncated line,
+                # which is a new string and so has no identity to match. It can
+                # still be a visible, selected action — leaving it unmapped made
+                # it look clickable while clicking did nothing. Match it back by
+                # prefix, and only when exactly one action can own it.
+                index = IdeOptionsModal._action_for_truncated(
+                    line, body, action_of_line
+                )
+            if index is not None:
                 for offset in range(cost):
-                    mouse_rows[screen_row + offset] = action_of_line[id(line)]
+                    mouse_rows[screen_row + offset] = index
             screen_row += cost
         return lines, mouse_rows
+
+    @staticmethod
+    def _action_for_truncated(
+        drawn: str, body: list[str], action_of_line: dict[int, int]
+    ) -> int | None:
+        """The action a TRUNCATED line came from, or None if it is ambiguous."""
+        plain = modal_io.strip_ansi(drawn)
+        if not plain.strip():
+            return None
+        matches = {
+            action_of_line[id(candidate)]
+            for candidate in body
+            if id(candidate) in action_of_line
+            and modal_io.strip_ansi(candidate).startswith(plain)
+        }
+        return matches.pop() if len(matches) == 1 else None
 
     @staticmethod
     def _draw(

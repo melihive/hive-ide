@@ -131,6 +131,13 @@ def test_width_is_counted_in_cells_not_characters():
     assert modal_io.printable_width("\u65e5\u672c\u8a9e") == 6, "CJK is double-width"
     assert modal_io.printable_width("e\u0301") == 1, "a combining mark costs nothing"
     assert modal_io.printable_width("   \u25b8 \U0001f506 claude") == 14
+    # Zero width with combining CLASS 0, which a `combining()` test misses.
+    # U+FE0F follows most emoji, so this is the common case, not the exotic one.
+    for zero, name in (
+        ("\u200b", "ZWSP"), ("\u200d", "ZWJ"), ("\ufe0f", "VS16"),
+    ):
+        assert modal_io.printable_width("x" + zero) == 1, f"{name} cost a cell"
+        assert modal_io.cell_width(zero) == 0, name
 
 
 def test_fit_budgets_physical_rows_not_logical_lines():
@@ -163,3 +170,42 @@ def test_a_second_selection_is_kept_on_screen_when_it_fits():
     tight = modal_io.fit([], body, [], selected=1, rows=3, width=80, also_selected=11)
     assert "b1" in tight
     assert modal_io.wrapped_rows(tight, 80) <= 3
+
+
+def test_rows_are_counted_by_where_characters_LAND_not_by_division():
+    """A double-width character cannot straddle the right edge.
+
+    Dividing total cells by the width assumes every cell is usable. It is not:
+    a wide character that will not fit in the last cell of a row is pushed whole
+    onto the next row and that cell is wasted. `\u754c\u754c\u754c` is six cells, but at
+    width 3 it needs three rows, not two — and a modal that believes the
+    division draws past the bottom.
+    """
+    assert modal_io.line_rows("\u754c\u754c\u754c", 3) == 3
+    assert modal_io.line_rows("\u754c\u754c\u754c", 6) == 1
+    assert modal_io.line_rows("abc", 3) == 1
+    assert modal_io.line_rows("abcd", 3) == 2
+    assert modal_io.wrapped_rows(["\u754c\u754c\u754c"], 3) == 3
+
+
+@pytest.mark.parametrize("width", [3, 4, 5, 7, 12])
+def test_fit_respects_its_budget_with_double_width_content(width):
+    """The budget must hold for content that wraps awkwardly, not just neatly."""
+    body = ["\u754c" * n for n in range(1, 7)] + ["mixed \u754c\u754c text"]
+    for rows in range(2, 14):
+        for selected in range(len(body)):
+            drawn = modal_io.fit(
+                ["H\u754c"], body, ["F"], selected=selected, rows=rows, width=width
+            )
+            physical = modal_io.wrapped_rows(drawn, width)
+            assert physical <= rows, (
+                f"width={width} rows={rows} selected={selected}: "
+                f"drew {physical} rows"
+            )
+
+
+def test_truncation_cuts_a_straddling_wide_character_too():
+    """Half a double-width character is not half a cell."""
+    cut = modal_io.truncate_to_rows("\u754c\u754c\u754c", 1, 3)
+    assert modal_io.line_rows(cut, 3) == 1
+    assert cut == "\u754c", f"expected one wide char, got {cut!r}"
