@@ -613,3 +613,140 @@ def test_the_active_field_is_on_screen_at_every_size_the_popup_can_make():
                         f"{stage} {width}x{rows}: two edits drew one frame"
                     )
     assert not missing, "\n  ".join(["the active field was lost:"] + missing)
+
+
+def _draw_type_at(rows: int, width: int, ty: int, mode_sel: int = 0) -> list[str]:
+    state = {
+        "stage": "type", "name": "ALPHA", "err": "", "ty": ty,
+        "mode_sel": mode_sel, "adopt_sel": 0, "filter": "", "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_type_stage_never_overruns_at_any_size():
+    """The defect class this whole change set exists for: drawing past the
+    bottom scrolls the title away. This holds at EVERY size, with no floor."""
+    from hive_ide import modal_io
+
+    over = []
+    for width in range(14, 84, 2):
+        for rows in range(4, 25):
+            for ty in range(4):
+                drawn = _draw_type_at(rows, width, ty)
+                used = modal_io.wrapped_rows(drawn, width)
+                if used > rows:
+                    over.append(f"{width}x{rows} driver {ty}: {used} rows")
+    assert not over, "\n  ".join(["the type stage overran:"] + over[:12])
+
+
+def test_the_selected_driver_is_distinguishable_from_height_eight():
+    """Which driver Enter will create must be readable somewhere.
+
+    Where the driver row itself is windowed out, the footer names it. That
+    holds for every width from 14 at an interior of EIGHT rows or more. Below
+    eight the title, the footer and four driver rows cannot all be represented,
+    and some selections draw alike — a known limitation stated here rather than
+    hidden, and the layout is still correct (see the no-overrun test above).
+    An interior under eight rows means a popup under ten, i.e. a client
+    terminal under ten rows tall.
+    """
+    same = []
+    for width in range(14, 84, 2):
+        for rows in range(8, 25):
+            frames = {tuple(_draw_type_at(rows, width, ty)) for ty in range(4)}
+            if len(frames) != 4:
+                same.append(f"{width}x{rows}: {len(frames)} distinct of 4")
+            if _draw_type_at(rows, width, 0, 0) == _draw_type_at(rows, width, 0, 1):
+                same.append(f"{width}x{rows}: both modes drew alike")
+    assert not same, "\n  ".join(["selections were indistinguishable:"] + same[:12])
+
+
+def _plain(rows: int, width: int, stage: str, **kw) -> list[str]:
+    from hive_ide import modal_io
+
+    if stage == "adopt":
+        drawn = _draw_adopt_filter_at(rows, width, kw.get("filter", "a"))
+    else:
+        drawn = _draw_name_at(rows, width, kw.get("name", "A"))
+    return [modal_io.strip_ansi(line) for line in drawn]
+
+
+def _draw_adopt_filter_at(rows: int, width: int, filter_text: str) -> list[str]:
+    state = {
+        "stage": "adopt", "name": "ALPHA", "err": "", "ty": 0, "mode_sel": 0,
+        "adopt_sel": 0, "filter": filter_text,
+        "adopt_items": [
+            {"title": f"conversation {i}", "updated_at": None, "preview": "y" * 30}
+            for i in range(8)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def _draw_name_at(rows: int, width: int, name: str) -> list[str]:
+    state = {
+        "stage": "name", "name": name, "err": "", "ty": 0, "mode_sel": 0,
+        "adopt_sel": 0, "filter": "", "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_what_a_tiny_modal_gives_up_and_in_which_order():
+    """Pinned by EXAMPLE, because no universal property covers these.
+
+    At the smallest interiors something must be sacrificed, and WHICH thing is
+    a judgement the code makes deliberately. A mutation harness reported all
+    three of these decisions as unobservable — true, because the sweeps assert
+    that the active field survives and nothing overruns, and every variant
+    satisfied both. So they are pinned as the concrete frames they produce.
+
+    Not claimed: that the escape hint always survives. It does not — at some
+    widths it is gone up to a height of 17 — and widening the layout further to
+    chase that was judged worse than stating it.
+    """
+    # Measuring the footer, rather than assuming two rows, is what leaves room
+    # for "Esc → cancel" here instead of a truncated hint line.
+    name_small = _plain(6, 14, "name", name="A")
+    assert any("Esc" in line for line in name_small), name_small
+    assert any("Name: A" in line for line in name_small), name_small
+
+    # At four rows the ACTIVE field wins: the adopt stage is filtering, so the
+    # filter stays and the name it is not editing goes.
+    adopt_tiny = _plain(4, 14, "adopt", filter="a")
+    assert any("Filter: a" in line for line in adopt_tiny), adopt_tiny
+    assert not any("Name: ALPHA" in line for line in adopt_tiny), adopt_tiny
+
+    # One row more and the compacted key hints buy back the name line.
+    adopt_small = _plain(5, 14, "adopt", filter="a")
+    assert any("Filter: a" in line for line in adopt_small), adopt_small
+    assert any("Name: ALPHA" in line for line in adopt_small), adopt_small

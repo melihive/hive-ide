@@ -274,6 +274,8 @@ class IdeOptionsModal:
         and wraps onto a second row.
         """
         M = IdeNewModal
+        if width is None:
+            width = modal_io.cols_available()
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
         groups = IdeOptionsModal._grouped_actions(record)
@@ -310,8 +312,14 @@ class IdeOptionsModal:
             offset += len(group_actions)
         footer: list[str] = []
         if rename_value:
+            # Trimmed to its row like the new-session fields: a valid 24-char
+            # name wraps to three rows at a 16-cell interior and fitting then
+            # drops it whole, so two different edits draw the same frame while
+            # Enter still returns the edited value.
+            room = width - len("  new name: ")
             footer.append(
-                f"  {M.DIM}new name:{M.RST} {M.NAME}{rename_value}{M.RST}{M.EL}"
+                f"  {M.DIM}new name:{M.RST} "
+                f"{M.NAME}{modal_io.field_tail(rename_value, room)}{M.RST}{M.EL}"
             )
             if driver_too is not None:
                 box = "[x]" if driver_too else "[ ]"
@@ -322,8 +330,6 @@ class IdeOptionsModal:
             f"  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
-        if width is None:
-            width = modal_io.cols_available()
         lines = modal_io.fit(
             header, body, footer, selected=selected_line, rows=rows, width=width
         )

@@ -618,3 +618,36 @@ def test_the_rename_field_survives_a_screen_too_small_for_the_chrome(tmp_path):
             f"{rows} rows: the rename field was not drawn"
         )
         assert alpha != beta, f"{rows} rows: two names drew the same frame"
+
+
+def test_the_rename_field_survives_every_width_and_value(tmp_path):
+    """Swept, because the first rename test used one width (74) and missed this.
+
+    The rename value is unbounded by display width: a valid 24-character name
+    wrapped to three rows at a 16-cell interior and was dropped whole, so two
+    different edits drew the same frame while Enter still returned the edited
+    value. It trims to its row like every other field now.
+    """
+    from hive_ide import modal_io
+
+    store, record = _session(tmp_path)
+    bad = []
+    for width in range(14, 84, 2):
+        for rows in range(4, 25):
+            for value in ("X" * 4, "X" * 24, "N" * 24 + "X", "\u65e5" * 12):
+                drawn, _ = IdeOptionsModal._lines(
+                    record, store.workspace_key, 0, rename_value=value,
+                    driver_too=False, rows=rows, width=width,
+                )
+                other, _ = IdeOptionsModal._lines(
+                    record, store.workspace_key, 0,
+                    rename_value=value[:-1] + "Y",
+                    driver_too=False, rows=rows, width=width,
+                )
+                if modal_io.wrapped_rows(drawn, width) > rows:
+                    bad.append(f"{width}x{rows} len={len(value)}: overran")
+                if not any("new name" in modal_io.strip_ansi(l) for l in drawn):
+                    bad.append(f"{width}x{rows} len={len(value)}: no field")
+                if drawn == other:
+                    bad.append(f"{width}x{rows} len={len(value)}: identical")
+    assert not bad, "\n  ".join(["the rename field was lost:"] + bad[:12])

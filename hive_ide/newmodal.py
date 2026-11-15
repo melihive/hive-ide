@@ -368,31 +368,11 @@ class IdeNewModal:
 
     @staticmethod
     def _field_tail(value: str, cells: int) -> str:
-        """`value` trimmed from the LEFT to `cells`, like a real input field.
+        """Delegates to `modal_io.field_tail` — the options modal needs it too.
 
-        An input that wraps onto a second row is one the fitting can then drop
-        whole — a 30-cell filter at a 20-cell interior took three rows and was
-        discarded, so two different queries drew the same frame. Keeping the
-        END is the only honest trim: the caret is there, and what was just
-        typed is what the reader is looking for.
+        Kept as a name here because this stage's code reads better with it.
         """
-        if cells <= 0:
-            return ""
-        if modal_io.printable_width(value) <= cells:
-            return value
-        # Measured on the RESULT, longest suffix first. Accumulating per-character
-        # costs got this wrong twice: a character's width can depend on the one
-        # after it (U+FE0F), and a suffix that STARTS with a selector orphans it
-        # onto the ellipsis and makes that two cells wide. Checking the finished
-        # string cannot be fooled by either.
-        ellipsis = "\u2026"
-        for start in range(len(value) + 1):
-            suffix = value[start:]
-            if suffix and modal_io.cell_costs(suffix)[0] == 0:
-                continue  # would orphan a zero-width mark onto the ellipsis
-            if modal_io.printable_width(ellipsis + suffix) <= cells:
-                return ellipsis + suffix
-        return ellipsis
+        return modal_io.field_tail(value, cells)
 
     @staticmethod
     def _sel_summary(line: str) -> str:
@@ -623,14 +603,50 @@ class IdeNewModal:
             header, body, footer, selected=selected_line,
             also_selected=also_selected,
         )
-        if also_selected is not None and body[also_selected] not in lines:
-            # Too short to show both selections at once. The one that was cut
-            # still decides what Enter does, so say it in the FOOTER, which is
-            # pinned and cannot be clipped — otherwise two different modes draw
-            # the same screen and the reader has to guess.
-            cut = C._sel_summary(body[also_selected])
+        # EVERY selection that was cut gets named in the footer, not just the
+        # second one. The driver can be windowed out too — at narrow widths all
+        # four drivers drew identical frames while Enter created the selected
+        # one. Whatever decides what Enter does must be readable somewhere, and
+        # the footer is the one place that cannot be clipped.
+        cut_indexes = [
+            index
+            for index in (selected_line, also_selected)
+            if index is not None and 0 <= index < len(body)
+            and body[index] not in lines
+        ]
+        if cut_indexes:
+            summaries = [
+                summary
+                for summary in (C._sel_summary(body[i]) for i in cut_indexes)
+                if summary
+            ]
+            cut = " · ".join(dict.fromkeys(summaries))
             if cut:
-                footer = [f"  {C.DIM}{cut} · {C._footer(stage)}{C.RST}{C.EL}"]
+                # Build on the footer AS IT STANDS. Re-reading `_footer(stage)`
+                # put the full key hints back over a footer the shedding had
+                # just compacted, which ate the body budget — at a 38x6
+                # interior all four drivers then drew identical frames.
+                standing = (
+                    modal_io.strip_ansi(footer[0]).strip()
+                    if footer
+                    else C._footer(stage)
+                )
+                footer = [f"  {C.DIM}{cut} · {standing}{C.RST}{C.EL}"]
+                # The summary is only useful if the footer carrying it SURVIVES.
+                # At a 14-cell interior the title alone takes two rows, and the
+                # full line needed three, so it was dropped and every driver
+                # drew the same frame again. Trim to the rows actually left —
+                # from the right, because the summary leads.
+                cols_now = modal_io.cols_available()
+                spare = modal_io.rows_available() - modal_io.wrapped_rows(
+                    header, cols_now
+                )
+                if spare >= 1 and modal_io.wrapped_rows(footer, cols_now) > spare:
+                    footer = [
+                        f"  {C.DIM}"
+                        f"{modal_io.truncate_to_rows(f'{cut} · {standing}', spare, cols_now - 2)}"
+                        f"{C.RST}{C.EL}"
+                    ]
                 lines = modal_io.fit(
                     header, body, footer, selected=selected_line,
                     also_selected=also_selected,

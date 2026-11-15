@@ -281,6 +281,34 @@ def window(
     return list(lines[start:start + rows]), start > 0, start + rows < len(lines)
 
 
+def field_tail(value: str, cells: int) -> str:
+    """`value` trimmed from the LEFT to `cells`, like a real input field.
+
+    An input that wraps onto a second row is one the fitting can then drop
+    whole — a 30-cell filter at a 20-cell interior took three rows and was
+    discarded, so two different queries drew the same frame. Keeping the
+    END is the only honest trim: the caret is there, and what was just
+    typed is what the reader is looking for.
+    """
+    if cells <= 0:
+        return ""
+    if printable_width(value) <= cells:
+        return value
+    # Measured on the RESULT, longest suffix first. Accumulating per-character
+    # costs got this wrong twice: a character's width can depend on the one
+    # after it (U+FE0F), and a suffix that STARTS with a selector orphans it
+    # onto the ellipsis and makes that two cells wide. Checking the finished
+    # string cannot be fooled by either.
+    ellipsis = "\u2026"
+    for start in range(len(value) + 1):
+        suffix = value[start:]
+        if suffix and cell_costs(suffix)[0] == 0:
+            continue  # would orphan a zero-width mark onto the ellipsis
+        if printable_width(ellipsis + suffix) <= cells:
+            return ellipsis + suffix
+    return ellipsis
+
+
 def _sacrifice(
     header: list[str], body: list[str], footer: list[str], rows: int, width: int
 ) -> list[str]:
