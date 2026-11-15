@@ -328,3 +328,46 @@ def test_the_selected_driver_is_on_screen_at_every_selection():
     assert not missing, "the selected driver was off screen:\n  " + "\n  ".join(
         missing
     )
+
+
+def test_the_chosen_mode_is_distinguishable_at_every_height():
+    """Found by a second cross-model review.
+
+    `New session` and `Adopt existing` are a separate selection from the driver,
+    and Enter does different things for each — yet at 10, 12 and 14 rows the two
+    drew IDENTICAL screens, because the window was anchored on the driver and the
+    mode row was clipped away. Where both fit, both are shown; where they cannot,
+    the pinned footer names the one that was cut.
+    """
+    same = []
+    for rows in (6, 8, 10, 12, 14, 20, 40):
+        new = _draw_type_mode(rows, mode_sel=0)
+        adopt = _draw_type_mode(rows, mode_sel=1)
+        assert len(new) <= rows and len(adopt) <= rows
+        if new == adopt:
+            same.append(rows)
+    assert not same, (
+        "two different modes drew the same screen at heights: "
+        + ", ".join(str(r) for r in same)
+    )
+
+
+def _draw_type_mode(rows: int, mode_sel: int) -> list[str]:
+    state = {
+        "stage": "type",
+        "name": "ALPHA",
+        "ty": 0,
+        "mode_sel": mode_sel,
+        "adopt_sel": 0,
+        "filter": "",
+        "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]

@@ -367,6 +367,22 @@ class IdeNewModal:
                 o.append(f"   {arrow} {label}{tail}{C.EL}\n")
 
     @staticmethod
+    def _sel_summary(line: str) -> str:
+        """What is CHOSEN on a highlighted row, for naming it in the footer.
+
+        A row of checkboxes holds every option, so its plain text does not say
+        which one is picked — printing all of them in the footer was as
+        ambiguous as hiding the row. Take the `[x]` one, or the whole row when
+        it is a plain highlighted item rather than a checkbox set.
+        """
+        text = modal_io.strip_ansi(line)
+        if "[x]" in text:
+            chosen = text.split("[x]", 1)[1]
+            chosen = chosen.split("[")[0]
+            return " ".join(chosen.split()).strip(" ▸·")
+        return " ".join(text.split()).strip(" ▸·")
+
+    @staticmethod
     def _footer(stage: str) -> str:
         if stage == "name":
             return "Enter → next · Esc → cancel"
@@ -482,12 +498,34 @@ class IdeNewModal:
         # visible because the next keypress acts on it. Stages with no selection
         # (creating, error) have no highlight, and for them the end IS the news.
         selected_line = len(body) - 1
+        also_selected = None
         if C.SEL:
-            selected_line = next(
-                (i for i, line in enumerate(body) if C.SEL in line),
-                selected_line,
-            )
-        lines = modal_io.fit(header, body, footer, selected=selected_line)
+            highlighted = [i for i, line in enumerate(body) if C.SEL in line]
+            if highlighted:
+                # A stage can have TWO independent selections — the driver list
+                # and the mode row — and Enter acts on both, so both have to be
+                # visible. With only the first kept, "New session" and "Adopt
+                # existing" drew identical screens at 10, 12 and 14 rows.
+                selected_line = highlighted[0]
+                if len(highlighted) > 1:
+                    also_selected = highlighted[-1]
+        lines = modal_io.fit(
+            header, body, footer, selected=selected_line,
+            also_selected=also_selected,
+        )
+        if also_selected is not None and body[also_selected] not in lines:
+            # Too short to show both selections at once. The one that was cut
+            # still decides what Enter does, so say it in the FOOTER, which is
+            # pinned and cannot be clipped — otherwise two different modes draw
+            # the same screen and the reader has to guess.
+            cut = C._sel_summary(body[also_selected])
+            if cut:
+                footer = [f"  {C.DIM}{cut} · {C._footer(stage)}{C.RST}{C.EL}"]
+                lines = modal_io.fit(
+                    header, body, footer, selected=selected_line,
+                    also_selected=also_selected,
+                )
+        
         sys.stdout.write(C.CLR + "\n".join(lines))
         sys.stdout.flush()
 

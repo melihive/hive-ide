@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import unicodedata
 
 #: What to assume when the terminal will not say how tall it is. Low on purpose:
 #: guessing large is what loses content off the top, and guessing small only
@@ -15,9 +16,26 @@ DEFAULT_ROWS = 24
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
 
+def strip_ansi(line: str) -> str:
+    """`line` without the escapes that colour it — its plain text."""
+    return _ANSI.sub("", line)
+
+
 def printable_width(line: str) -> int:
-    """Cells `line` occupies, ignoring the escapes that colour it."""
-    return len(_ANSI.sub("", line))
+    """CELLS `line` occupies — not characters, and ignoring colour escapes.
+
+    A character is not a cell: CJK and most emoji are double-width, combining
+    marks are zero-width. Counting characters under-reports the width, the line
+    wraps where nothing expected it to, and the modal is a row taller than it
+    asked for. These modals already carry emoji in every driver label, so this
+    is not a hypothetical.
+    """
+    width = 0
+    for char in strip_ansi(line):
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in "WF" else 1
+    return width
 
 
 def wrapped_rows(lines: list[str], width: int) -> int:
@@ -91,19 +109,108 @@ def rows_available(reserve: int = 0, *, default: int = DEFAULT_ROWS) -> int:
     return max(1, rows - reserve)
 
 
-def window(lines: list[str], selected: int, rows: int) -> tuple[list[str], bool, bool]:
+#: Assumed when the terminal will not say how wide it is. Narrow on purpose,
+#: for the same reason `DEFAULT_ROWS` is short: over-guessing loses content.
+DEFAULT_COLS = 80
+
+
+def cols_available(*, default: int = DEFAULT_COLS) -> int:
+    """Cells this modal may draw across — the terminal, then `$COLUMNS`.
+
+    Inside a tmux popup the terminal IS the popup's interior, so this is the
+    width at which the modal's own lines will wrap.
+    """
+    cols = 0
+    try:
+        cols = os.get_terminal_size(sys.stdout.fileno()).columns
+    except (OSError, ValueError):
+        cols = 0
+    if cols <= 0:
+        try:
+            cols = int(os.environ.get("COLUMNS") or 0)
+        except ValueError:
+            cols = 0
+    if cols <= 0:
+        cols = default
+    return max(1, cols)
+
+
+def truncate_cells(line: str, cells: int) -> str:
+    """`line` cut to `cells` cells. Drops colour — it cuts the plain text.
+
+    Only for the degenerate case where a single line is wider than the entire
+    budget: keeping it whole would wrap past the bottom, and dropping it would
+    leave the modal blank. Cutting the plain text is the one option that both
+    shows something and stays inside the budget; cutting text with escapes in
+    it risks severing an escape sequence mid-flight.
+    """
+    if cells <= 0:
+        return ""
+    out: list[str] = []
+    used = 0
+    for char in strip_ansi(line):
+        cost = 0 if unicodedata.combining(char) else (
+            2 if unicodedata.east_asian_width(char) in "WF" else 1
+        )
+        if used + cost > cells:
+            break
+        out.append(char)
+        used += cost
+    return "".join(out)
+
+
+def clip_to_rows(lines: list[str], rows: int, width: int) -> list[str]:
+    """As many whole `lines` as fit in `rows` PHYSICAL rows at `width`.
+
+    When not even the first line fits, it is TRUNCATED rather than kept whole:
+    keeping a line wider than the whole budget is how the content ran past the
+    bottom, which scrolls the top away — the defect this module exists for.
+    """
+    if rows <= 0:
+        return []
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        cost = max(1, -(-printable_width(line) // width)) if width > 0 else 1
+        if used + cost > rows:
+            break
+        kept.append(line)
+        used += cost
+    if not kept and lines:
+        kept = [truncate_cells(lines[0], rows * max(1, width))]
+    return kept
+
+
+def window(
+    lines: list[str], selected: int, rows: int, also: int | None = None
+) -> tuple[list[str], bool, bool]:
     """`rows` of `lines` that still contain `selected`, and which ends were cut.
 
     Returns `(visible, clipped_above, clipped_below)`. The selection is kept near
     the middle so moving through a long list scrolls rather than jumping, and the
     window is clamped to the ends so the last page is full instead of trailing off.
+
+    `also` is a SECOND row that must stay visible where it can — a stage with two
+    independent selections (a driver AND a mode) acts on both, so showing only one
+    makes the other a guess: two different modes drew identical screens while
+    Enter did different things. When the span between them cannot fit, `selected`
+    wins and the other is reported as clipped like anything else.
     """
     if rows <= 0:
         return [], bool(lines), False
     if len(lines) <= rows:
         return list(lines), False, False
     selected = max(0, min(selected, len(lines) - 1))
-    start = selected - (rows - 1) // 2
+    if also is None:
+        start = selected - (rows - 1) // 2
+    else:
+        also = max(0, min(also, len(lines) - 1))
+        low, high = min(selected, also), max(selected, also)
+        if high - low + 1 > rows:
+            start = selected - (rows - 1) // 2
+        else:
+            start = (low + high) // 2 - (rows - 1) // 2
+            start = max(high - rows + 1, min(start, low))
     start = max(0, min(start, len(lines) - rows))
     return list(lines[start:start + rows]), start > 0, start + rows < len(lines)
 
@@ -115,6 +222,8 @@ def fit(
     *,
     selected: int = 0,
     rows: int | None = None,
+    width: int | None = None,
+    also_selected: int | None = None,
     more_above: str = "   ↑ more",
     more_below: str = "   ↓ more",
     more_both: str = "   ↕ more",
@@ -130,11 +239,20 @@ def fit(
     fits — something readable beats a correct layout nobody can see.
     """
     rows = rows_available() if rows is None else rows
-    chrome = len(header) + len(footer)
+    width = cols_available() if width is None else width
+    # The budget is PHYSICAL ROWS, not lines. Counting lines was wrong wherever
+    # one of them is wider than the popup: the terminal wraps it onto a second
+    # row, the modal is a row taller than the budget it was given, and the row
+    # that leaves is the top one — the title. Same defect as the popup's own
+    # sizing, one level down.
+    def height(lines: list[str]) -> int:
+        return wrapped_rows(lines, width)
+
+    chrome = height(header) + height(footer)
     if rows <= chrome:
-        return (header + body + footer)[:max(1, rows)]
+        return clip_to_rows(header + body + footer, max(1, rows), width)
     budget = rows - chrome
-    if len(body) <= budget:
+    if height(body) <= budget:
         return header + body + footer
     # A row is spent on a marker ONLY when that end is actually cut: reserving
     # both unconditionally wastes a row on a blank end, which on a 10-row screen
@@ -143,19 +261,20 @@ def fit(
     # body height DOWN instead and take the first one whose markers also fit:
     # fewer body rows can only ever add markers, never remove the overflow, so
     # the first fit is the tallest honest layout and the walk cannot overrun.
-    for height in range(budget, 0, -1):
-        visible, above, below = window(body, selected, height)
-        want = (1 if above else 0) + (1 if below else 0)
-        if height + want <= budget:
-            middle = (
-                ([more_above] if above else [])
-                + visible
-                + ([more_below] if below else [])
-            )
+    for take in range(len(body), 0, -1):
+        visible, above, below = window(body, selected, take, also_selected)
+        middle = (
+            ([more_above] if above else [])
+            + visible
+            + ([more_below] if below else [])
+        )
+        if height(middle) <= budget:
             return header + middle + footer
     # No body row fits beside its own markers. Spend the budget on the selection
     # and, if there is a row left, ONE marker saying the list is cut both ways —
     # drawing both would overrun, and overrunning is what loses the title.
-    visible, _, _ = window(body, selected, max(1, budget - 1))
-    middle = ([more_both] if budget > len(visible) else []) + visible
+    visible, _, _ = window(body, selected, 1, also_selected)
+    middle = [more_both] + visible
+    if height(middle) > budget:
+        middle = clip_to_rows(visible, budget, width)
     return header + middle + footer

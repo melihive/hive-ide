@@ -60,8 +60,10 @@ def _content_rows(
             return None
         # Rendered with room for everything, so this is the height the modal
         # WANTS — the same lines `_draw` writes, not an arithmetic beside them.
+        # Measured at the width the modal will ACTUALLY be drawn at, so the
+        # fit it performs inside the popup matches the height asked for here.
         lines, _rows = IdeOptionsModal._lines(
-            record, store.workspace_key, 0, rows=10_000
+            record, store.workspace_key, 0, rows=10_000, width=interior
         )
     except Exception:  # noqa: BLE001 — a sizing hint must never break the popup
         return None

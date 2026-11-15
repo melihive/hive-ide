@@ -467,3 +467,38 @@ def test_the_sizing_hint_abstains_rather_than_guesses(tmp_path):
             session_id=f"missing-{uuid.uuid4().hex}",
         ),
     ) is None, "a session it cannot read must abstain, not guess"
+
+
+def test_click_rows_are_physical_rows_even_when_lines_wrap(tmp_path):
+    """Found by a second cross-model review.
+
+    The map was keyed by LINE NUMBER. A line wider than the popup wraps onto a
+    second row and shifts everything below it down, so at a narrow width a
+    click ran a different action than the row it landed on — measured at an
+    interior of 38 cells, eleven rows were wrong, and a click acts immediately.
+    """
+    from hive_ide import modal_io
+
+    store, record = _session(tmp_path)
+    actions = IdeOptionsModal._actions(record)
+
+    for interior in (30, 38, 55, 72):
+        lines, mouse_rows = IdeOptionsModal._lines(
+            record, store.workspace_key, 0, rows=10_000, width=interior
+        )
+        # The physical row each line starts on, and the rows it occupies.
+        occupies: dict[int, str] = {}
+        row = 1
+        for line in lines:
+            cost = max(1, -(-modal_io.printable_width(line) // interior))
+            for offset in range(cost):
+                occupies[row + offset] = line
+            row += cost
+
+        assert mouse_rows, f"interior {interior}: no clickable rows"
+        for screen_row, index in mouse_rows.items():
+            label = actions[index][1]
+            assert label in occupies.get(screen_row, ""), (
+                f"interior {interior}: clicking row {screen_row} runs "
+                f"{label!r} but that row draws {occupies.get(screen_row)!r}"
+            )

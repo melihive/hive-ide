@@ -264,6 +264,7 @@ class IdeOptionsModal:
         rename_value: str = "",
         driver_too: bool | None = None,
         rows: int | None = None,
+        width: int | None = None,
     ) -> tuple[list[str], dict[int, int]]:
         """The modal's lines and {screen row: action index}, without printing.
 
@@ -321,19 +322,30 @@ class IdeOptionsModal:
             f"  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
+        if width is None:
+            width = modal_io.cols_available()
         lines = modal_io.fit(
-            header, body, footer, selected=selected_line, rows=rows
+            header, body, footer, selected=selected_line, rows=rows, width=width
         )
         # The click map MUST come from what was drawn. Deriving it from the full
         # action list independently was a real defect: once the list is windowed,
         # a screen row holds a different action than the arithmetic believed, so
         # a click ran the wrong one — and a mouse click goes straight to Enter,
         # with `archive` among the actions it could land on.
-        return lines, {
-            screen_row: action_of_line[id(line)]
-            for screen_row, line in enumerate(lines, start=1)
-            if id(line) in action_of_line
-        }
+        # PHYSICAL screen rows, not line numbers: a line wider than the popup
+        # wraps onto a second row and shifts everything below it down, so at a
+        # narrow width the map pointed a click at a different action — measured
+        # at an interior of 38 cells, eleven of them were wrong, and a click
+        # runs its action immediately. A wrapped action owns both of its rows.
+        mouse_rows: dict[int, int] = {}
+        screen_row = 1
+        for line in lines:
+            cost = max(1, -(-modal_io.printable_width(line) // width))
+            if id(line) in action_of_line:
+                for offset in range(cost):
+                    mouse_rows[screen_row + offset] = action_of_line[id(line)]
+            screen_row += cost
+        return lines, mouse_rows
 
     @staticmethod
     def _draw(
