@@ -133,16 +133,27 @@ def test_width_is_counted_in_cells_not_characters():
     assert modal_io.printable_width("   \u25b8 \U0001f506 claude") == 14
     # Zero width with combining CLASS 0, which a `combining()` test misses.
     # U+FE0F follows most emoji, so this is the common case, not the exotic one.
-    for zero, name in (
-        ("\u200b", "ZWSP"), ("\u200d", "ZWJ"), ("\ufe0f", "VS16"),
-    ):
+    for zero, name in (("\u200b", "ZWSP"), ("\u200d", "ZWJ")):
         assert modal_io.printable_width("x" + zero) == 1, f"{name} cost a cell"
         assert modal_io.cell_costs(zero) == [0], name
+    # U+FE0F takes no cell of its own, but it makes the character BEFORE it two
+    # cells wide, so it is not neutral in a string the way the other two are.
+    assert modal_io.cell_costs("\ufe0f") == [0]
+    assert modal_io.printable_width("x\ufe0f") == 2
     # Emoji presentation: what makes U+1F441 wide is the U+FE0F after it, so a
     # per-character measurement cannot see it. The sidebar already knew.
-    assert modal_io.printable_width("\U0001f441\ufe0f") == 2
-    assert modal_io.printable_width("\U0001f9e0") == 2
-    assert modal_io.printable_width("\u25b6") == 1
+    # The bases here span THREE categories on purpose — So, Sm and Ll — because
+    # scoping this to So (one round of mine did) measures the last two as one
+    # cell, and U+2139's category is the same as plain `x`.
+    for emoji in (
+        "\U0001f441\ufe0f",  # So  eye
+        "\u2764\ufe0f",       # So  heart
+        "\u2194\ufe0f",       # Sm  left-right arrow
+        "\u2139\ufe0f",       # Ll  information
+    ):
+        assert modal_io.printable_width(emoji) == 2, repr(emoji)
+    assert modal_io.printable_width("\U0001f9e0") == 2, "wide without a selector"
+    assert modal_io.printable_width("\u25b6") == 1, "narrow without a selector"
 
 
 def test_fit_budgets_physical_rows_not_logical_lines():

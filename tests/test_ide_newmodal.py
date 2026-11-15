@@ -415,3 +415,52 @@ def _draw_name(rows: int, name: str) -> list[str]:
         os.environ.pop("LINES", None)
     text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
     return [l for l in text.split("\n") if l.strip()]
+
+
+def _draw_adopt_filter(rows: int, filter_text: str, count: int = 12) -> list[str]:
+    state = {
+        "stage": "adopt",
+        "name": "ALPHA",
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": filter_text,
+        "adopt_items": [
+            {"title": f"al conversation {i}", "updated_at": None, "preview": "x" * 40}
+            for i in range(count)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_adopt_filter_being_typed_is_never_windowed_away():
+    """Found by a fifth cross-model review.
+
+    Pinning only the name was not enough: the adopt filter sits after the
+    workspace hint, so it stayed in the windowed body and scrolled off. At 80x8
+    the filters `a` and `al` drew identical frames — with the same matching
+    conversations — while the keystrokes still landed. Any field the reader is
+    typing into is pinned; a clipped LIST at least carries a marker saying so,
+    a clipped input carries nothing.
+    """
+    from hive_ide import modal_io
+
+    for rows in (4, 5, 6, 8, 10, 16, 24):
+        narrow = _draw_adopt_filter(rows, "a")
+        wider = _draw_adopt_filter(rows, "al")
+        assert len(narrow) <= rows, f"{rows} rows: drew {len(narrow)}"
+        assert any("Filter:" in modal_io.strip_ansi(l) for l in narrow), (
+            f"{rows} rows: the filter being typed was not on screen: {narrow}"
+        )
+        assert narrow != wider, (
+            f"{rows} rows: two different filters drew the same frame"
+        )

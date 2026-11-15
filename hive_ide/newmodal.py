@@ -489,12 +489,45 @@ class IdeNewModal:
         header = [f"  {C.BOLD}New IDE session{C.RST}", ""]
         while body and body[0].strip() == "":
             body.pop(0)
-        # The name line is PINNED, not windowed. "Name — always on screen" is
-        # what the code building it says, and the window broke that: at a 20x6
-        # interior the field you are typing into scrolled away, so two
-        # different names drew identical frames while the keystrokes landed.
-        if body and "Name:" in modal_io.strip_ansi(body[0]):
-            header.append(body.pop(0))
+        # Any line the reader is TYPING INTO is pinned, not windowed. The window
+        # broke both: at a 20x6 interior the name field scrolled away, and at
+        # 80x8 the adopt filter did, so two different inputs drew identical
+        # frames while the keystrokes still landed. An input you cannot see is
+        # worse than a list you cannot see — the list has a marker saying so.
+        inputs = [
+            index
+            for index, line in enumerate(body)
+            if any(
+                field in modal_io.strip_ansi(line)
+                for field in ("Name:", "Filter:")
+            )
+        ]
+        if inputs:
+            # Everything up to and including the LAST input field moves to the
+            # header: a prefix, so the order is unchanged. Pinning only a
+            # leading run was not enough — the adopt filter sits after the
+            # workspace hint, so it stayed in the body and kept scrolling off.
+            cut = inputs[-1] + 1
+            pinned = [line for line in body[:cut] if line.strip()]
+            del body[:cut]
+            # On a screen too short even for that, keep the TITLE and the input
+            # fields and let the rest go back to being windowed: the fields are
+            # what the keystrokes land in. The popup floors at six rows, so this
+            # really happens.
+            if len(header) + len(pinned) + 2 > modal_io.rows_available():
+                keep = [
+                    line
+                    for line in pinned
+                    if any(
+                        field in modal_io.strip_ansi(line)
+                        for field in ("Name:", "Filter:")
+                    )
+                ]
+                body[:0] = [line for line in pinned if line not in keep]
+                pinned = keep
+            header.extend(pinned)
+        while body and body[0].strip() == "":
+            body.pop(0)
         while body and body[-1].strip() == "":
             body.pop()
         # Anchor the window on the row that is actually SELECTED, which is the

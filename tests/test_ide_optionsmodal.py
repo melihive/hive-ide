@@ -561,7 +561,9 @@ def test_an_emoji_in_the_repo_name_does_not_misdirect_a_click(tmp_path):
     """
     from hive_ide import modal_io
 
-    workspace = tmp_path / "rrrrrrrrrrr\U0001f441\ufe0f"
+    # U+2139 is category Ll, the same as a plain letter, so a category-scoped
+    # rule measures it as one cell and the subtitle wraps a row early.
+    workspace = tmp_path / "rrrrrrrrr\u2139\ufe0f"
     workspace.mkdir()
     store = StateStore(tmp_path / "state", workspace)
     record = store.create_session(

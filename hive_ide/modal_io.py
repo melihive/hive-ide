@@ -51,14 +51,14 @@ def cell_costs(text: str) -> list[int]:
             costs.append(0)
         elif unicodedata.east_asian_width(char) in "WF":
             costs.append(2)
-        elif (
-            text[index + 1 : index + 2] == _VARIATION_SELECTOR_16
-            and unicodedata.category(char) == "So"
-        ):
-            # Only a SYMBOL takes emoji presentation. The sidebar's copy
-            # widened whatever preceded U+FE0F, which never bit it because it
-            # only ever measures emoji icons — shared, it would have made
-            # `x` + U+FE0F two cells wide.
+        elif text[index + 1 : index + 2] == _VARIATION_SELECTOR_16:
+            # Anything before U+FE0F is two cells. I narrowed this to category
+            # So for one round, to stop `x` + U+FE0F measuring two — and broke
+            # real emoji: `ℹ️` is category Ll, the SAME category as `x`, and
+            # `↔️` is Sm. The Emoji property is what distinguishes them and
+            # `unicodedata` does not expose it, so category cannot do this job.
+            # A selector after a non-emoji is a meaningless sequence no caller
+            # here produces; every real one is wide. Breadth is correct.
             costs.append(2)
         else:
             costs.append(1)
