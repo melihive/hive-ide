@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import modal_io
+
 from .agentmodal import IdeAgentModal
 from .newmodal import IdeNewModal
 from .python_cmd import PythonCommand
@@ -267,34 +269,47 @@ class IdeOptionsModal:
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
         groups = IdeOptionsModal._grouped_actions(record)
-        o = [M.CLR, f"  {M.BOLD}Session options{M.RST}\n"]
-        o.append(
+        # Built as LINES, then fitted to the rows this terminal actually has.
+        # Writing straight out is what lost the title on a short screen: the
+        # content is 21-22 rows and the popup gets a percentage of the client, so
+        # on a handheld the overflow scrolled off the top. Header and footer are
+        # pinned; the group/item list is what scrolls.
+        header = [
+            f"  {M.BOLD}Session options{M.RST}",
             f"  {M.NAME}{record.get('name') or '?'}{M.RST}"
-            f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}\n\n"
-        )
+            f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}",
+            "",
+        ]
+        body: list[str] = []
+        selected_line = 0
         offset = 0
         for group, group_actions in groups:
-            o.append(f"  {M.DIM}{group}{M.RST}{M.EL}\n")
+            body.append(f"  {M.DIM}{group}{M.RST}{M.EL}")
             for action, label, note in group_actions:
                 i = actions.index((action, label, note), offset)
                 arrow = "▸" if i == sel else " "
                 if i == sel:
-                    o.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}\n")
+                    selected_line = len(body)
+                    body.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}")
                 else:
-                    o.append(f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}\n")
+                    body.append(f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}")
             offset += len(group_actions)
+        footer: list[str] = []
         if rename_value:
-            o.append(f"\n  {M.DIM}new name:{M.RST} {M.NAME}{rename_value}{M.RST}{M.EL}")
+            footer.append(
+                f"  {M.DIM}new name:{M.RST} {M.NAME}{rename_value}{M.RST}{M.EL}"
+            )
             if driver_too is not None:
                 box = "[x]" if driver_too else "[ ]"
-                o.append(
-                    f"\n  {box} also rename {driver} {M.DIM}(Tab toggles){M.RST}{M.EL}"
+                footer.append(
+                    f"  {box} also rename {driver} {M.DIM}(Tab toggles){M.RST}{M.EL}"
                 )
-        o.append(
-            f"\n  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
+        footer.append(
+            f"  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
-        sys.stdout.write("".join(o))
+        lines = modal_io.fit(header, body, footer, selected=selected_line)
+        sys.stdout.write(M.CLR + "\n".join(lines))
         sys.stdout.flush()
 
     @staticmethod

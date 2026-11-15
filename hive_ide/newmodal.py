@@ -22,6 +22,8 @@ import json
 import select
 import subprocess
 import sys
+
+from . import modal_io
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -421,8 +423,21 @@ class IdeNewModal:
             if not filtered:
                 o.append(f"  {C.DIM}No matching conversations.{C.RST}{C.EL}\n")
             else:
-                start = min(max(0, st["adopt_sel"] - 9), max(0, len(filtered) - 10))
-                visible = filtered[start:start + 10]
+                # The window was a hardcoded 10 rows whatever the screen was — the
+                # same mistake as sizing a popup by percentage, one layer down: on
+                # a short screen ten adopt rows plus this stage's chrome overflows
+                # and the title goes. Ask the terminal instead. CHROME is this
+                # stage's own fixed lines (title, blank, name, hint, blank, the
+                # "Adopt …" label, the filter line, blank, the range line, blank,
+                # footer); one row is the floor, because a list of nothing is not
+                # a kinder failure than a clipped one.
+                CHROME = 11
+                room = max(1, modal_io.rows_available() - CHROME)
+                start = min(
+                    max(0, st["adopt_sel"] - (room - 1)),
+                    max(0, len(filtered) - room),
+                )
+                visible = filtered[start:start + room]
                 rows = []
                 for item in visible:
                     label = str(item.get("title") or item.get("label") or item.get("name") or "")
@@ -447,8 +462,21 @@ class IdeNewModal:
             o.append(f"  {C.ERR}✗ Couldn't create {st['name']}{C.RST}{C.EL}\n\n")
             for line in (st.get("error_msg") or "create failed").splitlines()[-8:]:
                 o.append(f"  {C.DIM}{line[:76]}{C.RST}{C.EL}\n")
-        o.append(f"\n  {C.DIM}{C._footer(stage)}{C.RST}{C.EL}")
-        sys.stdout.write("".join(o))
+        # A backstop for every stage: the title says what this modal IS and the
+        # footer how to leave it, so neither may be what scrolls away. The stages
+        # build one buffer with embedded newlines, so split to display lines and
+        # let `fit` window the middle.
+        # o[0] is the clear-screen escape and o[1] IS the title line, which is
+        # pinned as the header below — slicing from 1 printed it twice.
+        body = "".join(o[2:]).split("\n")
+        footer = [f"  {C.DIM}{C._footer(stage)}{C.RST}{C.EL}"]
+        header = [f"  {C.BOLD}New IDE session{C.RST}", ""]
+        while body and body[0].strip() == "":
+            body.pop(0)
+        while body and body[-1].strip() == "":
+            body.pop()
+        lines = modal_io.fit(header, body, footer, selected=len(body) - 1)
+        sys.stdout.write(C.CLR + "\n".join(lines))
         sys.stdout.flush()
 
     @staticmethod

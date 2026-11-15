@@ -1,9 +1,14 @@
-"""Small terminal input helpers shared by read-only popups."""
+"""Small terminal input and LAYOUT helpers shared by the modal popups."""
 
 from __future__ import annotations
 
 import os
 import sys
+
+#: What to assume when the terminal will not say how tall it is. Low on purpose:
+#: guessing large is what loses content off the top, and guessing small only
+#: costs a scroll indicator on a screen that had room.
+DEFAULT_ROWS = 24
 
 try:
     import termios
@@ -33,3 +38,87 @@ def wait_any_key(prompt: str = "(press any key to close)") -> None:
         pass
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def rows_available(reserve: int = 0, *, default: int = DEFAULT_ROWS) -> int:
+    """How many rows this modal may actually draw into.
+
+    Asked of the terminal, then `$LINES`, then a conservative default — because a
+    modal that assumes a height it does not have writes past the bottom, the
+    terminal scrolls, and the lines that disappear are the ones at the TOP: the
+    title and the first item. That is the handheld report, reproduced at 80x20, where
+    the capture began with the subtitle because the header had already gone.
+    """
+    rows = 0
+    try:
+        rows = os.get_terminal_size(sys.stdout.fileno()).lines
+    except (OSError, ValueError):
+        rows = 0
+    if rows <= 0:
+        try:
+            rows = int(os.environ.get("LINES") or 0)
+        except ValueError:
+            rows = 0
+    if rows <= 0:
+        rows = default
+    return max(1, rows - reserve)
+
+
+def window(lines: list[str], selected: int, rows: int) -> tuple[list[str], bool, bool]:
+    """`rows` of `lines` that still contain `selected`, and which ends were cut.
+
+    Returns `(visible, clipped_above, clipped_below)`. The selection is kept near
+    the middle so moving through a long list scrolls rather than jumping, and the
+    window is clamped to the ends so the last page is full instead of trailing off.
+    """
+    if rows <= 0:
+        return [], bool(lines), False
+    if len(lines) <= rows:
+        return list(lines), False, False
+    selected = max(0, min(selected, len(lines) - 1))
+    start = selected - (rows - 1) // 2
+    start = max(0, min(start, len(lines) - rows))
+    return list(lines[start:start + rows]), start > 0, start + rows < len(lines)
+
+
+def fit(
+    header: list[str],
+    body: list[str],
+    footer: list[str],
+    *,
+    selected: int = 0,
+    rows: int | None = None,
+    more_above: str = "   ↑ more",
+    more_below: str = "   ↓ more",
+) -> list[str]:
+    """Header and footer pinned, body windowed around `selected`, within `rows`.
+
+    The header and footer are never the thing that gets dropped: they carry what
+    the modal IS and how to leave it, so a clipped list is recoverable while a
+    clipped title is just confusing. When the body does not fit, one row at each
+    cut end becomes a `more` marker, so the list never silently appears complete.
+
+    A screen too short even for the chrome keeps the header and as much else as
+    fits — something readable beats a correct layout nobody can see.
+    """
+    rows = rows_available() if rows is None else rows
+    chrome = len(header) + len(footer)
+    if rows <= chrome:
+        return (header + body + footer)[:max(1, rows)]
+    budget = rows - chrome
+    if len(body) <= budget:
+        return header + body + footer
+    # Reserve a row ONLY for a marker that will actually be shown. Reserving both
+    # unconditionally spends a row on a blank line at whichever end is not cut,
+    # which on a 10-row screen is a tenth of the modal. The reserve changes which
+    # ends clip, so settle it: two passes converge, the third is a guard.
+    reserve = 0
+    visible, above, below = window(body, selected, budget)
+    for _ in range(3):
+        want = (1 if above else 0) + (1 if below else 0)
+        if want == reserve:
+            break
+        reserve = want
+        visible, above, below = window(body, selected, budget - reserve)
+    middle = ([more_above] if above else []) + visible + ([more_below] if below else [])
+    return header + middle + footer

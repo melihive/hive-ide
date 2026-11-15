@@ -272,3 +272,140 @@ def test_options_modal_draws_a_record_loaded_the_way_the_popup_loads_it(tmp_path
     IdeOptionsModal._draw(loaded, str(workspace), 0)
     assert clear in IdeOptionsModal._actions(loaded)
     assert "Session options" in capsys.readouterr().out
+
+
+# -- fitting the screen it is actually on -------------------------------------------
+#
+# Reported from a handheld as "hides first item", reproduced at 80x20: the pane began with
+# the subtitle because the bold title had already scrolled off. Two causes — the
+# modal drew 20 rows with no height budget, and the popup was sized by percentage
+# rather than by content, so 92% of a short screen minus tmux's popup border was
+# less than the modal needed and the overflow left from the top.
+
+import argparse
+import io
+import os
+import re
+import uuid
+from contextlib import redirect_stdout
+
+import pytest
+
+from hive_ide import modal_io
+from hive_ide.popup import MIN_POPUP_ROWS, _content_rows
+from hive_ide.store import StateStore
+
+
+def _session(tmp_path, **extra) -> tuple[StateStore, dict]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="ALPHA",
+        working_dir=workspace,
+        source={},
+        driver={"id": "claude"},
+        **extra,
+    )
+    return store, record
+
+
+def _drawn_lines(record: dict, repo: str, rows: int) -> list[str]:
+    """What `_draw` actually puts on a terminal of `rows` rows."""
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        os.environ["LINES"] = str(rows)
+        try:
+            IdeOptionsModal._draw(record, repo, 0)
+        finally:
+            os.environ.pop("LINES", None)
+    text = buffer.getvalue()
+    # Strip the clear-screen prefix, then count display lines.
+    return text.replace("\x1b[2J", "").replace("\x1b[H", "").split("\n")
+
+
+def test_the_row_count_popup_uses_matches_what_draw_actually_draws(tmp_path):
+    """The two must not drift, or the clipping comes straight back.
+
+    `popup._content_rows` tells tmux how tall to make the popup WITHOUT rendering,
+    so it re-derives the chrome `_draw` adds. That is a duplicate of an arithmetic
+    — the kind that agrees with itself while the real output moves — so it is
+    pinned against the drawing, on a terminal tall enough that nothing is clipped.
+    """
+    store, record = _session(tmp_path)
+    args = argparse.Namespace(
+        state_home=str(store.home),
+        workspace_key=store.workspace_key,
+        session_id=record["id"],
+    )
+
+    claimed = _content_rows("options", args)
+    drawn = len(_drawn_lines(record, store.workspace_key, rows=200))
+
+    assert claimed == drawn, (
+        f"popup would request {claimed} rows for a modal that draws {drawn}"
+    )
+
+
+def test_the_title_and_footer_survive_a_short_screen(tmp_path):
+    """The reported symptom, as a test: the title must not be what gets dropped."""
+    store, record = _session(tmp_path)
+
+    for rows in (20, 14, 10, 7):
+        lines = [l for l in _drawn_lines(record, store.workspace_key, rows=rows) if l]
+        assert len(lines) <= rows, f"{rows} rows: drew {len(lines)} lines"
+        assert "Session options" in lines[0], (
+            f"{rows} rows: the title is not the first line — it scrolled off"
+        )
+        assert any("Esc" in l for l in lines), f"{rows} rows: the footer was dropped"
+
+
+def test_the_selected_row_stays_on_screen_wherever_it_is(tmp_path):
+    """A selection you cannot see is worse than a clipped list."""
+    store, record = _session(tmp_path)
+    actions = IdeOptionsModal._actions(record)
+
+    for sel in range(len(actions)):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            os.environ["LINES"] = "10"
+            try:
+                IdeOptionsModal._draw(record, store.workspace_key, sel)
+            finally:
+                os.environ.pop("LINES", None)
+        text = buffer.getvalue()
+        label = actions[sel][1]
+        assert "▸" in text, f"selection {sel}: no selection arrow on screen"
+        assert label in text, f"selection {sel} ({label}) was scrolled out of view"
+
+
+def test_a_clipped_list_says_so(tmp_path):
+    """Silently showing part of a list reads as the whole list."""
+    store, record = _session(tmp_path)
+
+    short = _drawn_lines(record, store.workspace_key, rows=10)
+    tall = _drawn_lines(record, store.workspace_key, rows=200)
+
+    assert any("more" in l for l in short), "a clipped list showed no marker"
+    assert not any("more" in l for l in tall), "an unclipped list claimed there was more"
+
+
+def test_the_sizing_hint_abstains_rather_than_guesses(tmp_path):
+    """None keeps the old percentage. A wrong number clips or over-fills."""
+    store, record = _session(tmp_path)
+    good = argparse.Namespace(
+        state_home=str(store.home),
+        workspace_key=store.workspace_key,
+        session_id=record["id"],
+    )
+
+    assert _content_rows("options", good) > MIN_POPUP_ROWS
+    assert _content_rows("card", good) is None, "a kind that cannot say must abstain"
+    assert _content_rows(
+        "options",
+        argparse.Namespace(
+            state_home=str(store.home),
+            workspace_key=store.workspace_key,
+            session_id=f"missing-{uuid.uuid4().hex}",
+        ),
+    ) is None, "a session it cannot read must abstain, not guess"

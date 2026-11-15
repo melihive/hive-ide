@@ -199,3 +199,38 @@ def test_draw_shows_explicit_handoff_mode_selector(capsys):
     assert "mode:" in package
     assert "quick switch" in package
     assert "handoff package" in package
+
+
+# -- fitting a short screen --------------------------------------------------------
+
+import io
+import os
+from contextlib import redirect_stdout
+
+
+def _agent_lines(rows: int, sel: int = 0) -> list[str]:
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeAgentModal._draw("ALPHA", "repo", "claude", sel, False)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_agent_modal_keeps_its_title_and_footer_on_a_short_screen():
+    """Nine rows fits most places and clipped under ten, silently from the top."""
+    for rows in (20, 10, 8, 6):
+        lines = _agent_lines(rows)
+        assert len(lines) <= rows, f"{rows} rows: drew {len(lines)}"
+        assert "Change agent" in lines[0], f"{rows} rows: the title scrolled off"
+        assert any("Esc" in l for l in lines), f"{rows} rows: the footer was dropped"
+
+
+def test_the_agent_modal_keeps_the_selected_driver_visible():
+    for sel in range(len(IdeNewModal.TYPES)):
+        text = "\n".join(_agent_lines(8, sel))
+        label = IdeNewModal.TYPES[sel][1]
+        assert label in text, f"driver {sel} ({label}) was scrolled out of view"
