@@ -30,7 +30,6 @@ class IdeOptionsModal:
     """One popup for common session maintenance actions."""
 
     MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([mM])")
-    ACTION_ROW = 4
 
     GROUPS = [
         (
@@ -258,13 +257,21 @@ class IdeOptionsModal:
         return (found[0], found[2]["id"], found[2]) if found else None
 
     @staticmethod
-    def _draw(
+    def _lines(
         record: dict,
         repo: str,
         sel: int,
         rename_value: str = "",
         driver_too: bool | None = None,
-    ) -> None:
+        rows: int | None = None,
+    ) -> tuple[list[str], dict[int, int]]:
+        """The modal's lines and {screen row: action index}, without printing.
+
+        Separated from `_draw` so the popup can MEASURE what will be drawn
+        instead of re-deriving a row count beside it. That duplicate arithmetic
+        agreed with itself while missing that the footer is wider than the popup
+        and wraps onto a second row.
+        """
         M = IdeNewModal
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
@@ -283,6 +290,10 @@ class IdeOptionsModal:
         body: list[str] = []
         selected_line = 0
         offset = 0
+        # Which action each body line belongs to, by the identity of the line
+        # object. `fit` returns the very strings handed to it, so after clipping
+        # the surviving lines can be mapped back without re-deriving anything.
+        action_of_line: dict[int, int] = {}
         for group, group_actions in groups:
             body.append(f"  {M.DIM}{group}{M.RST}{M.EL}")
             for action, label, note in group_actions:
@@ -290,9 +301,11 @@ class IdeOptionsModal:
                 arrow = "▸" if i == sel else " "
                 if i == sel:
                     selected_line = len(body)
-                    body.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}")
+                    line = f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}"
                 else:
-                    body.append(f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}")
+                    line = f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}"
+                body.append(line)
+                action_of_line[id(line)] = i
             offset += len(group_actions)
         footer: list[str] = []
         if rename_value:
@@ -308,9 +321,35 @@ class IdeOptionsModal:
             f"  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
-        lines = modal_io.fit(header, body, footer, selected=selected_line)
-        sys.stdout.write(M.CLR + "\n".join(lines))
+        lines = modal_io.fit(
+            header, body, footer, selected=selected_line, rows=rows
+        )
+        # The click map MUST come from what was drawn. Deriving it from the full
+        # action list independently was a real defect: once the list is windowed,
+        # a screen row holds a different action than the arithmetic believed, so
+        # a click ran the wrong one — and a mouse click goes straight to Enter,
+        # with `archive` among the actions it could land on.
+        return lines, {
+            screen_row: action_of_line[id(line)]
+            for screen_row, line in enumerate(lines, start=1)
+            if id(line) in action_of_line
+        }
+
+    @staticmethod
+    def _draw(
+        record: dict,
+        repo: str,
+        sel: int,
+        rename_value: str = "",
+        driver_too: bool | None = None,
+    ) -> dict[int, int]:
+        """Draw the modal; return {screen row: action index} for the mouse."""
+        lines, mouse_rows = IdeOptionsModal._lines(
+            record, repo, sel, rename_value, driver_too
+        )
+        sys.stdout.write(IdeNewModal.CLR + "\n".join(lines))
         sys.stdout.flush()
+        return mouse_rows
 
     @staticmethod
     def _grouped_actions(record: dict) -> list[tuple[str, list[tuple[str, str, str]]]]:
@@ -350,19 +389,6 @@ class IdeOptionsModal:
         plan = record.get("plan")
         path = plan.get("path") if isinstance(plan, dict) else plan
         return path if isinstance(path, str) and path else None
-
-    @staticmethod
-    def _action_rows(record: dict) -> dict[int, int]:
-        row = IdeOptionsModal.ACTION_ROW
-        index = 0
-        rows: dict[int, int] = {}
-        for _group, actions in IdeOptionsModal._grouped_actions(record):
-            row += 1
-            for _action in actions:
-                rows[row] = index
-                row += 1
-                index += 1
-        return rows
 
     @staticmethod
     def _mouse_selection(data: bytes, rows: dict[int, int]) -> int | None:
@@ -485,13 +511,11 @@ class IdeOptionsModal:
         sel = 0
         try:
             while True:
-                IdeOptionsModal._draw(record, repo, sel)
+                mouse_rows = IdeOptionsModal._draw(record, repo, sel)
                 actions = IdeOptionsModal._actions(record)
                 if sel >= len(actions):
                     sel = len(actions) - 1
-                key = IdeOptionsModal._getkey(
-                    fd, mouse_rows=IdeOptionsModal._action_rows(record)
-                )
+                key = IdeOptionsModal._getkey(fd, mouse_rows=mouse_rows)
                 if key == "esc":
                     return 0
                 if key in ("up", "k"):

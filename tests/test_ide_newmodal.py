@@ -286,3 +286,45 @@ def test_the_adopt_window_never_collapses_to_nothing():
     assert modal_io.rows_available(200) >= 1
     lines = _draw_adopt(4, conversations=30)
     assert lines, "a very short screen drew nothing at all"
+
+
+def _draw_type(rows: int, ty: int) -> list[str]:
+    """The `type` stage at `rows` rows with driver index `ty` selected."""
+    state = {
+        "stage": "type",
+        "name": "ALPHA",
+        "ty": ty,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": "",
+        "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_selected_driver_is_on_screen_at_every_selection():
+    """Found by a cross-model review of the first fit pass.
+
+    The window was anchored on the LAST body line, so on a short screen the
+    trailing explanation stayed and the selected driver could be scrolled out of
+    view — while Enter still created that driver. A selection the reader cannot
+    see makes the next keypress a guess.
+    """
+    missing = []
+    for rows in (40, 14, 12, 10, 8):
+        for ty, (_id, label, _note) in enumerate(IdeNewModal.TYPES):
+            drawn = _draw_type(rows, ty)
+            assert len(drawn) <= rows, f"{rows} rows: drew {len(drawn)}"
+            if not any(label in line for line in drawn):
+                missing.append(f"rows={rows} selected={label!r}")
+    assert not missing, "the selected driver was off screen:\n  " + "\n  ".join(
+        missing
+    )

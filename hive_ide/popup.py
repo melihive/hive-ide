@@ -32,31 +32,42 @@ def _client_size(tmux: list[str]) -> tuple[int | None, int | None]:
     return int(parts[0]), int(parts[1])
 
 
-def _content_rows(kind: str, args: argparse.Namespace) -> int | None:
-    """Rows this modal would draw, asked of the modal, without rendering it.
+def _content_rows(
+    kind: str, args: argparse.Namespace, interior: int | None = None
+) -> int | None:
+    """Terminal rows this modal would occupy, measured from its own lines.
 
     None when the modal cannot say — an unknown kind, a store that will not read,
     anything — and the caller then keeps the old percentage. A sizing hint that
     guesses is worse than one that abstains: too small clips, too large is the
     full-screen box for a five-item menu that made this look badly designed.
+
+    `interior` is the popup's usable width. Given it, the count includes lines
+    the terminal will WRAP: counting logical lines under-reports the height
+    whenever a line is wider than the popup, which the footer is on a narrow
+    client, and the row that then leaves the screen is the top one.
     """
     if kind != "options":
         return None
     try:
         from .optionsmodal import IdeOptionsModal
         from .store import StateStore
+        from . import modal_io
 
         store = StateStore(args.state_home, args.workspace_key)
         record = store.find_session(args.session_id)
         if record is None:
             return None
-        groups = IdeOptionsModal._grouped_actions(record)
+        # Rendered with room for everything, so this is the height the modal
+        # WANTS — the same lines `_draw` writes, not an arithmetic beside them.
+        lines, _rows = IdeOptionsModal._lines(
+            record, store.workspace_key, 0, rows=10_000
+        )
     except Exception:  # noqa: BLE001 — a sizing hint must never break the popup
         return None
-    # header + name line + blank, each group label with its items, then the
-    # key-hint footer. Kept beside `_draw`'s own chrome by a test, because a
-    # count that drifts from the drawing is how the clipping comes back.
-    return 3 + sum(1 + len(items) for _, items in groups) + 1
+    if interior is None:
+        return len(lines)
+    return modal_io.wrapped_rows(lines, interior)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
     # minus tmux's popup border is less than this modal's 21-22 rows, and the
     # overflow leaves from the top. `+2` is that border; the clamp keeps it on
     # screen, and the floor keeps a tiny popup usable.
-    needed = _content_rows(args.kind, args)
+    # The popup's usable width, so the sizing hint can count wrapped rows: tmux
+    # takes the percentage of the client, and the border costs two columns.
+    interior = None
+    if width_cells is not None and width.endswith("%"):
+        interior = int(width_cells * int(width[:-1]) / 100) - 2
+    needed = _content_rows(args.kind, args, interior)
     if needed is not None and height_cells:
         height = str(max(MIN_POPUP_ROWS, min(needed + 2, height_cells)))
     result = subprocess.run(

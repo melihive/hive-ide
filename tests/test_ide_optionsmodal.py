@@ -148,12 +148,70 @@ def test_options_modal_routes_common_actions(monkeypatch, tmp_path):
     ]
 
 
-def test_options_modal_mouse_click_maps_action_rows():
-    rows = IdeOptionsModal._action_rows({"driver": {"id": "term"}})
-    assert IdeOptionsModal._mouse_selection(b"\x1b[<0;12;5M", rows) == 0
-    assert IdeOptionsModal._mouse_selection(b"\x1b[<0;12;9M", rows) == 4
+def _click(row: int, rows: dict[int, int]) -> int | None:
+    """What a left-click on 1-based screen `row` selects."""
+    return IdeOptionsModal._mouse_selection(
+        f"\x1b[<0;12;{row}M".encode(), rows
+    )
+
+
+def test_options_modal_mouse_click_maps_action_rows(tmp_path):
+    """The map comes from the draw, so it describes the screen as drawn."""
+    store, record = _session(tmp_path)
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        os.environ["LINES"] = "200"
+        try:
+            rows = IdeOptionsModal._draw(record, store.workspace_key, 0)
+        finally:
+            os.environ.pop("LINES", None)
+    drawn = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "").split("\n")
+    actions = IdeOptionsModal._actions(record)
+
+    assert rows, "the draw reported no clickable rows"
+    for screen_row, index in rows.items():
+        label = actions[index][1]
+        assert label in drawn[screen_row - 1], (
+            f"row {screen_row} maps to {label!r} but draws "
+            f"{drawn[screen_row - 1]!r}"
+        )
+    # A non-action row and a non-left button select nothing.
+    assert _click(1, rows) is None, "the title row is not clickable"
     assert IdeOptionsModal._mouse_selection(b"\x1b[<2;12;5M", rows) is None
-    assert IdeOptionsModal._mouse_selection(b"\x1b[<0;12;4M", rows) is None
+
+
+def test_a_click_after_clipping_runs_the_action_on_that_row(tmp_path):
+    """The regression a cross-model review caught.
+
+    A click goes straight to Enter, so a stale row map does not mis-highlight —
+    it RUNS the wrong action, and `archive` is one of the actions a misdirected
+    click could land on. Once the list is windowed, the rows the full action
+    list would have occupied are no longer the rows on screen.
+    """
+    store, record = _session(tmp_path)
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        os.environ["LINES"] = "12"
+        try:
+            rows = IdeOptionsModal._draw(record, store.workspace_key, 0)
+        finally:
+            os.environ.pop("LINES", None)
+    drawn = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "").split("\n")
+    actions = IdeOptionsModal._actions(record)
+
+    assert len(drawn) <= 12, f"drew {len(drawn)} lines into 12 rows"
+    assert rows, "a clipped modal reported no clickable rows at all"
+    for screen_row, index in rows.items():
+        assert 1 <= screen_row <= len(drawn)
+        label = actions[index][1]
+        assert label in drawn[screen_row - 1], (
+            f"clipped: row {screen_row} would run {label!r} but draws "
+            f"{drawn[screen_row - 1]!r}"
+        )
+    # Nothing off-screen remains clickable, and the footer is not an action.
+    assert max(rows) <= len(drawn)
+    footer_row = len(drawn)
+    assert footer_row not in rows, "the footer row maps to an action"
 
 
 def test_options_modal_rejects_empty_rename(tmp_path):

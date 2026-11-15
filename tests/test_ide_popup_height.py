@@ -118,3 +118,54 @@ def test_a_screen_shorter_than_the_content_is_never_overrun(tmp_path):
     assert int(_height(argv)) == MIN_POPUP_ROWS, (
         f"popup shrank to {_height(argv)}, below the usable floor"
     )
+
+
+def test_the_height_covers_lines_the_terminal_will_wrap(tmp_path):
+    """Found by a cross-model review: logical lines are not terminal rows.
+
+    tmux takes a percentage of the client for the width and draws the border
+    inside it, so on some client widths the modal's widest line — its footer —
+    is one cell too wide and wraps onto a second row. Counting logical lines
+    then asks for one row too few, the content overruns, and the title is what
+    leaves. EVERY client from 60 to 78 columns wraps today, plus exactly 120 —
+    the whole narrow-terminal range, which is the screen this was reported from.
+    """
+    from hive_ide import modal_io
+    from hive_ide.optionsmodal import IdeOptionsModal
+
+    store, record = _session(tmp_path)
+    lines, _ = IdeOptionsModal._lines(record, store.workspace_key, 0, rows=10_000)
+    widest = max(modal_io.printable_width(line) for line in lines)
+
+    for client_width in (60, 70, 78, 120):
+        pct = 96 if client_width < 120 else 62
+        interior = int(client_width * pct / 100) - 2
+        argv, _ = _opened(store, record, client=f"{client_width} 60")
+        asked = int(_height(argv))
+
+        physical = modal_io.wrapped_rows(lines, interior)
+        assert physical > len(lines), (
+            f"width {client_width} was expected to wrap (interior {interior}, "
+            f"widest line {widest}) but did not — pick a width that does"
+        )
+        assert asked >= physical + 2, (
+            f"client {client_width}: asked tmux for {asked} rows, but the "
+            f"content occupies {physical} rows plus a 2-row border"
+        )
+
+
+def test_a_width_that_does_not_wrap_is_not_padded(tmp_path):
+    """The wrap allowance must not become a blanket two extra rows."""
+    from hive_ide import modal_io
+    from hive_ide.optionsmodal import IdeOptionsModal
+
+    store, record = _session(tmp_path)
+    lines, _ = IdeOptionsModal._lines(record, store.workspace_key, 0, rows=10_000)
+
+    for client_width, pct in ((80, 96), (200, 62)):
+        argv, _ = _opened(store, record, client=f"{client_width} 60")
+        interior = int(client_width * pct / 100) - 2
+        assert modal_io.wrapped_rows(lines, interior) == len(lines), (
+            f"{client_width} cells was expected to wrap nothing"
+        )
+        assert int(_height(argv)) == len(lines) + 2

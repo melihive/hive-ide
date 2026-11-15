@@ -3,12 +3,39 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 #: What to assume when the terminal will not say how tall it is. Low on purpose:
 #: guessing large is what loses content off the top, and guessing small only
 #: costs a scroll indicator on a screen that had room.
 DEFAULT_ROWS = 24
+
+#: SGR/CSI escapes, which cost no cells on screen.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def printable_width(line: str) -> int:
+    """Cells `line` occupies, ignoring the escapes that colour it."""
+    return len(_ANSI.sub("", line))
+
+
+def wrapped_rows(lines: list[str], width: int) -> int:
+    """Terminal rows `lines` occupy once the terminal wraps them at `width`.
+
+    A modal that counts LOGICAL lines under-reports its height the moment one
+    line is wider than the popup it is drawn in: the terminal wraps it onto a
+    second row, the content is one row taller than requested, and the row that
+    leaves is the top one. The footer is the usual offender because it is the
+    widest line in the modal.
+    """
+    if width <= 0:
+        return len(lines)
+    total = 0
+    for line in lines:
+        cells = printable_width(line)
+        total += max(1, -(-cells // width))
+    return total
 
 try:
     import termios
@@ -90,6 +117,7 @@ def fit(
     rows: int | None = None,
     more_above: str = "   ↑ more",
     more_below: str = "   ↓ more",
+    more_both: str = "   ↕ more",
 ) -> list[str]:
     """Header and footer pinned, body windowed around `selected`, within `rows`.
 
@@ -108,17 +136,26 @@ def fit(
     budget = rows - chrome
     if len(body) <= budget:
         return header + body + footer
-    # Reserve a row ONLY for a marker that will actually be shown. Reserving both
-    # unconditionally spends a row on a blank line at whichever end is not cut,
-    # which on a 10-row screen is a tenth of the modal. The reserve changes which
-    # ends clip, so settle it: two passes converge, the third is a guard.
-    reserve = 0
-    visible, above, below = window(body, selected, budget)
-    for _ in range(3):
+    # A row is spent on a marker ONLY when that end is actually cut: reserving
+    # both unconditionally wastes a row on a blank end, which on a 10-row screen
+    # is a tenth of the modal. But the reserve CHANGES which ends are cut, so it
+    # cannot be settled by iterating to a fixed point — it oscillates. Walk the
+    # body height DOWN instead and take the first one whose markers also fit:
+    # fewer body rows can only ever add markers, never remove the overflow, so
+    # the first fit is the tallest honest layout and the walk cannot overrun.
+    for height in range(budget, 0, -1):
+        visible, above, below = window(body, selected, height)
         want = (1 if above else 0) + (1 if below else 0)
-        if want == reserve:
-            break
-        reserve = want
-        visible, above, below = window(body, selected, budget - reserve)
-    middle = ([more_above] if above else []) + visible + ([more_below] if below else [])
+        if height + want <= budget:
+            middle = (
+                ([more_above] if above else [])
+                + visible
+                + ([more_below] if below else [])
+            )
+            return header + middle + footer
+    # No body row fits beside its own markers. Spend the budget on the selection
+    # and, if there is a row left, ONE marker saying the list is cut both ways —
+    # drawing both would overrun, and overrunning is what loses the title.
+    visible, _, _ = window(body, selected, max(1, budget - 1))
+    middle = ([more_both] if budget > len(visible) else []) + visible
     return header + middle + footer

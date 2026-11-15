@@ -475,7 +475,19 @@ class IdeNewModal:
             body.pop(0)
         while body and body[-1].strip() == "":
             body.pop()
-        lines = modal_io.fit(header, body, footer, selected=len(body) - 1)
+        # Anchor the window on the row that is actually SELECTED, which is the
+        # one carrying the highlight. Anchoring on the last line (as this first
+        # did) keeps the trailing explanation on screen and can window away the
+        # driver the reader is about to press Enter on — the selection must be
+        # visible because the next keypress acts on it. Stages with no selection
+        # (creating, error) have no highlight, and for them the end IS the news.
+        selected_line = len(body) - 1
+        if C.SEL:
+            selected_line = next(
+                (i for i, line in enumerate(body) if C.SEL in line),
+                selected_line,
+            )
+        lines = modal_io.fit(header, body, footer, selected=selected_line)
         sys.stdout.write(C.CLR + "\n".join(lines))
         sys.stdout.flush()
 
