@@ -493,6 +493,95 @@ def _frame(rows: int, width: int, stage: str, **kw) -> list[str]:
     return [l for l in text.split("\n") if l.strip()]
 
 
+HOSTILE_VALUES = [
+    "",
+    "a",
+    "al",
+    "q" * 10,
+    "q" * 30,
+    "q" * 31,
+    "w" * 80,
+    "\u65e5" * 20,              # CJK, double-width
+    "x\U0001f441\ufe0f" * 8,     # emoji whose width comes from the NEXT char
+    "\u2139\ufe0f" * 12,         # emoji with a letter-category base
+    "e\u0301" * 25,             # combining marks
+    "\u200b" * 10 + "tail",     # zero-width spaces
+]
+
+
+def test_the_active_field_survives_every_width_height_and_value():
+    """A swept invariant, because my sampled version of it was FALSE.
+
+    I checked widths 20/40/74 with short values, then claimed the field was
+    always visible. A seventh review pass found 30x8 (the footer is three rows
+    there, and a hardcoded `+ 2` skipped the decoration shedding) and 20x4 with
+    a 30-character filter (the value itself took three rows and was discarded
+    whole). My own sweep then found seven more combinations at widths I had
+    never tried. So this sweeps instead of sampling, with values chosen to be
+    hostile about width.
+
+    The filter has no length limit, so a field now shows the TAIL of its value
+    on one row, the way an input field behaves.
+    """
+    from hive_ide import modal_io
+
+    bad = []
+    # EVERY height and every other width. The first version of this stepped
+    # rows by 3 and widths by 6, which skipped 20x8 and 30x8 — the two sizes
+    # the review had just named. A grid that steps over the failing case is a
+    # sample wearing a sweep's clothes.
+    for width in range(14, 84, 2):
+        for rows in range(4, 25):
+            for value in HOSTILE_VALUES:
+                first = _frame(rows, width, "adopt", filter=value)
+                second = _frame(rows, width, "adopt", filter=value + "z")
+                used = modal_io.wrapped_rows(first, width)
+                if used > rows:
+                    bad.append(f"adopt {width}x{rows} len={len(value)}: {used} rows")
+                if not any("Filter:" in modal_io.strip_ansi(l) for l in first):
+                    bad.append(f"adopt {width}x{rows} len={len(value)}: no field")
+                if first == second:
+                    bad.append(f"adopt {width}x{rows} len={len(value)}: identical")
+            for name in ("A", "ALPHA", "N" * 24):
+                first = _frame(rows, width, "name", name=name)
+                second = _frame(rows, width, "name", name=name + "Z")
+                if modal_io.wrapped_rows(first, width) > rows:
+                    bad.append(f"name {width}x{rows}: overran")
+                if not any("Name:" in modal_io.strip_ansi(l) for l in first):
+                    bad.append(f"name {width}x{rows}: no field")
+                if first == second:
+                    bad.append(f"name {width}x{rows} len={len(name)}: identical")
+    assert not bad, "\n  ".join(["the active field was lost:"] + bad[:20])
+
+
+def test_a_trimmed_field_value_keeps_its_end_and_fits_its_row():
+    """The tail is what matters — the caret and what was just typed are there."""
+    from hive_ide import modal_io
+
+    assert IdeNewModal._field_tail("short", 20) == "short"
+    for value in HOSTILE_VALUES:
+        for cells in range(1, 12):
+            tail = IdeNewModal._field_tail(value, cells)
+            assert modal_io.printable_width(tail) <= cells, (
+                f"{value!r} trimmed to {cells} cells gave {tail!r} "
+                f"({modal_io.printable_width(tail)} cells)"
+            )
+            if modal_io.printable_width(value) > cells and value:
+                assert tail.startswith("\u2026"), tail
+            # Never orphan a zero-width mark onto the ellipsis: it attaches and
+            # renders the ellipsis itself two cells wide. The measured check
+            # above keeps that from overflowing, so this is about the OUTPUT
+            # being right rather than merely fitting. Only meaningful when the
+            # value WAS trimmed — an untrimmed value has no ellipsis, and my
+            # first version of this check read its second character instead.
+            rest = tail[1:] if tail.startswith("\u2026") else ""
+            if rest:
+                assert modal_io.cell_costs(rest)[0] != 0, (
+                    f"{value!r} at {cells} cells gave {tail!r}, whose first "
+                    "character after the ellipsis takes no cell of its own"
+                )
+
+
 def test_the_active_field_is_on_screen_at_every_size_the_popup_can_make():
     """The invariant: the field taking the keystrokes is always visible.
 

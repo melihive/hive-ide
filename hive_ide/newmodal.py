@@ -367,6 +367,34 @@ class IdeNewModal:
                 o.append(f"   {arrow} {label}{tail}{C.EL}\n")
 
     @staticmethod
+    def _field_tail(value: str, cells: int) -> str:
+        """`value` trimmed from the LEFT to `cells`, like a real input field.
+
+        An input that wraps onto a second row is one the fitting can then drop
+        whole — a 30-cell filter at a 20-cell interior took three rows and was
+        discarded, so two different queries drew the same frame. Keeping the
+        END is the only honest trim: the caret is there, and what was just
+        typed is what the reader is looking for.
+        """
+        if cells <= 0:
+            return ""
+        if modal_io.printable_width(value) <= cells:
+            return value
+        # Measured on the RESULT, longest suffix first. Accumulating per-character
+        # costs got this wrong twice: a character's width can depend on the one
+        # after it (U+FE0F), and a suffix that STARTS with a selector orphans it
+        # onto the ellipsis and makes that two cells wide. Checking the finished
+        # string cannot be fooled by either.
+        ellipsis = "\u2026"
+        for start in range(len(value) + 1):
+            suffix = value[start:]
+            if suffix and modal_io.cell_costs(suffix)[0] == 0:
+                continue  # would orphan a zero-width mark onto the ellipsis
+            if modal_io.printable_width(ellipsis + suffix) <= cells:
+                return ellipsis + suffix
+        return ellipsis
+
+    @staticmethod
     def _sel_summary(line: str) -> str:
         """What is CHOSEN on a highlighted row, for naming it in the footer.
 
@@ -401,7 +429,11 @@ class IdeNewModal:
         o = [C.CLR, f"  {C.BOLD}New IDE session{C.RST}\n\n"]
         # Name — always on screen; caret only while editing it.
         caret = "▏" if stage == "name" else " "
-        o.append(f"  Name: {C.NAME}{st['name']}{caret}{C.RST}{C.EL}\n")
+        name_room = modal_io.cols_available() - len("  Name: ") - 1
+        o.append(
+            f"  Name: {C.NAME}{C._field_tail(st['name'], name_room)}"
+            f"{caret}{C.RST}{C.EL}\n"
+        )
         if stage == "name":
             hint = (f"{C.ERR}{st['err']}" if st["err"]
                     else f"{C.DIM}CAPS · spaces · ≤{StateIO.NAME_MAX}") + C.RST
@@ -435,7 +467,12 @@ class IdeNewModal:
             if filtered and st["adopt_sel"] >= len(filtered):
                 st["adopt_sel"] = len(filtered) - 1
             o.append(f"  Adopt {typ} conversation{C.EL}\n")
-            o.append(f"  Filter: {C.NAME}{st.get('filter', '')}▏{C.RST}{C.EL}\n\n")
+            filter_room = modal_io.cols_available() - len("  Filter: ") - 1
+            o.append(
+                f"  Filter: {C.NAME}"
+                f"{C._field_tail(str(st.get('filter', '')), filter_room)}"
+                f"▏{C.RST}{C.EL}\n\n"
+            )
             if not filtered:
                 o.append(f"  {C.DIM}No matching conversations.{C.RST}{C.EL}\n")
             else:
@@ -517,10 +554,12 @@ class IdeNewModal:
             # PHYSICAL rows, not line counts: fit measures in rows, and at a
             # 20x8 adopt interior the wrapped decoration ate the space before
             # the field, so this check passed and the filter was clipped anyway.
-            chrome_rows = modal_io.wrapped_rows(
-                header + pinned, modal_io.cols_available()
-            )
-            if chrome_rows + 2 > modal_io.rows_available():
+            cols = modal_io.cols_available()
+            # MEASURE the footer. Assuming two rows was the same mistake one
+            # level up: the adopt footer is three rows at a 30-cell interior,
+            # so the guard did not fire and the field was clipped anyway.
+            chrome_rows = modal_io.wrapped_rows(header + pinned + footer, cols)
+            if chrome_rows > modal_io.rows_available():
                 keep = [
                     line
                     for line in pinned
@@ -546,7 +585,7 @@ class IdeNewModal:
                 # honest way to draw the modal at all.
                 active = "Filter:" if stage == "adopt" else "Name:"
                 if (
-                    modal_io.wrapped_rows(header + pinned + footer, modal_io.cols_available())
+                    modal_io.wrapped_rows(header + pinned + footer, cols)
                     > modal_io.rows_available()
                 ):
                     live = [
