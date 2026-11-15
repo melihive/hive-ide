@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import os
 import shlex
 import signal
@@ -614,7 +615,78 @@ def test_open_isolates_and_reports_a_missing_session_directory(tmp_path, monkeyp
 _SHELL_COMMANDS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
 
 
-def _keepalive_diagnosis(pane_pid: str, freeze: Path | None = None) -> str:
+def _renderer_pids(pane_pid: str) -> set[str] | None:
+    """The sidebar renderers running under this keep-alive, by pid.
+
+    `_sidebar_running` answers "is one running", and that is not what the
+    blank-pane test means. It means "did the keep-alive start one during the
+    measurement" — and a renderer left over from the setup phase answers the
+    first question wrongly while saying nothing about the second. Comparing pids
+    across the measurement answers it directly: a renderer that was already there
+    is not evidence of a paint, and a NEW pid is.
+    """
+    try:
+        kids = subprocess.run(
+            ["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5
+        )
+        if kids.returncode not in (0, 1):
+            return None
+        pids = [k for k in kids.stdout.split() if k.isdigit()]
+        if not pids:
+            return set()
+        listing = subprocess.run(
+            ["ps", "-ww", "-p", ",".join(pids), "-o", "pid=,comm=,args="],
+            capture_output=True, text=True, timeout=5,
+        )
+        if listing.returncode not in (0, 1):
+            return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = set()
+    for line in listing.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, comm, args = parts
+        # The same three discriminators `_sidebar_running` uses, for the same
+        # reason: the keep-alive's own subshells inherit its argv verbatim.
+        if "python" not in comm:
+            continue
+        if "window_active" in args:
+            continue
+        if "hive_ide.sidebar" not in args:
+            continue
+        found.add(pid)
+    return found
+
+
+def _pane_census(frame, window_id: str) -> str:
+    """Who is who in this window, at the moment it matters.
+
+    The assertion below has twice failed on CI with a freeze that was present in
+    both the file system and the keep-alive's own command, while a renderer ran
+    under the pid it was watching — which cannot happen if that pid is the pane
+    the freeze was built for. So the remaining question is identity: whether
+    `{window}.0` is still the pane this test thinks it is after
+    `relayout --mode=adopt` re-sorts panes on the very hook under test, and
+    whether the keep-alive being watched belongs to the same session as the
+    renderer found under it.
+    """
+    rows = frame.tmux([
+        "list-panes", "-t", window_id, "-F",
+        "#{pane_index} #{pane_id} #{pane_pid} role=#{@hive_ide_pane} "
+        "session=#{@hive_ide_session_id}",
+    ]).stdout.strip()
+    return rows or "(no panes listed)"
+
+
+def _keepalive_diagnosis(
+    pane_pid: str,
+    freeze: Path | None = None,
+    frame=None,
+    window_id: str | None = None,
+    expected_session: str | None = None,
+) -> str:
     """What a failure of the frozen-keep-alive assertion needs to say.
 
     "assert True is False" names neither the process that was running nor the
@@ -637,14 +709,57 @@ def _keepalive_diagnosis(pane_pid: str, freeze: Path | None = None) -> str:
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
         return f"could not diagnose pid {pane_pid}: {exc!r}"
     present = "not checked" if freeze is None else freeze.exists()
+    # WHEN, not just what. The two remaining explanations are "a renderer from
+    # before the freeze never exited and the setup's wait was fooled" and "the
+    # loop rendered while the freeze was in place". Their difference is entirely
+    # in whether the renderer is older than the freeze file.
+    def _started(pid: str) -> str:
+        try:
+            return subprocess.run(
+                ["ps", "-o", "lstart=", "-p", pid],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip() or "(gone)"
+        except (OSError, subprocess.SubprocessError):
+            return "(unreadable)"
+
+    kid_times = []
+    try:
+        for kid in subprocess.run(
+            ["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5
+        ).stdout.split():
+            kid_times.append(f"{kid} started {_started(kid)}")
+    except (OSError, subprocess.SubprocessError):
+        kid_times.append("(unreadable)")
+    freeze_made = (
+        datetime.datetime.fromtimestamp(freeze.stat().st_mtime).strftime("%c")
+        if freeze is not None and freeze.exists()
+        else "(no freeze file)"
+    )
+    census = (
+        _pane_census(frame, window_id)
+        if frame is not None and window_id
+        else "(not collected)"
+    )
+    # The keep-alive's OWN session id, untruncated, because the renderer's is
+    # already visible and the comparison is the whole question.
+    import re as _re
+    mine = _re.search(r"--session-id (\S+)", parent)
     return (
         f"a sidebar renderer was running under keep-alive {pane_pid} at the first "
         f"fresh frame, which the freeze should have made impossible.\n"
         f"  freeze FILE exists right now: {present}\n"
         f"  freeze present in the keep-alive command: "
         f"{'freeze-keepalive' in parent}\n"
-        f"  keep-alive argv: {parent[:400]}\n"
-        f"  children: {argv[:600]}"
+        f"  freeze file created: {freeze_made}\n"
+        f"  keep-alive started:  {_started(pane_pid)}\n"
+        f"  children started:    {'; '.join(kid_times) or '(none)'}\n"
+        f"  expected session (BRAVO): {expected_session}\n"
+        f"  keep-alive's own --session-id: "
+        f"{mine.group(1) if mine else '(none in argv)'}\n"
+        f"  panes in the window now:\n    "
+        + census.replace("\n", "\n    ")
+        + f"\n  keep-alive argv: {parent[:600]}\n"
+        f"  children: {argv[:700]}"
     )
 
 
@@ -859,9 +974,24 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
                 ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
             ).stdout.strip()
             assert pid_before
-            assert _until(lambda: _sidebar_running(pid_before) is False, timeout=15.0), (
-                "BRAVO's sidebar process never exited after its window was left"
+            # Gone AND STAYING gone. A single sampled instant of "no renderer"
+            # let a stale one — or one flapping in the keep-alive's one-second
+            # retry — survive into the measurement, where it read as proof that
+            # the keep-alive had painted. Under load that is how this test failed
+            # about one run in three locally and twice in a row on CI.
+            def _settled() -> bool:
+                for _ in range(4):
+                    if _renderer_pids(pid_before) != set():
+                        return False
+                    time.sleep(0.4)
+                return True
+
+            assert _until(_settled, timeout=20.0), (
+                "BRAVO's sidebar process never stayed gone after its window was "
+                f"left: {_renderer_pids(pid_before)}"
             )
+            renderers_before = _renderer_pids(pid_before)
+            assert renderers_before == set()
             if order_is("ALPHA", "BRAVO"):
                 frozen = True
                 break
@@ -894,7 +1024,10 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
                 # the paint, and one that painted and exited would already be
                 # invisible — so the only moment worth asking about is the first
                 # fresh frame itself.
-                renderer_at_fresh = _sidebar_running(pid_before)
+                # A NEW renderer pid is what would mean the keep-alive painted
+                # this frame. One that was already running is not evidence.
+                now = _renderer_pids(pid_before)
+                renderer_at_fresh = None if now is None else bool(now - renderers_before)
                 pid_at_fresh = frame.tmux(
                     ["display-message", "-p", "-t", f"{win_second}.0", "#{pane_pid}"]
                 ).stdout.strip()
@@ -913,7 +1046,10 @@ def test_switching_windows_shows_the_right_order_and_never_blanks_the_pane(
         )
         # Still frozen AT THE MOMENT IT PAINTED: the keep-alive cannot have
         # painted it, and had not started.
-        assert renderer_at_fresh is False, _keepalive_diagnosis(pid_before, freeze)
+        assert renderer_at_fresh is False, _keepalive_diagnosis(
+            pid_before, freeze, frame=frame, window_id=win_second,
+            expected_session=second["id"],
+        )
         # The mechanism, pinned without a clock: the pane was painted, not rebuilt.
         pid_after = pid_at_fresh
         assert pid_after and pid_after == pid_before, (
