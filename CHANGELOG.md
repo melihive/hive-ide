@@ -4,6 +4,33 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [2.0.1] - 2026-11-15
+
+2.0.0 was tagged but never published: its publish workflow failed the test gate
+twice on a flaky test, so nothing reached PyPI. The tag is left in place rather
+than rewritten, and this is the first released build of that work. Everything
+described under 2.0.0 below ships here.
+
+### Fixed
+
+- The window-switch test no longer fails about one run in three. It asked
+  whether a sidebar renderer was *running* when what it meant was whether the
+  keep-alive had *painted the frame* — and those differ exactly when a renderer
+  from the test's own setup is still alive. Timestamps settled it: the renderer
+  predated the freeze that was supposed to make it impossible, so it had simply
+  never exited, and a single sampled instant of "none running" had been accepted
+  as proof.
+
+  It now requires the renderer to be gone and to stay gone, and compares
+  renderer process ids across the measurement, so only a newly started one
+  counts as evidence. The assertions themselves are unchanged. Measured under
+  identical load, back to back: the old test failed 3 of 10 runs, the new one 0
+  of 10.
+
+  No product code changed. The failure mattered because the publish gate runs
+  the whole suite, so a test flaking one run in three could stop every release.
+
+
 ## [2.0.0] - 2026-11-15
 
 A major version at the maintainer's request. Nothing here is breaking: the
