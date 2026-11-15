@@ -4,6 +4,52 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [2.0.0] - 2026-11-15
+
+A major version at the maintainer's request. Nothing here is breaking: the
+sidebar change is behaviour-compatible, the caller-identity change is internal,
+and the new socket address applies only to frames created from now on.
+
+### Added
+
+- A frame created from now on puts its tmux socket under `<state_home>/sockets`
+  instead of `/tmp`, which is age-cleaned — `q /tmp … 10d` with the cleaner timer
+  active on a stock Fedora — so a socket could be deleted from under a server
+  that was still running with every pane in it. The exposed case is narrower than
+  it sounds: tmpfiles removes an entry only when atime, btime, ctime AND mtime
+  are all older than the age, and connecting refreshes atime, so a frame in use
+  was never at risk. A frame nothing touches for ten straight days was.
+
+  The address is recorded in the frame's own state, not inferred from the
+  environment, and passed as `TMUX_TMPDIR` on every tmux call including the
+  interactive attach: `-L <name>` resolves under it, so a frame that passed it on
+  some calls and not others would not error — it would reach a second, empty
+  server that looks exactly like a frame needing to be built.
+
+  **A running server is never relocated.** An address already pinned is kept, and
+  so is one where something is listening or where the probe cannot tell. Frames
+  already running therefore keep their `/tmp` address until they are next built,
+  so this does not close the exposure for an existing frame — it stops new ones
+  inheriting it.
+
+### Fixed
+
+- An agent driving a long operation can open the supervisory board. The
+  progress monitors refused with `409 caller_pane` on every run started from
+  inside an ide session, because the environment could not prove the caller was
+  not the pane being targeted — an agent has the markers but no `$TMUX` and no
+  `$TMUX_PANE`, and a marker can be inherited from anywhere. The guard was right
+  to refuse unknown; the evidence simply was not in the environment.
+
+  It is in the kernel, which cannot be inherited: no ancestor of the caller is a
+  pane's own process, and the terminal it is attached to belongs to none of this
+  server's panes. Only a positive reading counts. No terminal anywhere in the
+  ancestry, a server whose panes cannot be listed, and an ancestry walk cut short
+  all stay unknown, because a process that double-forked out of a pane looks
+  exactly like one that was never in it — and that verdict is what would let a
+  helper replace the pane it is sitting in.
+
+
 ## [1.0.123] - 2026-11-14
 
 ### Changed
