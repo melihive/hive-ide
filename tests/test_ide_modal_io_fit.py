@@ -137,7 +137,12 @@ def test_width_is_counted_in_cells_not_characters():
         ("\u200b", "ZWSP"), ("\u200d", "ZWJ"), ("\ufe0f", "VS16"),
     ):
         assert modal_io.printable_width("x" + zero) == 1, f"{name} cost a cell"
-        assert modal_io.cell_width(zero) == 0, name
+        assert modal_io.cell_costs(zero) == [0], name
+    # Emoji presentation: what makes U+1F441 wide is the U+FE0F after it, so a
+    # per-character measurement cannot see it. The sidebar already knew.
+    assert modal_io.printable_width("\U0001f441\ufe0f") == 2
+    assert modal_io.printable_width("\U0001f9e0") == 2
+    assert modal_io.printable_width("\u25b6") == 1
 
 
 def test_fit_budgets_physical_rows_not_logical_lines():

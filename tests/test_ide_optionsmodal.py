@@ -548,3 +548,42 @@ def test_an_ambiguous_truncation_is_left_unmapped():
         "  x same prefix A", body, action_of_line
     ) == 0
     assert IdeOptionsModal._action_for_truncated("   ", body, action_of_line) is None
+
+
+def test_an_emoji_in_the_repo_name_does_not_misdirect_a_click(tmp_path):
+    """Found by a fourth cross-model review.
+
+    `U+1F441 U+FE0F` is East_Asian_Width Neutral — what makes it two cells is
+    the variation selector AFTER it. Measuring it as one cell made the subtitle
+    wrap a row earlier than predicted, which shifted every action below it, and
+    a click then ran a different action. The sidebar already measured this
+    correctly; the modals had grown a second, worse copy.
+    """
+    from hive_ide import modal_io
+
+    workspace = tmp_path / "rrrrrrrrrrr\U0001f441\ufe0f"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="ALPHA", working_dir=workspace, source={}, driver={"id": "claude"}
+    )
+    actions = IdeOptionsModal._actions(record)
+
+    for interior in (28, 30, 38):
+        lines, mouse_rows = IdeOptionsModal._lines(
+            record, store.workspace_key, 0, rows=12, width=interior
+        )
+        occupies: dict[int, str] = {}
+        row = 1
+        for line in lines:
+            cost = modal_io.line_rows(line, interior)
+            for offset in range(cost):
+                occupies[row + offset] = line
+            row += cost
+
+        for screen_row, index in mouse_rows.items():
+            label = actions[index][1]
+            assert label in modal_io.strip_ansi(occupies.get(screen_row, "")), (
+                f"interior {interior}: clicking row {screen_row} runs {label!r} "
+                f"but that row draws {occupies.get(screen_row)!r}"
+            )

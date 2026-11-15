@@ -489,6 +489,12 @@ class IdeNewModal:
         header = [f"  {C.BOLD}New IDE session{C.RST}", ""]
         while body and body[0].strip() == "":
             body.pop(0)
+        # The name line is PINNED, not windowed. "Name — always on screen" is
+        # what the code building it says, and the window broke that: at a 20x6
+        # interior the field you are typing into scrolled away, so two
+        # different names drew identical frames while the keystrokes landed.
+        if body and "Name:" in modal_io.strip_ansi(body[0]):
+            header.append(body.pop(0))
         while body and body[-1].strip() == "":
             body.pop()
         # Anchor the window on the row that is actually SELECTED, which is the

@@ -12,8 +12,9 @@ import unicodedata
 #: costs a scroll indicator on a screen that had room.
 DEFAULT_ROWS = 24
 
-#: SGR/CSI escapes, which cost no cells on screen.
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+#: CSI escapes, which cost no cells on screen. Same pattern the sidebar uses,
+#: which covers more than SGR alone (`\x1b[?25l`, `\x1b[0 q`).
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def strip_ansi(line: str) -> str:
@@ -28,11 +29,40 @@ def strip_ansi(line: str) -> str:
 _ZERO_WIDTH_CATEGORIES = frozenset({"Mn", "Me", "Cf"})
 
 
-def cell_width(char: str) -> int:
-    """Cells one character occupies: 0, 1 or 2."""
-    if unicodedata.combining(char) or unicodedata.category(char) in _ZERO_WIDTH_CATEGORIES:
-        return 0
-    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
+#: An explicit request for emoji presentation, which makes the character before
+#: it double-width whatever its East_Asian_Width says.
+_VARIATION_SELECTOR_16 = "\ufe0f"
+
+
+def cell_costs(text: str) -> list[int]:
+    """The cell cost of each character of `text`, escapes already stripped.
+
+    Needs the whole string, not one character at a time: `U+1F441` EYE is
+    East_Asian_Width Neutral, so it measures 1 while every terminal draws it
+    across 2 cells — what makes it wide is the `U+FE0F` that FOLLOWS it. The
+    sidebar learned this before the modals did; this is now the one copy.
+    """
+    costs = []
+    for index, char in enumerate(text):
+        if (
+            unicodedata.combining(char)
+            or unicodedata.category(char) in _ZERO_WIDTH_CATEGORIES
+        ):
+            costs.append(0)
+        elif unicodedata.east_asian_width(char) in "WF":
+            costs.append(2)
+        elif (
+            text[index + 1 : index + 2] == _VARIATION_SELECTOR_16
+            and unicodedata.category(char) == "So"
+        ):
+            # Only a SYMBOL takes emoji presentation. The sidebar's copy
+            # widened whatever preceded U+FE0F, which never bit it because it
+            # only ever measures emoji icons — shared, it would have made
+            # `x` + U+FE0F two cells wide.
+            costs.append(2)
+        else:
+            costs.append(1)
+    return costs
 
 
 def printable_width(line: str) -> int:
@@ -44,7 +74,7 @@ def printable_width(line: str) -> int:
     taller than it asked for. These modals already carry emoji in every driver
     label, so this is not a hypothetical.
     """
-    return sum(cell_width(char) for char in strip_ansi(line))
+    return sum(cell_costs(strip_ansi(line)))
 
 
 def line_rows(line: str, width: int) -> int:
@@ -60,8 +90,8 @@ def line_rows(line: str, width: int) -> int:
         return 1
     rows = 1
     used = 0
-    for char in strip_ansi(line):
-        cost = cell_width(char)
+    plain = strip_ansi(line)
+    for cost in cell_costs(plain):
         if cost == 0:
             continue
         if used + cost > width:
@@ -179,8 +209,8 @@ def truncate_to_rows(line: str, rows: int, width: int) -> str:
         return ""
     out: list[str] = []
     row, used = 1, 0
-    for char in strip_ansi(line):
-        cost = cell_width(char)
+    plain = strip_ansi(line)
+    for char, cost in zip(plain, cell_costs(plain)):
         if cost == 0:
             out.append(char)
             continue

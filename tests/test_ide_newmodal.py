@@ -371,3 +371,47 @@ def _draw_type_mode(rows: int, mode_sel: int) -> list[str]:
         os.environ.pop("LINES", None)
     text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
     return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_name_being_typed_is_never_windowed_away():
+    """Found by a fourth cross-model review.
+
+    The code that writes this line says "Name — always on screen", and the
+    window broke it: at a short interior the field being typed into scrolled
+    off, so two different names drew identical frames while the keystrokes
+    still landed. The name is header now, not body, so it cannot be clipped.
+    """
+    from hive_ide import modal_io
+
+    for rows in (4, 6, 8, 12, 20):
+        alpha = _draw_name(rows, "ALPHA")
+        beta = _draw_name(rows, "BETA")
+        assert len(alpha) <= rows, f"{rows} rows: drew {len(alpha)}"
+        assert any("ALPHA" in modal_io.strip_ansi(l) for l in alpha), (
+            f"{rows} rows: the name being typed was not on screen: {alpha}"
+        )
+        assert alpha != beta, (
+            f"{rows} rows: two different names drew the same frame"
+        )
+
+
+def _draw_name(rows: int, name: str) -> list[str]:
+    state = {
+        "stage": "name",
+        "name": name,
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": "",
+        "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
