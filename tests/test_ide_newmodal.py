@@ -464,3 +464,63 @@ def test_the_adopt_filter_being_typed_is_never_windowed_away():
         assert narrow != wider, (
             f"{rows} rows: two different filters drew the same frame"
         )
+
+
+def _frame(rows: int, width: int, stage: str, **kw) -> list[str]:
+    state = {
+        "stage": stage,
+        "name": kw.get("name", "ALPHA"),
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": kw.get("filter", ""),
+        "adopt_items": [
+            {"title": f"conversation {i}", "updated_at": None, "preview": "y" * 30}
+            for i in range(8)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_active_field_is_on_screen_at_every_size_the_popup_can_make():
+    """The invariant: the field taking the keystrokes is always visible.
+
+    Found by a sixth cross-model review in its wrapped form — the decoration
+    check counted logical lines while fitting counts physical rows, so at a
+    20x8 adopt interior the wrapped decoration ate the space and the filter was
+    clipped anyway. Four rows is the smallest interior the popup can produce
+    (it floors at six rows, less a two-row border), so that is the floor here.
+    """
+    from hive_ide import modal_io
+
+    missing = []
+    for rows in (4, 5, 6, 8, 10, 16, 24):
+        for width in (20, 40, 74):
+            for stage, field, edits in (
+                ("adopt", "Filter:", ("conversatio", "conversation")),
+                ("name", "Name:", ("ALPHA", "BETA")),
+            ):
+                key = "filter" if stage == "adopt" else "name"
+                first = _frame(rows, width, stage, **{key: edits[0]})
+                second = _frame(rows, width, stage, **{key: edits[1]})
+                used = modal_io.wrapped_rows(first, width)
+                if used > rows:
+                    missing.append(f"{stage} {width}x{rows}: used {used} rows")
+                if not any(field in modal_io.strip_ansi(l) for l in first):
+                    missing.append(f"{stage} {width}x{rows}: {field} not drawn")
+                if first == second:
+                    missing.append(
+                        f"{stage} {width}x{rows}: two edits drew one frame"
+                    )
+    assert not missing, "\n  ".join(["the active field was lost:"] + missing)

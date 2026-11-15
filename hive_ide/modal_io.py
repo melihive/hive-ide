@@ -281,6 +281,48 @@ def window(
     return list(lines[start:start + rows]), start > 0, start + rows < len(lines)
 
 
+def _sacrifice(
+    header: list[str], body: list[str], footer: list[str], rows: int, width: int
+) -> list[str]:
+    """What to keep when not even the pinned chrome fits, in order of need.
+
+    Clipping `header + body + footer` front to back looked reasonable and was
+    not: body rows displaced the FOOTER, and the footer is where the escape
+    hint lives — and, while renaming, the field being typed into. At a 74x6
+    options interior that produced identical frames for two different names
+    with no rename field at all, while Enter still committed the edit.
+
+    So: the title (what this is), then the footer (how to leave, and any field
+    in it), then the rest of the header, and the body last — it is a list, and
+    a list is the one part that can be scrolled to instead.
+    """
+    everything = header + body + footer
+    if not everything or rows <= 0:
+        return []
+    head_count, body_count = len(header), len(body)
+
+    def need(index: int) -> int:
+        if index == 0 and head_count:
+            return 0
+        if index >= head_count + body_count:
+            return 1
+        if index < head_count:
+            return 2
+        return 3
+
+    kept: list[int] = []
+    used = 0
+    for index in sorted(range(len(everything)), key=lambda i: (need(i), i)):
+        cost = line_rows(everything[index], width)
+        if used + cost > rows:
+            continue
+        kept.append(index)
+        used += cost
+    if not kept:
+        return [truncate_to_rows(everything[0], rows, width)]
+    return [everything[index] for index in sorted(kept)]
+
+
 def fit(
     header: list[str],
     body: list[str],
@@ -316,7 +358,7 @@ def fit(
 
     chrome = height(header) + height(footer)
     if rows <= chrome:
-        return clip_to_rows(header + body + footer, max(1, rows), width)
+        return _sacrifice(header, body, footer, max(1, rows), width)
     budget = rows - chrome
     if height(body) <= budget:
         return header + body + footer

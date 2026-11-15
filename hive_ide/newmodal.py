@@ -514,7 +514,13 @@ class IdeNewModal:
             # fields and let the rest go back to being windowed: the fields are
             # what the keystrokes land in. The popup floors at six rows, so this
             # really happens.
-            if len(header) + len(pinned) + 2 > modal_io.rows_available():
+            # PHYSICAL rows, not line counts: fit measures in rows, and at a
+            # 20x8 adopt interior the wrapped decoration ate the space before
+            # the field, so this check passed and the filter was clipped anyway.
+            chrome_rows = modal_io.wrapped_rows(
+                header + pinned, modal_io.cols_available()
+            )
+            if chrome_rows + 2 > modal_io.rows_available():
                 keep = [
                     line
                     for line in pinned
@@ -525,6 +531,32 @@ class IdeNewModal:
                 ]
                 body[:0] = [line for line in pinned if line not in keep]
                 pinned = keep
+                # Shed the decoration this modal owns before the field goes:
+                # the blank spacer line, and the key hints down to the one that
+                # says how to LEAVE. At a 20-cell interior the adopt footer
+                # alone wraps to four rows and crowded the filter off a 6-row
+                # screen. This selects from existing copy; it invents none.
+                header[:] = [line for line in header if line.strip()]
+                escape = C._footer(stage).rsplit("·", 1)[-1].strip()
+                footer[:] = [f"  {C.DIM}{escape}{C.RST}{C.EL}"]
+                # Smaller still: keep the field this stage is ACTIVELY typing
+                # into. The adopt stage shows a name it is not editing; the
+                # name stage has only the one. The invariant is that the field
+                # taking the keystrokes is on screen — below this there is no
+                # honest way to draw the modal at all.
+                active = "Filter:" if stage == "adopt" else "Name:"
+                if (
+                    modal_io.wrapped_rows(header + pinned + footer, modal_io.cols_available())
+                    > modal_io.rows_available()
+                ):
+                    live = [
+                        line
+                        for line in pinned
+                        if active in modal_io.strip_ansi(line)
+                    ]
+                    if live:
+                        body[:0] = [line for line in pinned if line not in live]
+                        pinned = live
             header.extend(pinned)
         while body and body[0].strip() == "":
             body.pop(0)

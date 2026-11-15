@@ -589,3 +589,32 @@ def test_an_emoji_in_the_repo_name_does_not_misdirect_a_click(tmp_path):
                 f"interior {interior}: clicking row {screen_row} runs {label!r} "
                 f"but that row draws {occupies.get(screen_row)!r}"
             )
+
+
+def test_the_rename_field_survives_a_screen_too_small_for_the_chrome(tmp_path):
+    """Found by a sixth cross-model review.
+
+    When not even the pinned chrome fits, `fit` used to clip
+    `header + body + footer` front to back — so body rows displaced the FOOTER,
+    and the rename field lives in the footer. At a 74x6 interior two different
+    names drew identical frames with no rename field at all, while Enter still
+    committed the edit.
+    """
+    from hive_ide import modal_io
+
+    store, record = _session(tmp_path)
+
+    def frame(value: str, rows: int) -> list[str]:
+        lines, _ = IdeOptionsModal._lines(
+            record, store.workspace_key, 0,
+            rename_value=value, driver_too=False, rows=rows, width=74,
+        )
+        return lines
+
+    for rows in (4, 5, 6, 8, 12, 20):
+        alpha, beta = frame("ALPHA", rows), frame("BETA", rows)
+        assert modal_io.wrapped_rows(alpha, 74) <= rows, f"{rows}: overran"
+        assert any("new name" in modal_io.strip_ansi(l) for l in alpha), (
+            f"{rows} rows: the rename field was not drawn"
+        )
+        assert alpha != beta, f"{rows} rows: two names drew the same frame"
