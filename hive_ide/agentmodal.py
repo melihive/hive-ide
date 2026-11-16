@@ -21,6 +21,8 @@ from __future__ import annotations
 import subprocess
 import argparse
 import sys
+
+from . import modal_io
 from pathlib import Path
 
 from .newmodal import IdeNewModal
@@ -113,9 +115,21 @@ class IdeAgentModal:
     @staticmethod
     def _draw(window: str, repo: str, active: str, sel: int, handoff: bool) -> None:
         M = IdeNewModal
-        o = [M.CLR, f"  {M.BOLD}Change agent{M.RST}\n"]
-        # Subtitle: which session, and what it runs now — the context a bare list lacks.
-        o.append(f"  {M.DIM}{window} ({repo}) — running {active}{M.RST}{M.EL}\n\n")
+        # Header, list and footer kept apart so the list is what scrolls on a short
+        # screen. Nine rows fits most places and clips under ten — the same defect
+        # the options modal had, found by routing all four through one helper.
+        header = [
+            f"  {M.BOLD}Change agent{M.RST}",
+            # Subtitle: which session, and what it runs now — the context a bare list lacks.
+            f"  {M.DIM}{window} ({repo}) — running {active}{M.RST}{M.EL}",
+            "",
+        ]
+        o: list[str] = []
+        selected_line = 0
+        # Whether any row is actually picked. Enter switches to the picked
+        # agent, so that row must survive a screen too small for the chrome —
+        # but with nothing picked, row 0 is just the first agent, not a choice.
+        picked_any = False
         for i, (kind, label, note) in enumerate(M.TYPES):
             picked = i == sel
             here = kind == active
@@ -125,16 +139,22 @@ class IdeAgentModal:
             # "you are here", and the two must not be confused.
             tag = f"  {M.NAME}· current{M.RST}" if here else ""
             if picked:
-                o.append(f"  {M.SEL} {arrow} {label}  {note} {M.RST}{tag}{M.EL}\n")
+                selected_line = len(o)
+                picked_any = True
+                o.append(f"  {M.SEL} {arrow} {label}  {note} {M.RST}{tag}{M.EL}")
             else:
-                o.append(f"   {arrow} {label}  {M.DIM}{note}{M.RST}{tag}{M.EL}\n")
+                o.append(f"   {arrow} {label}  {M.DIM}{note}{M.RST}{tag}{M.EL}")
         quick = f"{M.SEL} quick switch {M.RST}" if not handoff else f"{M.DIM}quick switch{M.RST}"
         package = f"{M.SEL} handoff package {M.RST}" if handoff else f"{M.DIM}handoff package{M.RST}"
-        o.append(
-            f"\n  mode: {quick}  {package}"
-            f"\n  {M.DIM}↑/↓ or j/k · ←/→ handoff · 1-4 or Enter → switch · Esc → cancel{M.RST}{M.EL}"
+        footer = [
+            f"  mode: {quick}  {package}",
+            f"  {M.DIM}↑/↓ or j/k · ←/→ handoff · 1-4 or Enter → switch"
+            f" · Esc → cancel{M.RST}{M.EL}",
+        ]
+        lines = modal_io.fit(
+            header, o, footer, selected=selected_line, pin_selection=picked_any
         )
-        sys.stdout.write("".join(o))
+        sys.stdout.write(M.CLR + "\n".join(lines))
         sys.stdout.flush()
 
     @staticmethod

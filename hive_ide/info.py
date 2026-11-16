@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from .config import DEFAULT_KEYS, DEFAULT_SIDEBAR
+from . import modal_io
 from .modal_io import wait_any_key
 from .monitor import monitor_state
 from .sidebar_grid import SidebarGrid
@@ -254,7 +255,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         lines = _keys(snapshot)
-    print("\n  " + "\n  ".join(lines))
+    # These cards are READ-ONLY — any key closes them — so there is nothing to
+    # scroll with and a clipped card cannot be recovered by the reader. What can
+    # be done is refuse to lose the TOP, which is the title and the first rows,
+    # and say plainly that the rest was cut. Two rows are left for `wait_any_key`'s
+    # own prompt and the blank line before it, or the prompt pushes the title off
+    # exactly as the overflow used to.
+    body = [f"  {line}" for line in lines]
+    visible = modal_io.fit([], body, [], selected=0, rows=modal_io.rows_available(2))
+    print("\n" + "\n".join(visible))
     wait_any_key()
     return 0
 

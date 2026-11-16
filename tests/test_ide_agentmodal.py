@@ -199,3 +199,82 @@ def test_draw_shows_explicit_handoff_mode_selector(capsys):
     assert "mode:" in package
     assert "quick switch" in package
     assert "handoff package" in package
+
+
+# -- fitting a short screen --------------------------------------------------------
+
+import io
+import os
+from contextlib import redirect_stdout
+
+
+def _agent_lines(rows: int, sel: int = 0) -> list[str]:
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeAgentModal._draw("ALPHA", "repo", "claude", sel, False)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_agent_modal_keeps_its_title_and_footer_on_a_short_screen():
+    """Nine rows fits most places and clipped under ten, silently from the top."""
+    for rows in (20, 10, 8, 6):
+        lines = _agent_lines(rows)
+        assert len(lines) <= rows, f"{rows} rows: drew {len(lines)}"
+        assert "Change agent" in lines[0], f"{rows} rows: the title scrolled off"
+        assert any("Esc" in l for l in lines), f"{rows} rows: the footer was dropped"
+
+
+def test_the_agent_modal_keeps_the_selected_driver_visible():
+    for sel in range(len(IdeNewModal.TYPES)):
+        text = "\n".join(_agent_lines(8, sel))
+        label = IdeNewModal.TYPES[sel][1]
+        assert label in text, f"driver {sel} ({label}) was scrolled out of view"
+
+
+def _agent_frame(rows: int, width: int, sel: int, handoff: bool = False):
+    import io
+    import os
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeAgentModal._draw("ALPHA", "hive-ide", "claude", sel, handoff)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return tuple(l for l in text.split("\n") if l.strip())
+
+
+def test_which_agent_enter_will_switch_to_survives_a_small_screen():
+    """The fourth modal gets the same guarantee as the options list.
+
+    When the pinned chrome alone overflowed, the body was given up whole and
+    every agent drew the same frame while Enter still switched to the invisible
+    one. The picked row now outranks everything but the title and the footer.
+
+    GUARANTEED, no exceptions: every interior at least 6 rows tall AND at least
+    34 cells wide tells the four agents apart — swept, 0 violations.
+
+    LIMIT, stated not hidden: 47 sizes below that still draw some alike, all at
+    interiors 4-5 rows tall or 32 cells and narrower, where the footer wrapped
+    at that width fills the screen first. Same trade as the options modal.
+    """
+    choices = len(IdeNewModal.TYPES)
+    blind = []
+    for rows in range(4, 25):
+        for width in range(14, 84, 2):
+            frames = {_agent_frame(rows, width, sel) for sel in range(choices)}
+            if len(frames) != choices and rows >= 6 and width >= 34:
+                blind.append(f"{width}x{rows}: {len(frames)} of {choices}")
+    assert not blind, "\n  ".join(
+        ["the picked agent was indistinguishable:"] + blind[:12]
+    )

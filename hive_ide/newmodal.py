@@ -22,6 +22,8 @@ import json
 import select
 import subprocess
 import sys
+
+from . import modal_io
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -365,6 +367,30 @@ class IdeNewModal:
                 o.append(f"   {arrow} {label}{tail}{C.EL}\n")
 
     @staticmethod
+    def _field_tail(value: str, cells: int) -> str:
+        """Delegates to `modal_io.field_tail` — the options modal needs it too.
+
+        Kept as a name here because this stage's code reads better with it.
+        """
+        return modal_io.field_tail(value, cells)
+
+    @staticmethod
+    def _sel_summary(line: str) -> str:
+        """What is CHOSEN on a highlighted row, for naming it in the footer.
+
+        A row of checkboxes holds every option, so its plain text does not say
+        which one is picked — printing all of them in the footer was as
+        ambiguous as hiding the row. Take the `[x]` one, or the whole row when
+        it is a plain highlighted item rather than a checkbox set.
+        """
+        text = modal_io.strip_ansi(line)
+        if "[x]" in text:
+            chosen = text.split("[x]", 1)[1]
+            chosen = chosen.split("[")[0]
+            return " ".join(chosen.split()).strip(" ▸·")
+        return " ".join(text.split()).strip(" ▸·")
+
+    @staticmethod
     def _footer(stage: str) -> str:
         if stage == "name":
             return "Enter → next · Esc → cancel"
@@ -381,9 +407,24 @@ class IdeNewModal:
         C = IdeNewModal
         stage = st["stage"]
         o = [C.CLR, f"  {C.BOLD}New IDE session{C.RST}\n\n"]
+        # Which chunks of `o` ARE the input fields, recorded as they are
+        # written: (index into `o`, is this stage typing into it). Finding them
+        # afterwards by searching the rendered text for "Name:"/"Filter:" read
+        # the modal's own content as its structure — a conversation whose title
+        # or preview contains "Filter:" was taken for the filter field, so the
+        # list rows above it were pinned into the header and left the windowed
+        # body. Two different selections then drew the same frame while Enter
+        # adopted different conversations: 237 of the swept sizes with such a
+        # title, 0 with ordinary ones. An index cannot be spoofed by content.
+        fields: list[tuple[int, bool]] = []
         # Name — always on screen; caret only while editing it.
         caret = "▏" if stage == "name" else " "
-        o.append(f"  Name: {C.NAME}{st['name']}{caret}{C.RST}{C.EL}\n")
+        name_room = modal_io.cols_available() - len("  Name: ") - 1
+        o.append(
+            f"  Name: {C.NAME}{C._field_tail(st['name'], name_room)}"
+            f"{caret}{C.RST}{C.EL}\n"
+        )
+        fields.append((len(o) - 1, stage == "name"))
         if stage == "name":
             hint = (f"{C.ERR}{st['err']}" if st["err"]
                     else f"{C.DIM}CAPS · spaces · ≤{StateIO.NAME_MAX}") + C.RST
@@ -417,12 +458,31 @@ class IdeNewModal:
             if filtered and st["adopt_sel"] >= len(filtered):
                 st["adopt_sel"] = len(filtered) - 1
             o.append(f"  Adopt {typ} conversation{C.EL}\n")
-            o.append(f"  Filter: {C.NAME}{st.get('filter', '')}▏{C.RST}{C.EL}\n\n")
+            filter_room = modal_io.cols_available() - len("  Filter: ") - 1
+            o.append(
+                f"  Filter: {C.NAME}"
+                f"{C._field_tail(str(st.get('filter', '')), filter_room)}"
+                f"▏{C.RST}{C.EL}\n\n"
+            )
+            fields.append((len(o) - 1, True))
             if not filtered:
                 o.append(f"  {C.DIM}No matching conversations.{C.RST}{C.EL}\n")
             else:
-                start = min(max(0, st["adopt_sel"] - 9), max(0, len(filtered) - 10))
-                visible = filtered[start:start + 10]
+                # The window was a hardcoded 10 rows whatever the screen was — the
+                # same mistake as sizing a popup by percentage, one layer down: on
+                # a short screen ten adopt rows plus this stage's chrome overflows
+                # and the title goes. Ask the terminal instead. CHROME is this
+                # stage's own fixed lines (title, blank, name, hint, blank, the
+                # "Adopt …" label, the filter line, blank, the range line, blank,
+                # footer); one row is the floor, because a list of nothing is not
+                # a kinder failure than a clipped one.
+                CHROME = 11
+                room = max(1, modal_io.rows_available() - CHROME)
+                start = min(
+                    max(0, st["adopt_sel"] - (room - 1)),
+                    max(0, len(filtered) - room),
+                )
+                visible = filtered[start:start + room]
                 rows = []
                 for item in visible:
                     label = str(item.get("title") or item.get("label") or item.get("name") or "")
@@ -447,8 +507,189 @@ class IdeNewModal:
             o.append(f"  {C.ERR}✗ Couldn't create {st['name']}{C.RST}{C.EL}\n\n")
             for line in (st.get("error_msg") or "create failed").splitlines()[-8:]:
                 o.append(f"  {C.DIM}{line[:76]}{C.RST}{C.EL}\n")
-        o.append(f"\n  {C.DIM}{C._footer(stage)}{C.RST}{C.EL}")
-        sys.stdout.write("".join(o))
+        # A backstop for every stage: the title says what this modal IS and the
+        # footer how to leave it, so neither may be what scrolls away. The stages
+        # build one buffer with embedded newlines, so split to display lines and
+        # let `fit` window the middle.
+        # o[0] is the clear-screen escape and o[1] IS the title line, which is
+        # pinned as the header below — slicing from 1 printed it twice.
+        body = "".join(o[2:]).split("\n")
+        footer = [f"  {C.DIM}{C._footer(stage)}{C.RST}{C.EL}"]
+        header = [f"  {C.BOLD}New IDE session{C.RST}", ""]
+        dropped = 0
+        while body and body[0].strip() == "":
+            body.pop(0)
+            dropped += 1
+        # Any line the reader is TYPING INTO is pinned, not windowed. The window
+        # broke both: at a 20x6 interior the name field scrolled away, and at
+        # 80x8 the adopt filter did, so two different inputs drew identical
+        # frames while the keystrokes still landed. An input you cannot see is
+        # worse than a list you cannot see — the list has a marker saying so.
+        #
+        # Each field's body row is COUNTED, not recognised: the rows before a
+        # registered chunk are the newlines written ahead of it, less the blank
+        # leading rows just popped. Content plays no part, so no conversation
+        # title can pose as a field.
+        active_rows: set[int] = set()
+        inputs: list[int] = []
+        for chunk, live in fields:
+            row = "".join(o[2:chunk]).count("\n") - dropped
+            if 0 <= row < len(body):
+                inputs.append(row)
+                if live:
+                    active_rows.add(row)
+        inputs.sort()
+        if inputs:
+            # Everything up to and including the LAST input field moves to the
+            # header: a prefix, so the order is unchanged. Pinning only a
+            # leading run was not enough — the adopt filter sits after the
+            # workspace hint, so it stayed in the body and kept scrolling off.
+            cut = inputs[-1] + 1
+            field_rows = set(inputs)
+            # Carry each pinned line's ROLE with it; the fallbacks below used to
+            # re-derive it by searching the line's text, which is the same
+            # content-as-structure mistake one level down.
+            marked = [
+                (line, row in field_rows, row in active_rows)
+                for row, line in enumerate(body[:cut])
+                if line.strip()
+            ]
+            pinned = [line for line, _, _ in marked]
+            del body[:cut]
+            # On a screen too short even for that, keep the TITLE and the input
+            # fields and let the rest go back to being windowed: the fields are
+            # what the keystrokes land in. The popup floors at six rows, so this
+            # really happens.
+            # PHYSICAL rows, not line counts: fit measures in rows, and at a
+            # 20x8 adopt interior the wrapped decoration ate the space before
+            # the field, so this check passed and the filter was clipped anyway.
+            cols = modal_io.cols_available()
+            # MEASURE the footer. Assuming two rows was the same mistake one
+            # level up: the adopt footer is three rows at a 30-cell interior,
+            # so the guard did not fire and the field was clipped anyway.
+            chrome_rows = modal_io.wrapped_rows(header + pinned + footer, cols)
+            if chrome_rows > modal_io.rows_available():
+                keep = [line for line, is_field, _ in marked if is_field]
+                body[:0] = [
+                    line for line, is_field, _ in marked if not is_field
+                ]
+                pinned = keep
+                # Shed the decoration this modal owns before the field goes:
+                # the blank spacer line, and the key hints down to the one that
+                # says how to LEAVE. At a 20-cell interior the adopt footer
+                # alone wraps to four rows and crowded the filter off a 6-row
+                # screen. This selects from existing copy; it invents none.
+                header[:] = [line for line in header if line.strip()]
+                escape = C._footer(stage).rsplit("·", 1)[-1].strip()
+                footer[:] = [f"  {C.DIM}{escape}{C.RST}{C.EL}"]
+                # Smaller still: keep the field this stage is ACTIVELY typing
+                # into. The adopt stage shows a name it is not editing; the
+                # name stage has only the one. The invariant is that the field
+                # taking the keystrokes is on screen — below this there is no
+                # honest way to draw the modal at all.
+                if (
+                    modal_io.wrapped_rows(header + pinned + footer, cols)
+                    > modal_io.rows_available()
+                ):
+                    live = [line for line, _, is_live in marked if is_live]
+                    if live:
+                        body[:0] = [
+                            line
+                            for line, is_field, is_live in marked
+                            if is_field and not is_live
+                        ]
+                        pinned = live
+            header.extend(pinned)
+        while body and body[0].strip() == "":
+            body.pop(0)
+        while body and body[-1].strip() == "":
+            body.pop()
+        # Anchor the window on the row that is actually SELECTED, which is the
+        # one carrying the highlight. Anchoring on the last line (as this first
+        # did) keeps the trailing explanation on screen and can window away the
+        # driver the reader is about to press Enter on — the selection must be
+        # visible because the next keypress acts on it. Stages with no selection
+        # (creating, error) have no highlight, and for them the end IS the news.
+        selected_line = len(body) - 1
+        also_selected = None
+        # Whether Enter acts on a body row at all. The creating and error stages
+        # anchor on their last line because that is the news, but nothing there
+        # is selectable — so that row must NOT outrank the pinned name field
+        # when the screen is too small for both.
+        pin_selection = False
+        if C.SEL:
+            highlighted = [i for i, line in enumerate(body) if C.SEL in line]
+            if highlighted:
+                pin_selection = True
+                # A stage can have TWO independent selections — the driver list
+                # and the mode row — and Enter acts on both, so both have to be
+                # visible. With only the first kept, "New session" and "Adopt
+                # existing" drew identical screens at 10, 12 and 14 rows.
+                selected_line = highlighted[0]
+                if len(highlighted) > 1:
+                    also_selected = highlighted[-1]
+        # A pinned input field outranks the selection. The keystrokes are
+        # landing in the field right now, and a selection the window cuts is
+        # already named in the footer below — a cut field has no such notice.
+        # Letting the selected row win dropped the adopt filter at 40x4, 74x4,
+        # 40x5 and 40x8. The options modal has no conflict here: its rename
+        # field lives in the FOOTER, which outranks both.
+        if inputs:
+            pin_selection = False
+        lines = modal_io.fit(
+            header, body, footer, selected=selected_line,
+            also_selected=also_selected, pin_selection=pin_selection,
+        )
+        # EVERY selection that was cut gets named in the footer, not just the
+        # second one. The driver can be windowed out too — at narrow widths all
+        # four drivers drew identical frames while Enter created the selected
+        # one. Whatever decides what Enter does must be readable somewhere, and
+        # the footer is the one place that cannot be clipped.
+        cut_indexes = [
+            index
+            for index in (selected_line, also_selected)
+            if index is not None and 0 <= index < len(body)
+            and body[index] not in lines
+        ]
+        if cut_indexes:
+            summaries = [
+                summary
+                for summary in (C._sel_summary(body[i]) for i in cut_indexes)
+                if summary
+            ]
+            cut = " · ".join(dict.fromkeys(summaries))
+            if cut:
+                # Build on the footer AS IT STANDS. Re-reading `_footer(stage)`
+                # put the full key hints back over a footer the shedding had
+                # just compacted, which ate the body budget — at a 38x6
+                # interior all four drivers then drew identical frames.
+                standing = (
+                    modal_io.strip_ansi(footer[0]).strip()
+                    if footer
+                    else C._footer(stage)
+                )
+                footer = [f"  {C.DIM}{cut} · {standing}{C.RST}{C.EL}"]
+                # The summary is only useful if the footer carrying it SURVIVES.
+                # At a 14-cell interior the title alone takes two rows, and the
+                # full line needed three, so it was dropped and every driver
+                # drew the same frame again. Trim to the rows actually left —
+                # from the right, because the summary leads.
+                cols_now = modal_io.cols_available()
+                spare = modal_io.rows_available() - modal_io.wrapped_rows(
+                    header, cols_now
+                )
+                if spare >= 1 and modal_io.wrapped_rows(footer, cols_now) > spare:
+                    footer = [
+                        f"  {C.DIM}"
+                        f"{modal_io.truncate_to_rows(f'{cut} · {standing}', spare, cols_now - 2)}"
+                        f"{C.RST}{C.EL}"
+                    ]
+                lines = modal_io.fit(
+                    header, body, footer, selected=selected_line,
+                    also_selected=also_selected, pin_selection=pin_selection,
+                )
+        
+        sys.stdout.write(C.CLR + "\n".join(lines))
         sys.stdout.flush()
 
     @staticmethod

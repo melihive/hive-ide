@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unicodedata
+
+from . import modal_io
 from dataclasses import dataclass
 import re
 
@@ -26,27 +28,14 @@ class SidebarGrid:
 
     @staticmethod
     def cell_width(text: str) -> int:
-        text = SidebarGrid.ANSI_RE.sub("", text)
-        width = 0
-        for index, char in enumerate(text):
-            if unicodedata.combining(char) or unicodedata.category(char) in {
-                "Cf",
-                "Mn",
-                "Me",
-            }:
-                continue
-            if unicodedata.east_asian_width(char) in {"F", "W"}:
-                width += 2
-                continue
-            # East_Asian_Width alone under-counts emoji presentation: U+1F441 EYE
-            # is Neutral, so it measured 1 while every terminal draws it 2 cells
-            # wide, padding its column one cell past every other icon. A trailing
-            # U+FE0F is the explicit request for emoji presentation, so honour it.
-            if text[index + 1 : index + 2] == SidebarGrid.VARIATION_SELECTOR_16:
-                width += 2
-                continue
-            width += 1
-        return width
+        """Cells `text` occupies on a terminal.
+
+        The implementation moved to `modal_io.printable_width` so the modals and
+        the sidebar cannot disagree: the modals grew a second, worse copy that
+        measured `U+1F441 U+FE0F` as one cell, which mis-sized a popup and sent
+        a click to the wrong action. One copy, in the lower-level module.
+        """
+        return modal_io.printable_width(text)
 
     @classmethod
     def for_view(

@@ -186,3 +186,651 @@ def test_adopt_row_note_uses_relative_time_and_preview_only(monkeypatch):
     note = " · ".join(part for part in (when, preview) if part)
 
     assert note == "2h · Latest Hive Events allowlist work"
+
+
+# -- the adopt list sizes itself to the screen -------------------------------------
+#
+# It windowed a hardcoded 10 rows whatever the terminal was — the same mistake as
+# sizing a popup by percentage, one layer down: on a short screen ten adopt rows
+# plus the stage's chrome overflows, and the overflow leaves from the top.
+
+import io
+import os
+from contextlib import redirect_stdout
+
+from hive_ide import modal_io
+
+
+def _draw_adopt(rows: int, conversations: int, sel: int = 0) -> list[str]:
+    state = {
+        "stage": "adopt",
+        "name": "ALPHA",
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": sel,
+        "filter": "",
+        # `adopt_items`, which is what `_filtered_conversations` reads — my first
+        # version said "conversations" and silently rendered an empty list, so
+        # both screen sizes drew the same thing and the test looked like a fix
+        # that had not worked.
+        "adopt_items": [
+            {"title": f"conversation {i}", "updated_at": None, "preview": ""}
+            for i in range(conversations)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_adopt_list_shrinks_with_the_screen():
+    """Fewer rows on a short screen, not the same ten and an overflow."""
+    tall = _draw_adopt(40, conversations=30)
+    short = _draw_adopt(14, conversations=30)
+
+    assert len(short) <= 14, f"14 rows: drew {len(short)}"
+    assert len(short) < len(tall), (
+        "the adopt list drew the same height on a 14-row screen as on a 40-row one"
+    )
+
+
+def test_the_new_session_modal_keeps_its_title_and_footer():
+    for rows in (40, 14, 10, 7):
+        lines = _draw_adopt(rows, conversations=30)
+        # WITHIN the screen, not merely titled correctly. Without this the fit
+        # backstop could be removed entirely and this test stayed green, because
+        # the screen-sized adopt window kept the output small on its own — the two
+        # mechanisms masked each other and a mutation run found it.
+        assert len(lines) <= rows, f"{rows} rows: drew {len(lines)} lines"
+        assert "New IDE session" in lines[0], f"{rows} rows: the title scrolled off"
+        assert any("Esc" in l or "working" in l for l in lines), (
+            f"{rows} rows: the footer was dropped"
+        )
+
+
+def test_the_adopt_window_reports_a_range_that_fits_the_screen():
+    """The list's own "N-M of T" line is what proves the WINDOW sized itself.
+
+    Asserting only that the modal fits cannot distinguish a screen-sized window
+    from a hardcoded one that the backstop then clips — both "fit". The range line
+    is the window's own account of itself, so a hardcoded ten rows shows up as
+    "1-10 of 30" on a fourteen-row screen where only a few rows can exist.
+    """
+    import re as _re
+
+    for rows, ceiling in ((40, 30), (14, 8), (10, 6)):
+        lines = _draw_adopt(rows, conversations=30)
+        ranges = [
+            _re.search(r"(\d+)-(\d+) of (\d+)", l)
+            for l in lines
+            if _re.search(r"\d+-\d+ of \d+", l)
+        ]
+        assert ranges, f"{rows} rows: no range line, so the window cannot be checked"
+        first, last, total = (int(g) for g in ranges[0].groups())
+        assert total == 30
+        assert last - first + 1 <= ceiling, (
+            f"{rows} rows: window reported {first}-{last} of {total}, "
+            f"more than the {ceiling} rows that can exist here"
+        )
+
+
+def test_the_adopt_window_never_collapses_to_nothing():
+    """One row is the floor: an empty list is not a kinder failure than a cut one."""
+    assert modal_io.rows_available(200) >= 1
+    lines = _draw_adopt(4, conversations=30)
+    assert lines, "a very short screen drew nothing at all"
+
+
+def _draw_type(rows: int, ty: int) -> list[str]:
+    """The `type` stage at `rows` rows with driver index `ty` selected."""
+    state = {
+        "stage": "type",
+        "name": "ALPHA",
+        "ty": ty,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": "",
+        "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_selected_driver_is_on_screen_at_every_selection():
+    """Found by a cross-model review of the first fit pass.
+
+    The window was anchored on the LAST body line, so on a short screen the
+    trailing explanation stayed and the selected driver could be scrolled out of
+    view — while Enter still created that driver. A selection the reader cannot
+    see makes the next keypress a guess.
+    """
+    missing = []
+    for rows in (40, 14, 12, 10, 8):
+        for ty, (_id, label, _note) in enumerate(IdeNewModal.TYPES):
+            drawn = _draw_type(rows, ty)
+            assert len(drawn) <= rows, f"{rows} rows: drew {len(drawn)}"
+            if not any(label in line for line in drawn):
+                missing.append(f"rows={rows} selected={label!r}")
+    assert not missing, "the selected driver was off screen:\n  " + "\n  ".join(
+        missing
+    )
+
+
+def test_the_chosen_mode_is_distinguishable_at_every_height():
+    """Found by a second cross-model review.
+
+    `New session` and `Adopt existing` are a separate selection from the driver,
+    and Enter does different things for each — yet at 10, 12 and 14 rows the two
+    drew IDENTICAL screens, because the window was anchored on the driver and the
+    mode row was clipped away. Where both fit, both are shown; where they cannot,
+    the pinned footer names the one that was cut.
+    """
+    same = []
+    for rows in (6, 8, 10, 12, 14, 20, 40):
+        new = _draw_type_mode(rows, mode_sel=0)
+        adopt = _draw_type_mode(rows, mode_sel=1)
+        assert len(new) <= rows and len(adopt) <= rows
+        if new == adopt:
+            same.append(rows)
+    assert not same, (
+        "two different modes drew the same screen at heights: "
+        + ", ".join(str(r) for r in same)
+    )
+
+
+def _draw_type_mode(rows: int, mode_sel: int) -> list[str]:
+    state = {
+        "stage": "type",
+        "name": "ALPHA",
+        "ty": 0,
+        "mode_sel": mode_sel,
+        "adopt_sel": 0,
+        "filter": "",
+        "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_name_being_typed_is_never_windowed_away():
+    """Found by a fourth cross-model review.
+
+    The code that writes this line says "Name — always on screen", and the
+    window broke it: at a short interior the field being typed into scrolled
+    off, so two different names drew identical frames while the keystrokes
+    still landed. The name is header now, not body, so it cannot be clipped.
+    """
+    from hive_ide import modal_io
+
+    for rows in (4, 6, 8, 12, 20):
+        alpha = _draw_name(rows, "ALPHA")
+        beta = _draw_name(rows, "BETA")
+        assert len(alpha) <= rows, f"{rows} rows: drew {len(alpha)}"
+        assert any("ALPHA" in modal_io.strip_ansi(l) for l in alpha), (
+            f"{rows} rows: the name being typed was not on screen: {alpha}"
+        )
+        assert alpha != beta, (
+            f"{rows} rows: two different names drew the same frame"
+        )
+
+
+def _draw_name(rows: int, name: str) -> list[str]:
+    state = {
+        "stage": "name",
+        "name": name,
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": "",
+        "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def _draw_adopt_filter(rows: int, filter_text: str, count: int = 12) -> list[str]:
+    state = {
+        "stage": "adopt",
+        "name": "ALPHA",
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": filter_text,
+        "adopt_items": [
+            {"title": f"al conversation {i}", "updated_at": None, "preview": "x" * 40}
+            for i in range(count)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_adopt_filter_being_typed_is_never_windowed_away():
+    """Found by a fifth cross-model review.
+
+    Pinning only the name was not enough: the adopt filter sits after the
+    workspace hint, so it stayed in the windowed body and scrolled off. At 80x8
+    the filters `a` and `al` drew identical frames — with the same matching
+    conversations — while the keystrokes still landed. Any field the reader is
+    typing into is pinned; a clipped LIST at least carries a marker saying so,
+    a clipped input carries nothing.
+    """
+    from hive_ide import modal_io
+
+    for rows in (4, 5, 6, 8, 10, 16, 24):
+        narrow = _draw_adopt_filter(rows, "a")
+        wider = _draw_adopt_filter(rows, "al")
+        assert len(narrow) <= rows, f"{rows} rows: drew {len(narrow)}"
+        assert any("Filter:" in modal_io.strip_ansi(l) for l in narrow), (
+            f"{rows} rows: the filter being typed was not on screen: {narrow}"
+        )
+        assert narrow != wider, (
+            f"{rows} rows: two different filters drew the same frame"
+        )
+
+
+def _frame(rows: int, width: int, stage: str, **kw) -> list[str]:
+    state = {
+        "stage": stage,
+        "name": kw.get("name", "ALPHA"),
+        "err": "",
+        "ty": 0,
+        "mode_sel": 0,
+        "adopt_sel": 0,
+        "filter": kw.get("filter", ""),
+        "adopt_items": [
+            {"title": f"conversation {i}", "updated_at": None, "preview": "y" * 30}
+            for i in range(8)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+HOSTILE_VALUES = [
+    "",
+    "a",
+    "al",
+    "q" * 10,
+    "q" * 30,
+    "q" * 31,
+    "w" * 80,
+    "\u65e5" * 20,              # CJK, double-width
+    "x\U0001f441\ufe0f" * 8,     # emoji whose width comes from the NEXT char
+    "\u2139\ufe0f" * 12,         # emoji with a letter-category base
+    "e\u0301" * 25,             # combining marks
+    "\u200b" * 10 + "tail",     # zero-width spaces
+]
+
+
+def test_the_active_field_survives_every_width_height_and_value():
+    """A swept invariant, because my sampled version of it was FALSE.
+
+    I checked widths 20/40/74 with short values, then claimed the field was
+    always visible. A seventh review pass found 30x8 (the footer is three rows
+    there, and a hardcoded `+ 2` skipped the decoration shedding) and 20x4 with
+    a 30-character filter (the value itself took three rows and was discarded
+    whole). My own sweep then found seven more combinations at widths I had
+    never tried. So this sweeps instead of sampling, with values chosen to be
+    hostile about width.
+
+    The filter has no length limit, so a field now shows the TAIL of its value
+    on one row, the way an input field behaves.
+    """
+    from hive_ide import modal_io
+
+    bad = []
+    # EVERY height and every other width. The first version of this stepped
+    # rows by 3 and widths by 6, which skipped 20x8 and 30x8 — the two sizes
+    # the review had just named. A grid that steps over the failing case is a
+    # sample wearing a sweep's clothes.
+    for width in range(14, 84, 2):
+        for rows in range(4, 25):
+            for value in HOSTILE_VALUES:
+                first = _frame(rows, width, "adopt", filter=value)
+                second = _frame(rows, width, "adopt", filter=value + "z")
+                used = modal_io.wrapped_rows(first, width)
+                if used > rows:
+                    bad.append(f"adopt {width}x{rows} len={len(value)}: {used} rows")
+                if not any("Filter:" in modal_io.strip_ansi(l) for l in first):
+                    bad.append(f"adopt {width}x{rows} len={len(value)}: no field")
+                if first == second:
+                    bad.append(f"adopt {width}x{rows} len={len(value)}: identical")
+            for name in ("A", "ALPHA", "N" * 24):
+                first = _frame(rows, width, "name", name=name)
+                second = _frame(rows, width, "name", name=name + "Z")
+                if modal_io.wrapped_rows(first, width) > rows:
+                    bad.append(f"name {width}x{rows}: overran")
+                if not any("Name:" in modal_io.strip_ansi(l) for l in first):
+                    bad.append(f"name {width}x{rows}: no field")
+                if first == second:
+                    bad.append(f"name {width}x{rows} len={len(name)}: identical")
+    assert not bad, "\n  ".join(["the active field was lost:"] + bad[:20])
+
+
+def test_a_trimmed_field_value_keeps_its_end_and_fits_its_row():
+    """The tail is what matters — the caret and what was just typed are there."""
+    from hive_ide import modal_io
+
+    assert IdeNewModal._field_tail("short", 20) == "short"
+    for value in HOSTILE_VALUES:
+        for cells in range(1, 12):
+            tail = IdeNewModal._field_tail(value, cells)
+            assert modal_io.printable_width(tail) <= cells, (
+                f"{value!r} trimmed to {cells} cells gave {tail!r} "
+                f"({modal_io.printable_width(tail)} cells)"
+            )
+            if modal_io.printable_width(value) > cells and value:
+                assert tail.startswith("\u2026"), tail
+            # Never orphan a zero-width mark onto the ellipsis: it attaches and
+            # renders the ellipsis itself two cells wide. The measured check
+            # above keeps that from overflowing, so this is about the OUTPUT
+            # being right rather than merely fitting. Only meaningful when the
+            # value WAS trimmed — an untrimmed value has no ellipsis, and my
+            # first version of this check read its second character instead.
+            rest = tail[1:] if tail.startswith("\u2026") else ""
+            if rest:
+                assert modal_io.cell_costs(rest)[0] != 0, (
+                    f"{value!r} at {cells} cells gave {tail!r}, whose first "
+                    "character after the ellipsis takes no cell of its own"
+                )
+
+
+def test_the_active_field_is_on_screen_at_every_size_the_popup_can_make():
+    """The invariant: the field taking the keystrokes is always visible.
+
+    Found by a sixth cross-model review in its wrapped form — the decoration
+    check counted logical lines while fitting counts physical rows, so at a
+    20x8 adopt interior the wrapped decoration ate the space and the filter was
+    clipped anyway. Four rows is the smallest interior the popup can produce
+    (it floors at six rows, less a two-row border), so that is the floor here.
+    """
+    from hive_ide import modal_io
+
+    missing = []
+    for rows in (4, 5, 6, 8, 10, 16, 24):
+        for width in (20, 40, 74):
+            for stage, field, edits in (
+                ("adopt", "Filter:", ("conversatio", "conversation")),
+                ("name", "Name:", ("ALPHA", "BETA")),
+            ):
+                key = "filter" if stage == "adopt" else "name"
+                first = _frame(rows, width, stage, **{key: edits[0]})
+                second = _frame(rows, width, stage, **{key: edits[1]})
+                used = modal_io.wrapped_rows(first, width)
+                if used > rows:
+                    missing.append(f"{stage} {width}x{rows}: used {used} rows")
+                if not any(field in modal_io.strip_ansi(l) for l in first):
+                    missing.append(f"{stage} {width}x{rows}: {field} not drawn")
+                if first == second:
+                    missing.append(
+                        f"{stage} {width}x{rows}: two edits drew one frame"
+                    )
+    assert not missing, "\n  ".join(["the active field was lost:"] + missing)
+
+
+def _draw_type_at(rows: int, width: int, ty: int, mode_sel: int = 0) -> list[str]:
+    state = {
+        "stage": "type", "name": "ALPHA", "err": "", "ty": ty,
+        "mode_sel": mode_sel, "adopt_sel": 0, "filter": "", "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_the_type_stage_never_overruns_at_any_size():
+    """The defect class this whole change set exists for: drawing past the
+    bottom scrolls the title away. This holds at EVERY size, with no floor."""
+    from hive_ide import modal_io
+
+    over = []
+    for width in range(14, 84, 2):
+        for rows in range(4, 25):
+            for ty in range(4):
+                drawn = _draw_type_at(rows, width, ty)
+                used = modal_io.wrapped_rows(drawn, width)
+                if used > rows:
+                    over.append(f"{width}x{rows} driver {ty}: {used} rows")
+    assert not over, "\n  ".join(["the type stage overran:"] + over[:12])
+
+
+def test_the_selected_driver_is_distinguishable_from_height_eight():
+    """Which driver Enter will create must be readable somewhere.
+
+    Where the driver row itself is windowed out, the footer names it. That
+    holds for every width from 14 at an interior of EIGHT rows or more. Below
+    eight the title, the footer and four driver rows cannot all be represented,
+    and some selections draw alike — a known limitation stated here rather than
+    hidden, and the layout is still correct (see the no-overrun test above).
+    An interior under eight rows means a popup under ten, i.e. a client
+    terminal under ten rows tall.
+    """
+    same = []
+    for width in range(14, 84, 2):
+        for rows in range(8, 25):
+            frames = {tuple(_draw_type_at(rows, width, ty)) for ty in range(4)}
+            if len(frames) != 4:
+                same.append(f"{width}x{rows}: {len(frames)} distinct of 4")
+            if _draw_type_at(rows, width, 0, 0) == _draw_type_at(rows, width, 0, 1):
+                same.append(f"{width}x{rows}: both modes drew alike")
+    assert not same, "\n  ".join(["selections were indistinguishable:"] + same[:12])
+
+
+def _plain(rows: int, width: int, stage: str, **kw) -> list[str]:
+    from hive_ide import modal_io
+
+    if stage == "adopt":
+        drawn = _draw_adopt_filter_at(rows, width, kw.get("filter", "a"))
+    else:
+        drawn = _draw_name_at(rows, width, kw.get("name", "A"))
+    return [modal_io.strip_ansi(line) for line in drawn]
+
+
+def _draw_adopt_filter_at(rows: int, width: int, filter_text: str) -> list[str]:
+    state = {
+        "stage": "adopt", "name": "ALPHA", "err": "", "ty": 0, "mode_sel": 0,
+        "adopt_sel": 0, "filter": filter_text,
+        "adopt_items": [
+            {"title": f"conversation {i}", "updated_at": None, "preview": "y" * 30}
+            for i in range(8)
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def _draw_name_at(rows: int, width: int, name: str) -> list[str]:
+    state = {
+        "stage": "name", "name": name, "err": "", "ty": 0, "mode_sel": 0,
+        "adopt_sel": 0, "filter": "", "adopt_items": [],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_what_a_tiny_modal_gives_up_and_in_which_order():
+    """Pinned by EXAMPLE, because no universal property covers these.
+
+    At the smallest interiors something must be sacrificed, and WHICH thing is
+    a judgement the code makes deliberately. A mutation harness reported all
+    three of these decisions as unobservable — true, because the sweeps assert
+    that the active field survives and nothing overruns, and every variant
+    satisfied both. So they are pinned as the concrete frames they produce.
+
+    Not claimed: that the escape hint always survives. It does not — at some
+    widths it is gone up to a height of 17 — and widening the layout further to
+    chase that was judged worse than stating it.
+    """
+    # Measuring the footer, rather than assuming two rows, is what leaves room
+    # for "Esc → cancel" here instead of a truncated hint line.
+    name_small = _plain(6, 14, "name", name="A")
+    assert any("Esc" in line for line in name_small), name_small
+    assert any("Name: A" in line for line in name_small), name_small
+
+    # At four rows the ACTIVE field wins: the adopt stage is filtering, so the
+    # filter stays and the name it is not editing goes.
+    adopt_tiny = _plain(4, 14, "adopt", filter="a")
+    assert any("Filter: a" in line for line in adopt_tiny), adopt_tiny
+    assert not any("Name: ALPHA" in line for line in adopt_tiny), adopt_tiny
+
+    # One row more and the compacted key hints buy back the name line.
+    adopt_small = _plain(5, 14, "adopt", filter="a")
+    assert any("Filter: a" in line for line in adopt_small), adopt_small
+    assert any("Name: ALPHA" in line for line in adopt_small), adopt_small
+
+
+def _draw_adopt_at(
+    rows: int, width: int, sel: int, titles: list[str]
+) -> list[str]:
+    state = {
+        "stage": "adopt", "name": "ALPHA", "err": "", "ty": 0, "mode_sel": 0,
+        "adopt_sel": sel, "filter": "",
+        "adopt_items": [
+            {"title": title, "updated_at": None, "preview": "p" * 96}
+            for title in titles
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_a_conversation_titled_like_a_field_is_not_mistaken_for_one():
+    """A conversation's own text must never be read as the modal's structure.
+
+    The input fields used to be located by searching every rendered line for
+    "Name:" or "Filter:". A conversation titled "Filter: revenue by cohort" was
+    therefore taken for the filter field, so every list row above it was pinned
+    into the header and left the selection-aware window: two different
+    selections drew the SAME frame while Enter adopted different conversations.
+    Swept here at every height 6-24 and every other width 20-82, that was 237
+    sizes with such titles against 0 with ordinary ones.
+
+    Fields are now registered by index as they are written, so no content can
+    pose as one. Both title sets must keep every selection distinguishable.
+    """
+    poisoned = [
+        f"Filter: deep dive number {i} into the pipeline" for i in range(8)
+    ]
+    ordinary = [f"conversation {i}" for i in range(8)]
+    bad = []
+    for titles, label in ((poisoned, "field-like"), (ordinary, "ordinary")):
+        for rows in range(6, 25):
+            for width in range(20, 83, 2):
+                seen: dict[tuple[str, ...], list[int]] = {}
+                for sel in range(len(titles)):
+                    key = tuple(_draw_adopt_at(rows, width, sel, titles))
+                    seen.setdefault(key, []).append(sel)
+                alike = [v for v in seen.values() if len(v) > 1]
+                if alike:
+                    bad.append(f"{label} {width}x{rows}: {alike[:3]}")
+    assert not bad, "\n  ".join(
+        ["selections drew alike:"] + bad[:12] + [f"({len(bad)} sizes)"]
+    )
+
+
+def test_the_name_field_stays_above_the_list_it_labels():
+    """Pinning must not reorder the modal.
+
+    The content search could match a LIST row, making the pinned prefix run
+    past the real fields and surfacing conversation rows above the name line —
+    the frame literally read Filter-field, three conversations, then "Name:".
+    """
+    titles = [f"Filter: deep dive number {i}" for i in range(8)]
+    drawn = [
+        modal_io_strip(line) for line in _draw_adopt_at(38, 18, 4, titles)
+    ]
+    name_at = next(i for i, l in enumerate(drawn) if l.strip().startswith("Name:"))
+    filter_at = next(
+        i for i, l in enumerate(drawn) if l.strip().startswith("Filter:")
+    )
+    rows_at = [i for i, l in enumerate(drawn) if "deep dive" in l]
+    assert name_at < filter_at, drawn
+    assert all(name_at < r and filter_at < r for r in rows_at), drawn
+
+
+def modal_io_strip(line: str) -> str:
+    from hive_ide import modal_io
+
+    return modal_io.strip_ansi(line)

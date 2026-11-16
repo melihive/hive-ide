@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import modal_io
+
 from .agentmodal import IdeAgentModal
 from .newmodal import IdeNewModal
 from .python_cmd import PythonCommand
@@ -28,7 +30,6 @@ class IdeOptionsModal:
     """One popup for common session maintenance actions."""
 
     MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([mM])")
-    ACTION_ROW = 4
 
     GROUPS = [
         (
@@ -256,46 +257,144 @@ class IdeOptionsModal:
         return (found[0], found[2]["id"], found[2]) if found else None
 
     @staticmethod
+    def _lines(
+        record: dict,
+        repo: str,
+        sel: int,
+        rename_value: str = "",
+        driver_too: bool | None = None,
+        rows: int | None = None,
+        width: int | None = None,
+    ) -> tuple[list[str], dict[int, int]]:
+        """The modal's lines and {screen row: action index}, without printing.
+
+        Separated from `_draw` so the popup can MEASURE what will be drawn
+        instead of re-deriving a row count beside it. That duplicate arithmetic
+        agreed with itself while missing that the footer is wider than the popup
+        and wraps onto a second row.
+        """
+        M = IdeNewModal
+        if width is None:
+            width = modal_io.cols_available()
+        driver = (record.get("driver") or {}).get("id") or "term"
+        actions = IdeOptionsModal._actions(record)
+        groups = IdeOptionsModal._grouped_actions(record)
+        # Built as LINES, then fitted to the rows this terminal actually has.
+        # Writing straight out is what lost the title on a short screen: the
+        # content is 21-22 rows and the popup gets a percentage of the client, so
+        # on a handheld the overflow scrolled off the top. Header and footer are
+        # pinned; the group/item list is what scrolls.
+        header = [
+            f"  {M.BOLD}Session options{M.RST}",
+            f"  {M.NAME}{record.get('name') or '?'}{M.RST}"
+            f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}",
+            "",
+        ]
+        body: list[str] = []
+        selected_line = 0
+        offset = 0
+        # Which action each body line belongs to, by the identity of the line
+        # object. `fit` returns the very strings handed to it, so after clipping
+        # the surviving lines can be mapped back without re-deriving anything.
+        action_of_line: dict[int, int] = {}
+        for group, group_actions in groups:
+            body.append(f"  {M.DIM}{group}{M.RST}{M.EL}")
+            for action, label, note in group_actions:
+                i = actions.index((action, label, note), offset)
+                arrow = "▸" if i == sel else " "
+                if i == sel:
+                    selected_line = len(body)
+                    line = f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}"
+                else:
+                    line = f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}"
+                body.append(line)
+                action_of_line[id(line)] = i
+            offset += len(group_actions)
+        footer: list[str] = []
+        if rename_value:
+            # Trimmed to its row like the new-session fields: a valid 24-char
+            # name wraps to three rows at a 16-cell interior and fitting then
+            # drops it whole, so two different edits draw the same frame while
+            # Enter still returns the edited value.
+            room = width - len("  new name: ")
+            footer.append(
+                f"  {M.DIM}new name:{M.RST} "
+                f"{M.NAME}{modal_io.field_tail(rename_value, room)}{M.RST}{M.EL}"
+            )
+            if driver_too is not None:
+                box = "[x]" if driver_too else "[ ]"
+                footer.append(
+                    f"  {box} also rename {driver} {M.DIM}(Tab toggles){M.RST}{M.EL}"
+                )
+        footer.append(
+            f"  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
+            f" · rename types after selecting rename{M.RST}{M.EL}"
+        )
+        lines = modal_io.fit(
+            header, body, footer, selected=selected_line, rows=rows, width=width,
+            pin_selection=True,
+        )
+        # The click map MUST come from what was drawn. Deriving it from the full
+        # action list independently was a real defect: once the list is windowed,
+        # a screen row holds a different action than the arithmetic believed, so
+        # a click ran the wrong one — and a mouse click goes straight to Enter,
+        # with `archive` among the actions it could land on.
+        # PHYSICAL screen rows, not line numbers: a line wider than the popup
+        # wraps onto a second row and shifts everything below it down, so at a
+        # narrow width the map pointed a click at a different action — measured
+        # at an interior of 38 cells, eleven of them were wrong, and a click
+        # runs its action immediately. A wrapped action owns both of its rows.
+        mouse_rows: dict[int, int] = {}
+        screen_row = 1
+        for line in lines:
+            cost = modal_io.line_rows(line, width)
+            index = action_of_line.get(id(line))
+            if index is None:
+                # A screen too short for its own chrome gets ONE truncated line,
+                # which is a new string and so has no identity to match. It can
+                # still be a visible, selected action — leaving it unmapped made
+                # it look clickable while clicking did nothing. Match it back by
+                # prefix, and only when exactly one action can own it.
+                index = IdeOptionsModal._action_for_truncated(
+                    line, body, action_of_line
+                )
+            if index is not None:
+                for offset in range(cost):
+                    mouse_rows[screen_row + offset] = index
+            screen_row += cost
+        return lines, mouse_rows
+
+    @staticmethod
+    def _action_for_truncated(
+        drawn: str, body: list[str], action_of_line: dict[int, int]
+    ) -> int | None:
+        """The action a TRUNCATED line came from, or None if it is ambiguous."""
+        plain = modal_io.strip_ansi(drawn)
+        if not plain.strip():
+            return None
+        matches = {
+            action_of_line[id(candidate)]
+            for candidate in body
+            if id(candidate) in action_of_line
+            and modal_io.strip_ansi(candidate).startswith(plain)
+        }
+        return matches.pop() if len(matches) == 1 else None
+
+    @staticmethod
     def _draw(
         record: dict,
         repo: str,
         sel: int,
         rename_value: str = "",
         driver_too: bool | None = None,
-    ) -> None:
-        M = IdeNewModal
-        driver = (record.get("driver") or {}).get("id") or "term"
-        actions = IdeOptionsModal._actions(record)
-        groups = IdeOptionsModal._grouped_actions(record)
-        o = [M.CLR, f"  {M.BOLD}Session options{M.RST}\n"]
-        o.append(
-            f"  {M.NAME}{record.get('name') or '?'}{M.RST}"
-            f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}\n\n"
+    ) -> dict[int, int]:
+        """Draw the modal; return {screen row: action index} for the mouse."""
+        lines, mouse_rows = IdeOptionsModal._lines(
+            record, repo, sel, rename_value, driver_too
         )
-        offset = 0
-        for group, group_actions in groups:
-            o.append(f"  {M.DIM}{group}{M.RST}{M.EL}\n")
-            for action, label, note in group_actions:
-                i = actions.index((action, label, note), offset)
-                arrow = "▸" if i == sel else " "
-                if i == sel:
-                    o.append(f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}\n")
-                else:
-                    o.append(f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}\n")
-            offset += len(group_actions)
-        if rename_value:
-            o.append(f"\n  {M.DIM}new name:{M.RST} {M.NAME}{rename_value}{M.RST}{M.EL}")
-            if driver_too is not None:
-                box = "[x]" if driver_too else "[ ]"
-                o.append(
-                    f"\n  {box} also rename {driver} {M.DIM}(Tab toggles){M.RST}{M.EL}"
-                )
-        o.append(
-            f"\n  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
-            f" · rename types after selecting rename{M.RST}{M.EL}"
-        )
-        sys.stdout.write("".join(o))
+        sys.stdout.write(IdeNewModal.CLR + "\n".join(lines))
         sys.stdout.flush()
+        return mouse_rows
 
     @staticmethod
     def _grouped_actions(record: dict) -> list[tuple[str, list[tuple[str, str, str]]]]:
@@ -335,19 +434,6 @@ class IdeOptionsModal:
         plan = record.get("plan")
         path = plan.get("path") if isinstance(plan, dict) else plan
         return path if isinstance(path, str) and path else None
-
-    @staticmethod
-    def _action_rows(record: dict) -> dict[int, int]:
-        row = IdeOptionsModal.ACTION_ROW
-        index = 0
-        rows: dict[int, int] = {}
-        for _group, actions in IdeOptionsModal._grouped_actions(record):
-            row += 1
-            for _action in actions:
-                rows[row] = index
-                row += 1
-                index += 1
-        return rows
 
     @staticmethod
     def _mouse_selection(data: bytes, rows: dict[int, int]) -> int | None:
@@ -470,13 +556,11 @@ class IdeOptionsModal:
         sel = 0
         try:
             while True:
-                IdeOptionsModal._draw(record, repo, sel)
+                mouse_rows = IdeOptionsModal._draw(record, repo, sel)
                 actions = IdeOptionsModal._actions(record)
                 if sel >= len(actions):
                     sel = len(actions) - 1
-                key = IdeOptionsModal._getkey(
-                    fd, mouse_rows=IdeOptionsModal._action_rows(record)
-                )
+                key = IdeOptionsModal._getkey(fd, mouse_rows=mouse_rows)
                 if key == "esc":
                     return 0
                 if key in ("up", "k"):
