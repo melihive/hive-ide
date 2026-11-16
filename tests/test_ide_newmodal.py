@@ -750,3 +750,87 @@ def test_what_a_tiny_modal_gives_up_and_in_which_order():
     adopt_small = _plain(5, 14, "adopt", filter="a")
     assert any("Filter: a" in line for line in adopt_small), adopt_small
     assert any("Name: ALPHA" in line for line in adopt_small), adopt_small
+
+
+def _draw_adopt_at(
+    rows: int, width: int, sel: int, titles: list[str]
+) -> list[str]:
+    state = {
+        "stage": "adopt", "name": "ALPHA", "err": "", "ty": 0, "mode_sel": 0,
+        "adopt_sel": sel, "filter": "",
+        "adopt_items": [
+            {"title": title, "updated_at": None, "preview": "p" * 96}
+            for title in titles
+        ],
+    }
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeNewModal._draw(state)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [l for l in text.split("\n") if l.strip()]
+
+
+def test_a_conversation_titled_like_a_field_is_not_mistaken_for_one():
+    """A conversation's own text must never be read as the modal's structure.
+
+    The input fields used to be located by searching every rendered line for
+    "Name:" or "Filter:". A conversation titled "Filter: revenue by cohort" was
+    therefore taken for the filter field, so every list row above it was pinned
+    into the header and left the selection-aware window: two different
+    selections drew the SAME frame while Enter adopted different conversations.
+    Swept here at every height 6-24 and every other width 20-82, that was 237
+    sizes with such titles against 0 with ordinary ones.
+
+    Fields are now registered by index as they are written, so no content can
+    pose as one. Both title sets must keep every selection distinguishable.
+    """
+    poisoned = [
+        f"Filter: deep dive number {i} into the pipeline" for i in range(8)
+    ]
+    ordinary = [f"conversation {i}" for i in range(8)]
+    bad = []
+    for titles, label in ((poisoned, "field-like"), (ordinary, "ordinary")):
+        for rows in range(6, 25):
+            for width in range(20, 83, 2):
+                seen: dict[tuple[str, ...], list[int]] = {}
+                for sel in range(len(titles)):
+                    key = tuple(_draw_adopt_at(rows, width, sel, titles))
+                    seen.setdefault(key, []).append(sel)
+                alike = [v for v in seen.values() if len(v) > 1]
+                if alike:
+                    bad.append(f"{label} {width}x{rows}: {alike[:3]}")
+    assert not bad, "\n  ".join(
+        ["selections drew alike:"] + bad[:12] + [f"({len(bad)} sizes)"]
+    )
+
+
+def test_the_name_field_stays_above_the_list_it_labels():
+    """Pinning must not reorder the modal.
+
+    The content search could match a LIST row, making the pinned prefix run
+    past the real fields and surfacing conversation rows above the name line —
+    the frame literally read Filter-field, three conversations, then "Name:".
+    """
+    titles = [f"Filter: deep dive number {i}" for i in range(8)]
+    drawn = [
+        modal_io_strip(line) for line in _draw_adopt_at(38, 18, 4, titles)
+    ]
+    name_at = next(i for i, l in enumerate(drawn) if l.strip().startswith("Name:"))
+    filter_at = next(
+        i for i, l in enumerate(drawn) if l.strip().startswith("Filter:")
+    )
+    rows_at = [i for i, l in enumerate(drawn) if "deep dive" in l]
+    assert name_at < filter_at, drawn
+    assert all(name_at < r and filter_at < r for r in rows_at), drawn
+
+
+def modal_io_strip(line: str) -> str:
+    from hive_ide import modal_io
+
+    return modal_io.strip_ansi(line)

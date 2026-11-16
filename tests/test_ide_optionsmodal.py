@@ -651,3 +651,67 @@ def test_the_rename_field_survives_every_width_and_value(tmp_path):
                 if drawn == other:
                     bad.append(f"{width}x{rows} len={len(value)}: identical")
     assert not bad, "\n  ".join(["the rename field was lost:"] + bad[:12])
+
+
+def _options_frame(record: dict, repo: str, rows: int, width: int, sel: int):
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeOptionsModal._draw(record, repo, sel)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return tuple(l for l in text.split("\n") if l.strip())
+
+
+def test_which_action_enter_will_run_survives_a_screen_too_small(tmp_path):
+    """Enter must never fire an action the screen is not showing.
+
+    When the pinned chrome alone overflowed, the whole body was given up — so
+    at a 20x8 interior all twelve actions, `archive` among them, drew ONE
+    identical frame with no selection anywhere, while Enter still ran the one
+    the invisible cursor was on. That was 96 of the 735 swept sizes, up to
+    interior height eleven — well above the sub-height-eight limitation this
+    file already documents.
+
+    The selected row now outranks everything but the title and the footer.
+
+    GUARANTEED, no exceptions: every interior at least 6 rows tall AND at least
+    34 cells wide draws all twelve actions distinguishably — swept, 0 of 735
+    violations.
+
+    LIMIT, stated not hidden: 43 sizes below that still draw some selections
+    alike — interiors 4-5 rows tall at any width, and interiors 24 cells or
+    narrower at 6-11 rows. There the footer, wrapped at that width, fills the
+    screen before the selection gets a row. Letting the selection outrank the
+    footer is a trade this phase did not take: the footer carries the escape
+    hint and, while renaming, the field being typed into. It is a task on the
+    plan, not a silent gap. (An interior of 4 rows means a client terminal of
+    6 — the popup floor.)
+    """
+    store, record = _session(tmp_path)
+    repo = store.workspace_key
+    actions = IdeOptionsModal._actions(record)
+    assert len(actions) > 1, "a one-action modal cannot show this"
+
+    blind = []
+    for rows in range(4, 25):
+        for width in range(14, 84, 2):
+            frames = {
+                _options_frame(record, repo, rows, width, sel)
+                for sel in range(len(actions))
+            }
+            if len(frames) != len(actions) and rows >= 6 and width >= 34:
+                blind.append(f"{width}x{rows}: {len(frames)} of {len(actions)}")
+    assert not blind, "\n  ".join(
+        ["selections were indistinguishable inside the guarantee:"] + blind[:12]
+    )
+
+    # The size Codex reported is fully distinguishable, archive included.
+    frames = {
+        _options_frame(record, repo, 8, 20, sel) for sel in range(len(actions))
+    }
+    assert len(frames) == len(actions), f"20x8: {len(frames)} of {len(actions)}"

@@ -310,7 +310,15 @@ def field_tail(value: str, cells: int) -> str:
 
 
 def _sacrifice(
-    header: list[str], body: list[str], footer: list[str], rows: int, width: int
+    header: list[str],
+    body: list[str],
+    footer: list[str],
+    rows: int,
+    width: int,
+    *,
+    selected: int | None = None,
+    also_selected: int | None = None,
+    pin_selection: bool = False,
 ) -> list[str]:
     """What to keep when not even the pinned chrome fits, in order of need.
 
@@ -321,22 +329,47 @@ def _sacrifice(
     with no rename field at all, while Enter still committed the edit.
 
     So: the title (what this is), then the footer (how to leave, and any field
-    in it), then the rest of the header, and the body last — it is a list, and
-    a list is the one part that can be scrolled to instead.
+    in it), then THE SELECTED ROW, then the rest of the header, and the rest of
+    the body last — it is a list, and a list is the one part that can be
+    scrolled to instead.
+
+    The selected row outranks the rest of the header because Enter acts on it.
+    Dropping the whole body here gave every one of the twelve options actions an
+    identical frame at a 20x8 interior — ninety-six of the 735 swept sizes, up
+    to interior height eleven — with no selection on screen and Enter still
+    firing `archive`. The session name losing its row is a cosmetic loss; not
+    knowing which action is about to run is not. A second selection (the mode
+    row) is pinned with it, for the same reason it is windowed with it.
     """
     everything = header + body + footer
     if not everything or rows <= 0:
         return []
     head_count, body_count = len(header), len(body)
+    # Only a caller that KNOWS Enter acts on a body row may promote it. Guessing
+    # from `selected` alone was wrong: it is an anchor with a default of 0, so
+    # the new-session name stage — whose body is a one-line hint, not a list —
+    # promoted that hint above the pinned `Name:` field and dropped the field
+    # the keystrokes were landing in. The same would hit any read-only card.
+    chosen = (
+        {
+            head_count + index
+            for index in (selected, also_selected)
+            if index is not None and 0 <= index < body_count
+        }
+        if pin_selection
+        else set()
+    )
 
     def need(index: int) -> int:
         if index == 0 and head_count:
             return 0
         if index >= head_count + body_count:
             return 1
-        if index < head_count:
+        if index in chosen:
             return 2
-        return 3
+        if index < head_count:
+            return 3
+        return 4
 
     kept: list[int] = []
     used = 0
@@ -360,6 +393,7 @@ def fit(
     rows: int | None = None,
     width: int | None = None,
     also_selected: int | None = None,
+    pin_selection: bool = False,
     more_above: str = "   ↑ more",
     more_below: str = "   ↓ more",
     more_both: str = "   ↕ more",
@@ -386,7 +420,16 @@ def fit(
 
     chrome = height(header) + height(footer)
     if rows <= chrome:
-        return _sacrifice(header, body, footer, max(1, rows), width)
+        return _sacrifice(
+            header,
+            body,
+            footer,
+            max(1, rows),
+            width,
+            selected=selected,
+            also_selected=also_selected,
+            pin_selection=pin_selection,
+        )
     budget = rows - chrome
     if height(body) <= budget:
         return header + body + footer

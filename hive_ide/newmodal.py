@@ -407,6 +407,16 @@ class IdeNewModal:
         C = IdeNewModal
         stage = st["stage"]
         o = [C.CLR, f"  {C.BOLD}New IDE session{C.RST}\n\n"]
+        # Which chunks of `o` ARE the input fields, recorded as they are
+        # written: (index into `o`, is this stage typing into it). Finding them
+        # afterwards by searching the rendered text for "Name:"/"Filter:" read
+        # the modal's own content as its structure — a conversation whose title
+        # or preview contains "Filter:" was taken for the filter field, so the
+        # list rows above it were pinned into the header and left the windowed
+        # body. Two different selections then drew the same frame while Enter
+        # adopted different conversations: 237 of the swept sizes with such a
+        # title, 0 with ordinary ones. An index cannot be spoofed by content.
+        fields: list[tuple[int, bool]] = []
         # Name — always on screen; caret only while editing it.
         caret = "▏" if stage == "name" else " "
         name_room = modal_io.cols_available() - len("  Name: ") - 1
@@ -414,6 +424,7 @@ class IdeNewModal:
             f"  Name: {C.NAME}{C._field_tail(st['name'], name_room)}"
             f"{caret}{C.RST}{C.EL}\n"
         )
+        fields.append((len(o) - 1, stage == "name"))
         if stage == "name":
             hint = (f"{C.ERR}{st['err']}" if st["err"]
                     else f"{C.DIM}CAPS · spaces · ≤{StateIO.NAME_MAX}") + C.RST
@@ -453,6 +464,7 @@ class IdeNewModal:
                 f"{C._field_tail(str(st.get('filter', '')), filter_room)}"
                 f"▏{C.RST}{C.EL}\n\n"
             )
+            fields.append((len(o) - 1, True))
             if not filtered:
                 o.append(f"  {C.DIM}No matching conversations.{C.RST}{C.EL}\n")
             else:
@@ -504,28 +516,45 @@ class IdeNewModal:
         body = "".join(o[2:]).split("\n")
         footer = [f"  {C.DIM}{C._footer(stage)}{C.RST}{C.EL}"]
         header = [f"  {C.BOLD}New IDE session{C.RST}", ""]
+        dropped = 0
         while body and body[0].strip() == "":
             body.pop(0)
+            dropped += 1
         # Any line the reader is TYPING INTO is pinned, not windowed. The window
         # broke both: at a 20x6 interior the name field scrolled away, and at
         # 80x8 the adopt filter did, so two different inputs drew identical
         # frames while the keystrokes still landed. An input you cannot see is
         # worse than a list you cannot see — the list has a marker saying so.
-        inputs = [
-            index
-            for index, line in enumerate(body)
-            if any(
-                field in modal_io.strip_ansi(line)
-                for field in ("Name:", "Filter:")
-            )
-        ]
+        #
+        # Each field's body row is COUNTED, not recognised: the rows before a
+        # registered chunk are the newlines written ahead of it, less the blank
+        # leading rows just popped. Content plays no part, so no conversation
+        # title can pose as a field.
+        active_rows: set[int] = set()
+        inputs: list[int] = []
+        for chunk, live in fields:
+            row = "".join(o[2:chunk]).count("\n") - dropped
+            if 0 <= row < len(body):
+                inputs.append(row)
+                if live:
+                    active_rows.add(row)
+        inputs.sort()
         if inputs:
             # Everything up to and including the LAST input field moves to the
             # header: a prefix, so the order is unchanged. Pinning only a
             # leading run was not enough — the adopt filter sits after the
             # workspace hint, so it stayed in the body and kept scrolling off.
             cut = inputs[-1] + 1
-            pinned = [line for line in body[:cut] if line.strip()]
+            field_rows = set(inputs)
+            # Carry each pinned line's ROLE with it; the fallbacks below used to
+            # re-derive it by searching the line's text, which is the same
+            # content-as-structure mistake one level down.
+            marked = [
+                (line, row in field_rows, row in active_rows)
+                for row, line in enumerate(body[:cut])
+                if line.strip()
+            ]
+            pinned = [line for line, _, _ in marked]
             del body[:cut]
             # On a screen too short even for that, keep the TITLE and the input
             # fields and let the rest go back to being windowed: the fields are
@@ -540,15 +569,10 @@ class IdeNewModal:
             # so the guard did not fire and the field was clipped anyway.
             chrome_rows = modal_io.wrapped_rows(header + pinned + footer, cols)
             if chrome_rows > modal_io.rows_available():
-                keep = [
-                    line
-                    for line in pinned
-                    if any(
-                        field in modal_io.strip_ansi(line)
-                        for field in ("Name:", "Filter:")
-                    )
+                keep = [line for line, is_field, _ in marked if is_field]
+                body[:0] = [
+                    line for line, is_field, _ in marked if not is_field
                 ]
-                body[:0] = [line for line in pinned if line not in keep]
                 pinned = keep
                 # Shed the decoration this modal owns before the field goes:
                 # the blank spacer line, and the key hints down to the one that
@@ -563,18 +587,17 @@ class IdeNewModal:
                 # name stage has only the one. The invariant is that the field
                 # taking the keystrokes is on screen — below this there is no
                 # honest way to draw the modal at all.
-                active = "Filter:" if stage == "adopt" else "Name:"
                 if (
                     modal_io.wrapped_rows(header + pinned + footer, cols)
                     > modal_io.rows_available()
                 ):
-                    live = [
-                        line
-                        for line in pinned
-                        if active in modal_io.strip_ansi(line)
-                    ]
+                    live = [line for line, _, is_live in marked if is_live]
                     if live:
-                        body[:0] = [line for line in pinned if line not in live]
+                        body[:0] = [
+                            line
+                            for line, is_field, is_live in marked
+                            if is_field and not is_live
+                        ]
                         pinned = live
             header.extend(pinned)
         while body and body[0].strip() == "":
@@ -589,9 +612,15 @@ class IdeNewModal:
         # (creating, error) have no highlight, and for them the end IS the news.
         selected_line = len(body) - 1
         also_selected = None
+        # Whether Enter acts on a body row at all. The creating and error stages
+        # anchor on their last line because that is the news, but nothing there
+        # is selectable — so that row must NOT outrank the pinned name field
+        # when the screen is too small for both.
+        pin_selection = False
         if C.SEL:
             highlighted = [i for i, line in enumerate(body) if C.SEL in line]
             if highlighted:
+                pin_selection = True
                 # A stage can have TWO independent selections — the driver list
                 # and the mode row — and Enter acts on both, so both have to be
                 # visible. With only the first kept, "New session" and "Adopt
@@ -599,9 +628,17 @@ class IdeNewModal:
                 selected_line = highlighted[0]
                 if len(highlighted) > 1:
                     also_selected = highlighted[-1]
+        # A pinned input field outranks the selection. The keystrokes are
+        # landing in the field right now, and a selection the window cuts is
+        # already named in the footer below — a cut field has no such notice.
+        # Letting the selected row win dropped the adopt filter at 40x4, 74x4,
+        # 40x5 and 40x8. The options modal has no conflict here: its rename
+        # field lives in the FOOTER, which outranks both.
+        if inputs:
+            pin_selection = False
         lines = modal_io.fit(
             header, body, footer, selected=selected_line,
-            also_selected=also_selected,
+            also_selected=also_selected, pin_selection=pin_selection,
         )
         # EVERY selection that was cut gets named in the footer, not just the
         # second one. The driver can be windowed out too — at narrow widths all
@@ -649,7 +686,7 @@ class IdeNewModal:
                     ]
                 lines = modal_io.fit(
                     header, body, footer, selected=selected_line,
-                    also_selected=also_selected,
+                    also_selected=also_selected, pin_selection=pin_selection,
                 )
         
         sys.stdout.write(C.CLR + "\n".join(lines))

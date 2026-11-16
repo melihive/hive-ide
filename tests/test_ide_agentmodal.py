@@ -234,3 +234,47 @@ def test_the_agent_modal_keeps_the_selected_driver_visible():
         text = "\n".join(_agent_lines(8, sel))
         label = IdeNewModal.TYPES[sel][1]
         assert label in text, f"driver {sel} ({label}) was scrolled out of view"
+
+
+def _agent_frame(rows: int, width: int, sel: int, handoff: bool = False):
+    import io
+    import os
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeAgentModal._draw("ALPHA", "hive-ide", "claude", sel, handoff)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return tuple(l for l in text.split("\n") if l.strip())
+
+
+def test_which_agent_enter_will_switch_to_survives_a_small_screen():
+    """The fourth modal gets the same guarantee as the options list.
+
+    When the pinned chrome alone overflowed, the body was given up whole and
+    every agent drew the same frame while Enter still switched to the invisible
+    one. The picked row now outranks everything but the title and the footer.
+
+    GUARANTEED, no exceptions: every interior at least 6 rows tall AND at least
+    34 cells wide tells the four agents apart — swept, 0 violations.
+
+    LIMIT, stated not hidden: 47 sizes below that still draw some alike, all at
+    interiors 4-5 rows tall or 32 cells and narrower, where the footer wrapped
+    at that width fills the screen first. Same trade as the options modal.
+    """
+    choices = len(IdeNewModal.TYPES)
+    blind = []
+    for rows in range(4, 25):
+        for width in range(14, 84, 2):
+            frames = {_agent_frame(rows, width, sel) for sel in range(choices)}
+            if len(frames) != choices and rows >= 6 and width >= 34:
+                blind.append(f"{width}x{rows}: {len(frames)} of {choices}")
+    assert not blind, "\n  ".join(
+        ["the picked agent was indistinguishable:"] + blind[:12]
+    )

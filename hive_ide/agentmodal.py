@@ -126,6 +126,10 @@ class IdeAgentModal:
         ]
         o: list[str] = []
         selected_line = 0
+        # Whether any row is actually picked. Enter switches to the picked
+        # agent, so that row must survive a screen too small for the chrome —
+        # but with nothing picked, row 0 is just the first agent, not a choice.
+        picked_any = False
         for i, (kind, label, note) in enumerate(M.TYPES):
             picked = i == sel
             here = kind == active
@@ -136,6 +140,7 @@ class IdeAgentModal:
             tag = f"  {M.NAME}· current{M.RST}" if here else ""
             if picked:
                 selected_line = len(o)
+                picked_any = True
                 o.append(f"  {M.SEL} {arrow} {label}  {note} {M.RST}{tag}{M.EL}")
             else:
                 o.append(f"   {arrow} {label}  {M.DIM}{note}{M.RST}{tag}{M.EL}")
@@ -146,7 +151,9 @@ class IdeAgentModal:
             f"  {M.DIM}↑/↓ or j/k · ←/→ handoff · 1-4 or Enter → switch"
             f" · Esc → cancel{M.RST}{M.EL}",
         ]
-        lines = modal_io.fit(header, o, footer, selected=selected_line)
+        lines = modal_io.fit(
+            header, o, footer, selected=selected_line, pin_selection=picked_any
+        )
         sys.stdout.write(M.CLR + "\n".join(lines))
         sys.stdout.flush()
 

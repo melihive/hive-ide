@@ -331,7 +331,8 @@ class IdeOptionsModal:
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
         lines = modal_io.fit(
-            header, body, footer, selected=selected_line, rows=rows, width=width
+            header, body, footer, selected=selected_line, rows=rows, width=width,
+            pin_selection=True,
         )
         # The click map MUST come from what was drawn. Deriving it from the full
         # action list independently was a real defect: once the list is windowed,
