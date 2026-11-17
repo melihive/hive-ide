@@ -944,9 +944,6 @@ class SessionRepair:
         if apply:
             self.store.write("sessions", record["id"], record)
 
-    def _pane_cwd_warnings(self, record: dict[str, Any]) -> list[str]:
-        return self._observe_pane_cwds(record)["warnings"]
-
     def _observe_pane_cwds(self, record: dict[str, Any]) -> dict[str, Any]:
         """Observe every pane's cwd in the session window.
 

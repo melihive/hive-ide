@@ -9,46 +9,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import SCHEMA_VERSION
 from .agents import AgentResumeState
-from .store import StateStore, utc_now
+from .store import StateStore
 from .turns import TurnSequence
-
-
-def _version_tuple(value: object) -> tuple[int, ...]:
-    if not isinstance(value, str):
-        return ()
-    parts: list[int] = []
-    for part in value.split("."):
-        if not part.isdigit():
-            break
-        parts.append(int(part))
-    return tuple(parts)
-
-
-def migrate_snapshot(snapshot: dict) -> dict:
-    """Normalize old persisted snapshots without erasing explicit current config."""
-    sidebar = snapshot.get("sidebar")
-    if not isinstance(sidebar, dict):
-        return snapshot
-    icons = sidebar.get("icons")
-    if not isinstance(icons, dict):
-        return snapshot
-    status = icons.get("status")
-    if not isinstance(status, dict):
-        return snapshot
-    version = _version_tuple(snapshot.get("package_version"))
-    if status.get("sleeping") == "☾" and (not version or version < (1, 0, 70)):
-        migrated = dict(snapshot)
-        migrated_sidebar = dict(sidebar)
-        migrated_icons = dict(icons)
-        migrated_status = dict(status)
-        migrated_status["sleeping"] = "💤"
-        migrated_icons["status"] = migrated_status
-        migrated_sidebar["icons"] = migrated_icons
-        migrated["sidebar"] = migrated_sidebar
-        return migrated
-    return snapshot
 
 
 class StateIO:
@@ -81,7 +44,7 @@ class StateIO:
     def read_config_snapshot(state_home: Path, workspace_key: str) -> dict | None:
         store = StateIO._store(state_home, workspace_key)
         snapshot = store.read_path(store.config_snapshot_path())
-        return migrate_snapshot(snapshot) if snapshot is not None else None
+        return snapshot
 
     @staticmethod
     def read(state_home: Path, workspace_key: str, name: str) -> dict | None:
@@ -121,25 +84,6 @@ class StateIO:
             "session_id": status.get("conversation_reference"),
             "ts": status.get("observed_at"),
         }
-
-    @staticmethod
-    def write_session_status_update(
-        state_home: Path, record: dict, update: dict
-    ) -> None:
-        key = record.get("workspace_key") or record.get("repo")
-        session_id = record.get("id")
-        if not key or not session_id:
-            return
-        store = StateIO._store(state_home, key)
-        current = store.read("status", session_id) or {
-            "schema_version": SCHEMA_VERSION,
-            "workspace_key": store.workspace_key,
-            "session_id": session_id,
-        }
-        current.update(update)
-        current.setdefault("driver", (record.get("driver") or {}).get("id"))
-        current["observed_at"] = utc_now()
-        store.write("status", session_id, current)
 
     @staticmethod
     def read_session_activity(state_home: Path, record: dict) -> dict | None:

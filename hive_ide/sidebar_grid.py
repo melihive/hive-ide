@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import unicodedata
 
 from . import modal_io
 from dataclasses import dataclass

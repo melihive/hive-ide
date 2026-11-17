@@ -26,7 +26,6 @@ from hive_ide.hook import IdeHook
 from hive_ide.info import _card
 from hive_ide.nudge import AgentNudge
 from hive_ide.seen import IdeSeen
-from hive_ide.state_compat import StateIO
 from hive_ide.store import StateStore
 from hive_ide.turns import TurnSequence
 
@@ -709,16 +708,6 @@ def test_status_event_carries_turns_but_never_proves_idle_for_working(tmp_path, 
     assert main([*base, "status-event", f"--session-id={record['id']}",
                  "--state=waiting", "--driver=codex"]) == 0
     assert TurnSequence.idle_proven(store.read("status", record["id"])) is True
-
-
-def test_state_compat_update_keeps_turns_and_fails_safe(tmp_path, monkeypatch):
-    store, record = _session(tmp_path)
-    _codex_turn(store, record, monkeypatch, tmp_path)
-    StateIO.write_session_status_update(store.home, record, {"state": "working"})
-    status = store.read("status", record["id"])
-    assert status["turns"]["stopped_turn"] == 1
-    assert TurnSequence.idle_proven(status) is False
-
 
 
 # -- timeouts -----------------------------------------------------------------

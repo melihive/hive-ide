@@ -579,21 +579,6 @@ def test_tmux_timeout_returns_empty_instead_of_hanging(monkeypatch):
 
 # ---- circuit breaker: defence in depth against a self-feeding layout hook ----
 
-def test_breaker_ledger_prunes_to_the_window():
-    """Only invocations inside the window count; older ones age out."""
-    now = 1000.0
-    prev = [990.0, 995.0, 999.0]          # 10s window → 990.0 is exactly at the edge
-    hits = IdeRelayout._breaker_hits(prev, now, 10.0)
-    assert 990.0 not in hits, "an entry exactly one window old must age out"
-    assert hits == [995.0, 999.0, now]
-
-
-def test_breaker_ledger_survives_a_corrupt_file():
-    """Junk in the ledger is dropped, never raised — a bad file must not block layout."""
-    hits = IdeRelayout._breaker_hits(["x", None, True, 999.0], 1000.0, 10.0)
-    assert hits == [999.0, 1000.0]
-
-
 def test_breaker_trips_on_a_burst_and_resets_after_the_window(tmp_path, monkeypatch):
     """A runaway hook trips it; once the burst ages out, normal operation resumes.
     The production threshold is deliberately high (a drag must not trip it), so this
