@@ -358,16 +358,19 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             assert "#{alternate_on}" in line
         assert "#{@hive_ide_pane},sidebar" not in root_keys
         key_lines = {line.split()[3]: line for line in keys.splitlines() if " -T prefix " in line}
-        # The pane keys SELECT, and nothing else. Zoom is the `after-select-pane`
-        # hook's job now, and a key that toggled `-Z` as well would toggle the
-        # hook's zoom straight back off: measured at 49 columns, the sidebar key
-        # landed back on zoomed=0, which is the three-column squeeze the hook
-        # exists to prevent. These keys also no longer branch on `#{<:...}`, which
-        # compared the width as TEXT and so was false on every phone-sized client.
+        # Each pane key SELECTS, and on a mobile window also re-asserts the zoom.
+        # The zoom half is IDEMPOTENT (`if -F` on the zoom flag, never a bare
+        # toggle) so it cannot fight the `after-select-pane` hook that does the
+        # same job for every path that is not a key. It is needed anyway: tmux
+        # fires no `after-select-pane` when the target pane is already active, so
+        # without it, pressing a pane's own key after a manual `prefix z` left a
+        # phone unzoomed. The width is tested by the SHELL — `#{<:` compared it as
+        # text and was false on every phone-sized client.
         for key_name, pane_index in (("l", ".0"), ("c", ".1"), ("e", ".2")):
             line = key_lines.get(key_name, "")
             assert f"select-pane -t {pane_index}" in line, line
-            assert "resize-pane -Z" not in line, line
+            assert "-lt" in line and "window_width" in line, line
+            assert "window_zoomed_flag" in line, f"zoom is a bare toggle again: {line}"
             assert "#{<:" not in line, line
         for key in ("a", "o", "i", "k", "x"):
             assert "run-shell -b" in key_lines[key]

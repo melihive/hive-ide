@@ -3581,9 +3581,7 @@ class Frame:
                 "-t",
                 self.target,
                 "after-select-pane",
-                "if-shell '"
-                + IdeLayout.shell_mobile_unzoomed_test()
-                + "' 'resize-pane -Z'",
+                self.zoom_when_mobile(),
             ]
         )
         sidebar_key = keys.get("sidebar")
@@ -3592,12 +3590,7 @@ class Frame:
                 [
                     "bind-key",
                     sidebar_key,
-                    # Just select. The `after-select-pane` hook re-zooms when the
-                    # window is mobile, so a key that also toggled `-Z` itself would
-                    # now toggle the hook's zoom straight back off.
-                    "select-pane",
-                    "-t",
-                    ".0",
+                    *self.select_pane_keeping_mobile_zoom("0"),
                 ]
             )
         for action, index in (("chat", "1"), ("plan", "2")):
@@ -3608,10 +3601,7 @@ class Frame:
                 [
                     "bind-key",
                     key,
-                    # Same as the sidebar key: selection only, zoom is the hook's.
-                    "select-pane",
-                    "-t",
-                    f".{index}",
+                    *self.select_pane_keeping_mobile_zoom(index),
                 ]
             )
         bound = sorted({key for key in keys.values() if key})
@@ -3703,6 +3693,56 @@ class Frame:
         # focus change — is reported stale and repaired without reopening.
         "after-select-pane",
     )
+
+    @staticmethod
+    def zoom_when_mobile() -> str:
+        """Zoom the focused pane IF the window is mobile and not already zoomed.
+
+        IDEMPOTENT on purpose: `resize-pane -Z` is a TOGGLE, and this command is
+        issued from two places at once — the `after-select-pane` hook and the pane
+        keys — so a bare toggle would have them undo each other. Applying this one
+        three times running leaves the window zoomed (measured).
+
+        The width is tested by the shell, which no tmux version can read as text;
+        the zoom flag is tested by a FORMAT, which tmux evaluates synchronously in
+        its own command queue, immediately before the resize. The shell's answer
+        is necessarily stale by the time the subprocess returns — two overlapping
+        selections can both see "not zoomed" — and the inner check is what closes
+        that window (Codex review, 2026-11-17).
+        """
+        return (
+            "if-shell '"
+            + IdeLayout.shell_mobile_test()
+            + "' '"
+            + Frame.zoom_if_unzoomed()
+            + "'"
+        )
+
+    @staticmethod
+    def zoom_if_unzoomed() -> str:
+        """`resize-pane -Z`, but only from unzoomed — the half that makes it idempotent."""
+        return 'if-shell -F "#{==:#{window_zoomed_flag},0}" "resize-pane -Z"'
+
+    @staticmethod
+    def select_pane_keeping_mobile_zoom(index: str) -> list[str]:
+        """`if-shell` args for a pane key: select, and on a mobile window zoom too.
+
+        The hook alone is not enough. tmux returns EARLY from `select-pane` when
+        the target is already the active pane, and fires no `after-select-pane`
+        with it — so after a manual `prefix z` on a mobile window, pressing the
+        key for the pane you are already in left you unzoomed, where the binding
+        this replaced would have zoomed it (Codex review, 2026-11-17). Pressing a
+        pane's own key is exactly how someone asks for that pane.
+
+        Safe beside the hook because the zoom half is idempotent: when the hook
+        has already zoomed, the inner check sees it and does nothing.
+        """
+        return [
+            "if-shell",
+            IdeLayout.shell_mobile_test(),
+            f"select-pane -t .{index} ; {Frame.zoom_if_unzoomed()}",
+            f"select-pane -t .{index}",
+        ]
 
     def installed_frame_hooks(self) -> set[str] | None:
         """Hook names the live server carries, or None when it could not be read.

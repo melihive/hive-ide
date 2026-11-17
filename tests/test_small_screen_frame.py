@@ -231,3 +231,93 @@ def test_the_popup_opens_at_the_size_the_client_can_show(tmp_path):
             )
     finally:
         frame.tmux(["kill-server"])
+
+
+def test_a_panes_own_key_restores_the_zoom_a_manual_unzoom_gave_up(tmp_path):
+    """tmux fires no `after-select-pane` for the pane that is already active.
+
+    So on a mobile window the hook alone could not answer `prefix z` followed by
+    the key for the pane you are already in: you stayed in three crushed columns
+    having just asked, in the most direct way there is, for that pane. The key
+    carries the zoom itself, idempotently, for exactly this case.
+    """
+    frame, _ = _frame(tmp_path, names=("ALPHA",))
+    try:
+        frame.open(no_attach=True)
+        frame.bind_keys()
+        window = sorted(frame.windows().values())[0]
+        agent = frame.tmux(
+            ["display-message", "-p", "-t", f"{window}.1", "#{pane_id}"]
+        ).stdout.strip()
+
+        frame.tmux(["resize-window", "-t", window, "-x", "100", "-y", "40"])
+        frame.tmux(["select-pane", "-t", agent])
+        zoomed = lambda: frame.tmux(  # noqa: E731
+            ["display-message", "-p", "-t", window, "#{window_zoomed_flag}"]
+        ).stdout.strip()
+        assert zoomed() == "1", "the hook did not zoom on a 100-column window"
+
+        frame.tmux(["resize-pane", "-Z", "-t", agent])
+        assert zoomed() == "0", "the manual unzoom did not take"
+
+        # Exactly what the bound key runs.
+        frame.tmux(Frame.select_pane_keeping_mobile_zoom("1"))
+        assert zoomed() == "1", "the pane's own key left a mobile window unzoomed"
+
+        # Pressing it again must not toggle the zoom back off.
+        frame.tmux(Frame.select_pane_keeping_mobile_zoom("1"))
+        assert zoomed() == "1", "a second press toggled the zoom off"
+
+        # On a desktop window the same key must leave zoom alone, in both states.
+        frame.tmux(["resize-window", "-t", window, "-x", "200", "-y", "50"])
+        frame.tmux(["resize-pane", "-Z", "-t", agent])  # back to unzoomed
+        assert zoomed() == "0"
+        frame.tmux(Frame.select_pane_keeping_mobile_zoom("1"))
+        assert zoomed() == "0", "a 200-column window was zoomed by a pane key"
+    finally:
+        frame.tmux(["kill-server"])
+
+
+def test_the_mobile_zoom_command_is_idempotent(tmp_path):
+    """Applied twice it must still be zoomed — a bare `-Z` would flip it back.
+
+    The hook and the pane keys both issue this, and two overlapping selections can
+    both pass the shell's width test before either resizes; the inner format check
+    is evaluated by tmux immediately before the resize, so the second one is a
+    no-op instead of an unzoom.
+    """
+    frame, _ = _frame(tmp_path, names=("ALPHA",))
+    try:
+        frame.open(no_attach=True)
+        window = sorted(frame.windows().values())[0]
+        frame.tmux(["resize-window", "-t", window, "-x", "100", "-y", "40"])
+        pane = frame.tmux(
+            ["display-message", "-p", "-t", f"{window}.1", "#{pane_id}"]
+        ).stdout.strip()
+        frame.tmux(["select-pane", "-t", pane])
+        zoomed = lambda: frame.tmux(  # noqa: E731
+            ["display-message", "-p", "-t", window, "#{window_zoomed_flag}"]
+        ).stdout.strip()
+        if zoomed() == "1":
+            frame.tmux(["resize-pane", "-Z", "-t", pane])
+        assert zoomed() == "0"
+
+        command = Frame.zoom_when_mobile()
+        for applied in range(1, 4):
+            frame.tmux(command.split(" ", 1)[0:1] + _if_shell_args(command))
+            assert zoomed() == "1", f"flipped off after {applied} applications"
+
+        frame.tmux(["resize-window", "-t", window, "-x", "200", "-y", "50"])
+        frame.tmux(["resize-pane", "-Z", "-t", pane])
+        assert zoomed() == "0"
+        frame.tmux(command.split(" ", 1)[0:1] + _if_shell_args(command))
+        assert zoomed() == "0", "a 200-column window was zoomed"
+    finally:
+        frame.tmux(["kill-server"])
+
+
+def _if_shell_args(command: str) -> list[str]:
+    """`if-shell 'a' 'b'` -> ["a", "b"], so the command can be run as tmux argv."""
+    import shlex
+
+    return shlex.split(command)[1:]

@@ -99,15 +99,6 @@ class IdeLayout:
         return f"[ {width} -lt {cls.mobile_threshold()} ]"
 
     @classmethod
-    def shell_mobile_unzoomed_test(cls, width: str = "#{window_width}") -> str:
-        """Mobile AND not already zoomed — the guard a zoom-follows-focus hook needs.
-
-        `resize-pane -Z` TOGGLES, so a hook that fired on an already-zoomed window
-        would unzoom it, the exact opposite of its job.
-        """
-        return f"{cls.shell_mobile_test(width)} && [ #{{window_zoomed_flag}} = 0 ]"
-
-    @classmethod
     def plan_width(cls, window_width: int, side: int | None = None) -> int:
         """The plan column for a window — the AGENT has priority for the slack.
 
