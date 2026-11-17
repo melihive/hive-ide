@@ -237,7 +237,53 @@ class ConversationHolders:
     #: it is a subcommand, and treating it as a selector let ordinary prose do
     #: the selecting — `-p "how to resume <id> safely"` named a conversation the
     #: driver was not resuming (cross-model review, 2026-11-17).
-    SELECTION_FLAGS = frozenset({"--resume", "--continue", "--session-id"})
+    #:
+    #: `--continue` is NOT here either, and that was a defect: it is BOOLEAN
+    #: (`claude -c`/`--continue` resumes the most recent conversation and takes
+    #: no id), so reading the next token as its value turned a PROMPT into a
+    #: selection and authorized a signal against whatever conversation that
+    #: prompt happened to name (cross-model review, 2026-11-18). A `--continue`
+    #: process does hold a conversation, but nothing in its argv says WHICH, so
+    #: this path cannot name it and must leave it alone.
+    SELECTION_FLAGS = frozenset({"--resume", "--session-id"})
+
+    #: Options that make the invocation a FORK: it starts a NEW conversation from
+    #: the one it resumes, so that id is the fork's SOURCE and not what the
+    #: process holds. Signalling it would kill a live agent on a conversation
+    #: nobody asked to release (cross-model review, 2026-11-18).
+    FORK_FLAGS = frozenset({"--fork-session"})
+
+    #: Flags whose value is a fork's SOURCE once the invocation is a fork, and so
+    #: selects nothing. `--session-id` is deliberately NOT here: it names the NEW
+    #: conversation, the one the process really holds. The real background-host
+    #: shape in `tests/test_background_session_attach.py` carries both at once, so
+    #: rejecting a fork outright would blind this path to a genuine holder.
+    FORK_SOURCE_FLAGS = frozenset({"--resume", "--continue"})
+
+    #: Options of a `resume` driver that CONSUME the following token, so that
+    #: token is a value and never the session. Declared from `codex --help` and
+    #: `codex resume --help` rather than guessed: the session id may be a NAME as
+    #: well as a UUID, so no shape test can tell a swallowed session from a
+    #: swallowed directory, and the guess read a PROMPT as the session
+    #: (cross-model review, 2026-11-18).
+    VALUE_OPTIONS = frozenset({
+        "-c", "--config", "--enable", "--disable", "--remote",
+        "--remote-auth-token-env", "-m", "--model", "--local-provider",
+        "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
+        "-a", "--ask-for-approval",
+    })
+
+    #: Options of a `resume` driver that consume NOTHING. An option in NEITHER
+    #: set is unknown — including a VARIADIC one such as `-i/--image <FILE>...`,
+    #: which consumes an unknowable number of tokens — and an unknown option puts
+    #: the session's position beyond proof, so the holder is left alone.
+    BOOLEAN_OPTIONS = frozenset({
+        "--strict-config", "--oss", "--approve-for-me",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust", "--worktree", "--search",
+        "--no-alt-screen", "--no-daemon", "--last", "--all",
+        "--include-non-interactive", "-h", "--help", "-V", "--version",
+    })
 
     #: Drivers whose conversation is selected by a `resume` SUBCOMMAND with a
     #: positional id, rather than by a flag. For anything else the bare word is
@@ -284,7 +330,13 @@ class ConversationHolders:
         """
         if not argv:
             return False
+        # A fork resumes one conversation to start another. Judged on the KILL
+        # path only: the loose `holders()` guard may go on treating a fork as a
+        # holder, where the cost is a refused launch and not a signal.
+        forking = any(token.partition("=")[0] in cls.FORK_FLAGS for token in argv)
         for index, token in enumerate(argv):
+            if forking and token.partition("=")[0] in cls.FORK_SOURCE_FLAGS:
+                continue                       # the source, not what is held
             if token in cls.SELECTION_FLAGS:
                 if index + 1 < len(argv) and argv[index + 1] == reference:
                     return True
@@ -301,25 +353,22 @@ class ConversationHolders:
         # (`codex --no-daemon resume -C /w <id>` is what this package generates),
         # so the subcommand is located rather than assumed at argv[1].
         #
-        # An option's VALUE is skipped with it. Which options take one is the
-        # driver's business, not ours, so the conservative reading is used: a
-        # `-x`/`--x` token consumes a following non-option token.
+        # An option's VALUE is skipped with it, so WHICH options take one decides
+        # where the session sits. Guessing that was the defect: a BOOLEAN flag
+        # takes no value, so swallowing one shifts the window left and promotes
+        # the next token into the session slot. `codex resume --no-daemon OTHER
+        # TARGET` resumes OTHER and passes TARGET as the prompt, yet the guess
+        # read TARGET as the session and authorized a SIGTERM against a live
+        # agent on another conversation. Shape cannot rescue it either — a codex
+        # session id may be a NAME as much as a UUID, so a swallowed session is
+        # indistinguishable from a swallowed directory (cross-model review,
+        # 2026-11-18, two rounds).
         #
-        # That reading can be wrong in the DANGEROUS direction, and saying it
-        # merely left a holder unreleased was the error. A BOOLEAN flag takes no
-        # value, so swallowing one shifts the whole window left and promotes the
-        # next token into the session slot: `codex resume --no-daemon OTHER
-        # TARGET` resumes OTHER and passes TARGET as the prompt, yet this read
-        # TARGET as the session and so authorized a SIGTERM against a live agent
-        # on another conversation (cross-model review, 2026-11-18).
-        #
-        # Shape cannot tell `--no-daemon OTHER` from `-C <dir>` apart without
-        # per-driver flag knowledge, so the answer is not a cleverer parse but a
-        # narrower one: only a token SWALLOWED as an option's value is in doubt,
-        # and if one of those could be a session itself the argv is ambiguous and
-        # nothing is selected. The real argv this package generates carries a
-        # working directory there, never a second id, so the release still works;
-        # an ambiguous argv leaves the holder alone, which is inert.
+        # So the options are DECLARED, from the drivers' own `--help`, and an
+        # option in neither set is unknown. An unknown option puts the session's
+        # position beyond proof, and this path acts only on proof, so it answers
+        # False and the holder is left alone — inert, and the release of every
+        # argv shape this package actually generates is unaffected.
         # Only for a driver that HAS a `resume` subcommand. `claude` does not —
         # it selects with `--resume` — so for it the word is ordinary prompt
         # text, and `claude -p resume <id>` must not select anything. Without
@@ -328,55 +377,24 @@ class ConversationHolders:
         if os.path.basename(argv[0]).lower().split(".")[0] not in cls.SUBCOMMAND_DRIVERS:
             return False
         positionals: list[str] = []
-        swallowed: list[str] = []
         index = 1
         while index < len(argv):
             token = argv[index]
             if token.startswith("-"):
-                following = index + 1
-                if (
-                    "=" not in token
-                    and following < len(argv)
-                    and not argv[following].startswith("-")
-                    and argv[following] != "resume"     # a subcommand, not a value
-                ):
-                    swallowed.append(argv[following])
-                    index = following + 1
-                else:
-                    index += 1
+                flag = token.partition("=")[0]
+                known = flag in cls.VALUE_OPTIONS or flag in cls.BOOLEAN_OPTIONS
+                if not known:
+                    return False
+                # `--flag=value` carries its value inside the token.
+                takes_one = flag in cls.VALUE_OPTIONS and "=" not in token
+                index += 2 if takes_one else 1
                 continue
             positionals.append(token)
             index += 1
-        if not (
+        return (
             len(positionals) >= 2
             and positionals[0] == "resume"
             and positionals[1] == reference
-        ):
-            return False
-        return not any(
-            cls._could_be_a_session(token, reference) for token in swallowed
-        )
-
-    #: Characters an id is built from. Used only to compare one token's SHAPE
-    #: with another's, never to validate an id.
-    _HEX = frozenset("0123456789abcdefABCDEF")
-
-    @classmethod
-    def _could_be_a_session(cls, token: str, reference: str) -> bool:
-        """Could `token` be the session that `reference` is?
-
-        Shape is derived from the reference UNDER TEST, not from a list of known
-        id formats: a driver whose ids are not UUIDs is covered by the same rule,
-        and there is no format table to keep current. Two tokens have one shape
-        when, at every position, either both are id characters or both are the
-        same literal separator — so another UUID matches a UUID, while `/w` or a
-        prompt does not.
-        """
-        if len(token) != len(reference):
-            return False
-        return all(
-            (left in cls._HEX and right in cls._HEX) or left == right
-            for left, right in zip(token, reference)
         )
 
     @classmethod

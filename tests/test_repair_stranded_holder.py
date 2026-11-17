@@ -573,8 +573,10 @@ def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
     assert _stranded(rows, argv_of=lambda pid: argv if pid == 201 else None) == [], (
         "a driver resuming ANOTHER conversation was authorized for a signal"
     )
-    # Positive control: the same shape with a real option VALUE still releases,
-    # so the guard narrows the ambiguous argv and nothing else.
+    # It selects the session it REALLY resumes, rather than merely declining.
+    assert ConversationHolders.selects_exactly(argv, other)
+    # Positive control: the argv this package generates still releases, so the
+    # declaration fixed the reading without disabling the repair.
     works = ["codex", "resume", "--no-daemon", "-C", "/w", REFERENCE]
     assert ConversationHolders.selects_exactly(works, REFERENCE)
 
@@ -592,13 +594,44 @@ def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
         # `codex resume OTHER TARGET` resumes OTHER and passes TARGET as the
         # PROMPT. Only the first positional is the session.
         (["codex", "resume", "other-session-id", REFERENCE], False),
-        # A boolean flag swallows the real session and promotes the prompt into
-        # its slot. A swallowed token that could be a session means the argv is
-        # ambiguous, so nothing is selected.
+        # A BOOLEAN flag takes no value, so the token after it is the session and
+        # the reference is only the prompt. Shape cannot decide this: a codex
+        # session id may be a NAME as readily as a UUID, and both forms were read
+        # as selecting the prompt.
         (["codex", "resume", "--no-daemon",
           "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", REFERENCE], False),
-        (["codex", "resume", "--sandbox",
-          "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", REFERENCE], False),
+        (["codex", "resume", "--no-daemon", "my-other-session", REFERENCE], False),
+        (["codex", "resume", "--last", "my-other-session", REFERENCE], False),
+        # A VALUE option really does consume the next token, so here the
+        # reference IS the session — the declaration has to cut both ways.
+        (["codex", "resume", "--sandbox", "read-only", REFERENCE], True),
+        (["codex", "resume", "--sandbox=read-only", REFERENCE], True),
+        # An UNKNOWN option could consume the session or nothing, so the position
+        # is beyond proof and this path acts only on proof. Read as boolean, the
+        # reference below would BE the first positional and so select — which is
+        # exactly the coin-flip this declines.
+        # Both forms are needed to pin the refusal from both sides: read as
+        # boolean the first selects, and read as value-taking the second does.
+        (["codex", "resume", "--flag-from-a-later-codex", REFERENCE], False),
+        (["codex", "resume", "--flag-from-a-later-codex", "/w", REFERENCE], False),
+        # `-i/--image <FILE>...` is variadic — an unknowable number of tokens —
+        # so it is in neither set and lands in the same undecidable case.
+        (["codex", "resume", "-i", REFERENCE], False),
+        (["codex", "resume", "-i", "a.png", REFERENCE], False),
+        # `--continue` is BOOLEAN: it resumes the most recent conversation and
+        # the token after it is a PROMPT. Reading it as a selection authorized a
+        # signal against whatever conversation that prompt happened to name.
+        (["claude", "--continue", REFERENCE], False),
+        (["claude", "-c", REFERENCE], False),
+        # A FORK starts a NEW conversation from the one it resumes, so the
+        # resumed id is its SOURCE and the process does not hold it.
+        (["claude", "--resume", REFERENCE, "--fork-session"], False),
+        (["claude", "--fork-session", f"--resume={REFERENCE}"], False),
+        # ... but the fork's own conversation rides on `--session-id`, which the
+        # real background-host shape carries alongside the source. Blinding this
+        # path to that would miss a genuine holder.
+        (["claude", "--session-id", REFERENCE, "--fork-session",
+          "--resume", "/var/lib/projects/forked-from.jsonl"], True),
         (["claude", "--resume", "other", "-p", f"see {REFERENCE}"], False),
         (["claude", "-p", REFERENCE], False),
         # `resume` is a SUBCOMMAND, never a flag whose next argument is a
