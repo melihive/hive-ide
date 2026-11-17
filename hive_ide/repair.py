@@ -905,6 +905,14 @@ class SessionRepair:
         under `TMUX_TMPDIR`, and a retired frame predating the pinned socket
         directory keeps its socket in `/tmp` while the live frame's is
         elsewhere. None where it cannot be read, which protects.
+
+        STATED LIMIT — only `/proc` is consulted, the same choice `socket_gc`
+        makes for the same question. On a platform without it this answers None,
+        so every holder reads as unknown and this whole repair is INERT rather
+        than wrong: a macOS frame keeps the stalemate and the manual remedy the
+        launch guard already prints. Reading another process's environment there
+        needs machinery this has no way to exercise from here, so it is a stated
+        gap with a task on the plan, not a guess shipped untested.
         """
         try:
             raw = Path(f"/proc/{server_pid}/environ").read_bytes()
@@ -929,7 +937,7 @@ class SessionRepair:
         """
         root = self._socket_root_of(server_pid)
         if root is None:
-            return None
+            return None     # includes every platform without /proc — see above
         identity = self.frame.tmux_on(
             socket_name, ["display-message", "-p", "#{pid}"], tmpdir=root, timeout=10
         )
@@ -984,6 +992,7 @@ class SessionRepair:
         stranded = ConversationHolders.stranded(
             reference,
             live_socket=self.frame.socket,
+            live_server_pid=self._live_server_pid(),
             has_clients=self._socket_has_clients,
             rows=rows,
             exclude_tree=pane_pid,
@@ -1015,6 +1024,21 @@ class SessionRepair:
                 f"agent: stopped stranded driver — {where}{age}; "
                 "conversation released"
             )
+
+    def _live_server_pid(self) -> int | None:
+        """The PID of the frame's own tmux server, or None if it will not say.
+
+        A server's identity is its PID, not its `-L` name: the same name under a
+        different `TMUX_TMPDIR` is a different server, so excluding "the live
+        one" by name would hide a genuinely stranded holder whenever the two
+        happen to share a spelling. None falls back to the name, which is
+        protective — it can only ever exclude more.
+        """
+        result = self.frame.tmux(["display-message", "-p", "#{pid}"], timeout=10)
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        return int(raw) if raw.isdigit() else None
 
     def _still_stranded(self, holder: dict[str, Any]) -> bool:
         """Is this candidate STILL the thing we decided to stop?

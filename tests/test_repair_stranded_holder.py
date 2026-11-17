@@ -112,8 +112,13 @@ def test_a_driver_with_no_tmux_ancestor_at_all_is_left_alone():
 
 # ------------------------------------------------------------------- the action
 
+#: The release path reads a server's environment from `/proc` (a stated limit —
+#: see `_socket_root_of`), so on a platform without it the feature is inert by
+#: design. These tests therefore SKIP there rather than fail: a documented gap
+#: must not read as a broken build on the platform it was documented for.
 pytestmark_tmux = pytest.mark.skipif(
-    shutil.which("tmux") is None, reason="tmux is unavailable"
+    shutil.which("tmux") is None or not pathlib.Path("/proc/self/environ").exists(),
+    reason="needs tmux and a /proc that carries process environments",
 )
 
 
@@ -454,3 +459,53 @@ def test_a_recycled_pid_is_not_the_process_we_chose(tmp_path, retired_server):
         "a PID whose argv no longer matches was accepted as the same process"
     )
     assert _alive(pid)
+
+
+def test_a_backgrounded_sessions_driver_child_is_never_stranded(monkeypatch):
+    """A backgrounded session is held ON PURPOSE — host and children alike.
+
+    The host spawns the real driver as a child carrying no marker of its own, so
+    exempting only the host leaves that child looking abandoned. For the launch
+    guard that cost a refused launch; here it would cost a SIGTERM to a session
+    the user chose to background (cross-model review, 2026-11-17).
+    """
+    rows = _rows()
+    monkeypatch.setattr(
+        ConversationHolders, "background_tree",
+        classmethod(lambda _cls, _reference, rows=None: {201}),
+    )
+    assert _stranded(rows) == []
+
+
+def test_the_live_server_is_excluded_by_identity_not_by_name():
+    """Same `-L` name, different server: that holder is stranded, not ours.
+
+    Two servers can share a socket NAME under different `TMUX_TMPDIR` roots.
+    Excluding by name alone would hide a genuinely stranded holder behind the
+    coincidence, and repair could never release the conversation.
+    """
+    rows = _rows()
+    same_name_other_server = _stranded(
+        rows, live_socket=RETIRED_SOCKET, has_clients=lambda _s, _p: False
+    )
+    assert same_name_other_server == [], "no identity given: the name must still protect"
+
+    found = ConversationHolders.stranded(
+        REFERENCE,
+        live_socket=RETIRED_SOCKET,      # the live frame happens to share the name
+        live_server_pid=999_999,         # but it is a different server
+        has_clients=lambda _s, _p: False,
+        rows=rows,
+    )
+    assert [h["pid"] for h in found] == [201], (
+        "a holder under a DIFFERENT server was hidden by a matching socket name"
+    )
+
+    mine = ConversationHolders.stranded(
+        REFERENCE,
+        live_socket="unrelated-name",
+        live_server_pid=100,             # this IS the live frame's own server
+        has_clients=lambda _s, _p: False,
+        rows=rows,
+    )
+    assert mine == [], "the live frame's own driver was treated as stranded"

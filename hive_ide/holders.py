@@ -269,6 +269,7 @@ class ConversationHolders:
         *,
         live_socket: str | None,
         has_clients,
+        live_server_pid: int | None = None,
         rows: list[tuple[int, int, str]] | None = None,
         exclude_tree: int | None = None,
     ) -> list[dict[str, object]]:
@@ -297,13 +298,28 @@ class ConversationHolders:
         from .socket_gc import SocketReaper
 
         rows = cls._ps() if rows is None else rows
+        # The host AND everything under it, exactly as the launch guard does. The
+        # host spawns the real driver as a child that carries no marker of its
+        # own, so exempting only the host leaves that child looking stranded —
+        # and here the consequence is not a refused launch but a SIGTERM to a
+        # session the user backgrounded on purpose (cross-model review,
+        # 2026-11-17).
+        backgrounded = cls.background_tree(reference, rows=rows)
         found: list[dict[str, object]] = []
         for holder in cls.holders(reference, exclude_tree=exclude_tree, rows=rows):
-            if holder.get("background"):
+            if holder.get("background") or int(holder["pid"]) in backgrounded:
                 continue
             socket_name, server_pid = cls.server_of(int(holder["pid"]), rows)
-            if not socket_name or server_pid is None or socket_name == live_socket:
+            if not socket_name or server_pid is None:
                 continue
+            if live_server_pid is not None:
+                # Identity, not spelling. The same `-L` name under a different
+                # `TMUX_TMPDIR` is a DIFFERENT server, so comparing names alone
+                # would hide a genuinely stranded holder behind a coincidence.
+                if server_pid == live_server_pid:
+                    continue
+            elif socket_name == live_socket:
+                continue        # no identity to compare: fall back to the name
             if not SocketReaper.ours(socket_name):
                 continue        # someone else's tmux: never ours to touch
             if has_clients(socket_name, server_pid) is not False:
