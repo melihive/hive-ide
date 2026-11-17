@@ -278,7 +278,26 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             assert "-m hive_ide.relayout" not in line, (
                 f"{hook} relays out unconditionally again: {line!r}"
             )
-        assert "after-select-pane" not in hooks
+        # `after-select-pane` is INSTALLED again, deliberately, and narrowly: it
+        # re-zooms a mobile frame when focus moves, because every path that is not
+        # a key (a tap, `ide_nav`, a driver launch, a modal handing focus back)
+        # goes through a plain `select-pane` and tmux drops the zoom on it. It was
+        # banned when an older one ran a relayout and stormed, so the ban is kept
+        # exactly there: this hook may resize the pane and nothing else.
+        select_pane_hook = next(
+            (row for row in hooks.splitlines() if row.startswith("after-select-pane")),
+            "",
+        )
+        assert "resize-pane -Z" in select_pane_hook, select_pane_hook
+        assert "-m hive_ide.relayout" not in select_pane_hook, (
+            f"the select-pane hook relays out again: {select_pane_hook!r}"
+        )
+        assert "run-shell" not in select_pane_hook, (
+            f"the select-pane hook spawns a module again: {select_pane_hook!r}"
+        )
+        assert "window_zoomed_flag" in select_pane_hook, (
+            f"unguarded `-Z` toggles the zoom off again: {select_pane_hook!r}"
+        )
         assert "session-window-changed" in hooks
         client_resized = next(
             line for line in hooks.splitlines() if line.startswith("client-resized")
@@ -338,9 +357,23 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             assert f"send-keys -N3 {arrow}" in line
             assert "#{alternate_on}" in line
         assert "#{@hive_ide_pane},sidebar" not in root_keys
-        assert "#{client_width}" in keys
-        assert "resize-pane -Z ; select-pane -t .0" in keys
         key_lines = {line.split()[3]: line for line in keys.splitlines() if " -T prefix " in line}
+        # Each pane key SELECTS, and on a mobile window also re-asserts the zoom.
+        # The zoom half is IDEMPOTENT (`if -F` on the zoom flag, never a bare
+        # toggle) so it cannot fight the `after-select-pane` hook that does the
+        # same job for every path that is not a key. It is needed anyway: tmux
+        # fires no `after-select-pane` when the target pane is already active, so
+        # without it, pressing a pane's own key after a manual `prefix z` left a
+        # phone unzoomed. The width is tested by the SHELL — `#{<:` compared it as
+        # text and was false on every phone-sized client.
+        for key_name, pane_index in (("l", ".0"), ("c", ".1"), ("e", ".2")):
+            line = key_lines.get(key_name, "")
+            assert f"select-pane -t {pane_index}" in line, line
+            assert "@hive_ide_mobile" in line, (
+                f"the key no longer consults the frame's mobile flag: {line}"
+            )
+            assert "window_zoomed_flag" in line, f"zoom is a bare toggle again: {line}"
+            assert "#{<:" not in line, line
         for key in ("a", "o", "i", "k", "x"):
             assert "run-shell -b" in key_lines[key]
         assert "run-shell -b" in key_lines["g"]

@@ -97,19 +97,51 @@ class IdeRelayout:
 
     @staticmethod
     def _set_zoom(socket: str, win: str, want: bool, target: str | None = None) -> None:
-        # `resize-pane -Z` TOGGLES, so guard on the current flag — that is what stops
-        # repeated resize events (tmux fires many) from flapping in and out of zoom.
+        """Bring the window to `want`, moving the zoom onto `target` if it has to.
+
+        EVERY zoom mutation here is one guarded tmux command. `resize-pane -Z` is a
+        toggle, and the decision to issue it used to be made by a separate
+        `display-message` — a gap in which the frame's `after-select-pane` hook can
+        zoom, leaving the toggle to turn that zoom straight back off and the phone
+        in the squeezed layout both pieces exist to prevent (Codex review,
+        2026-11-17). Inside one `if-shell -F`, tmux reads the flag and resizes in
+        its own command queue, so there is no gap to land in. The probes that pick
+        the BRANCH may still be stale; they only choose which guarded command to
+        send, and each one re-checks for itself.
+        """
         target = target or f"{win}.1"
-        zoomed = IdeRelayout._zoomed(socket, win)
-        if want and zoomed:
-            active = IdeRelayout._tmux(socket, ["display-message", "-p", "-t", win, "#{pane_id}"])
+
+        def guarded(state: bool, pane: str) -> None:
+            # Toggle `pane` only while ITS OWN window's zoom differs from `state`.
+            #
+            # `-t pane` is not decoration. Without it the format resolves against
+            # whatever window is current on the server, while the resize targets
+            # this one — and the ladder walks EVERY window, so one zoomed current
+            # window stopped every background window from entering mobile zoom
+            # (measured: @0 zoomed, @1 never zoomed; Codex review, 2026-11-17).
+            unless = "0" if state else "1"
+            IdeRelayout._tmux(
+                socket,
+                [
+                    "if-shell",
+                    "-t",
+                    pane,
+                    "-F",
+                    "#{==:#{window_zoomed_flag}," + unless + "}",
+                    f"resize-pane -Z -t {pane}",
+                ],
+            )
+
+        if want and IdeRelayout._zoomed(socket, win):
+            active = IdeRelayout._tmux(
+                socket, ["display-message", "-p", "-t", win, "#{pane_id}"]
+            )
             if active != target:
-                IdeRelayout._tmux(socket, ["resize-pane", "-t", active or f"{win}.1", "-Z"])
+                guarded(False, active or f"{win}.1")
                 IdeRelayout._tmux(socket, ["select-pane", "-t", target])
-                IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
+                guarded(True, target)
             return
-        if zoomed != want:
-            IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
+        guarded(want, target)
 
     @staticmethod
     def _role_panes(socket: str, win: str) -> dict[str, str]:
@@ -701,6 +733,15 @@ class IdeRelayout:
                 width = canonical[0]
                 height = canonical[1]
                 resized_to = canonical
+            # The frame's mobile state, decided HERE in Python and left on the
+            # window for tmux to read. The zoom hook and the pane keys consult it
+            # instead of comparing numbers in a format or a shell: the first form
+            # cannot be written portably and the second yields mid-guard.
+            IdeRelayout._tmux(
+                sock,
+                ["set-option", "-w", "-t", win, IdeLayout.MOBILE_OPTION,
+                 IdeLayout.mobile_flag_value(width)],
+            )
             if width < sw + amin + pmin:
                 roles = IdeRelayout._order_role_panes(sock, win)
                 active_pane = IdeRelayout._tmux(

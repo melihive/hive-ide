@@ -276,6 +276,14 @@ class IdeOptionsModal:
         M = IdeNewModal
         if width is None:
             width = modal_io.cols_available()
+        if rows is None:
+            # Resolved HERE, not left to `fit`. `_draw` — the only path a user
+            # ever sees — calls this without a row count, so a body variant
+            # chosen under `if rows is not None` was chosen in tests and never in
+            # production: the popup went on cutting `repair` and `archive` while
+            # every new test passed (Codex review, 2026-11-17). Width was already
+            # resolved on this line for the same reason; the two now match.
+            rows = modal_io.rows_available()
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
         groups = IdeOptionsModal._grouped_actions(record)
@@ -290,26 +298,42 @@ class IdeOptionsModal:
             f"  {M.DIM}{Path(repo).name or repo} · {driver}{M.RST}{M.EL}",
             "",
         ]
-        body: list[str] = []
-        selected_line = 0
-        offset = 0
-        # Which action each body line belongs to, by the identity of the line
-        # object. `fit` returns the very strings handed to it, so after clipping
-        # the surviving lines can be mapped back without re-deriving anything.
-        action_of_line: dict[int, int] = {}
-        for group, group_actions in groups:
-            body.append(f"  {M.DIM}{group}{M.RST}{M.EL}")
-            for action, label, note in group_actions:
-                i = actions.index((action, label, note), offset)
-                arrow = "▸" if i == sel else " "
-                if i == sel:
-                    selected_line = len(body)
-                    line = f"  {M.SEL} {arrow} {label:<14} {note} {M.RST}{M.EL}"
-                else:
-                    line = f"   {arrow} {label:<14} {M.DIM}{note}{M.RST}{M.EL}"
-                body.append(line)
-                action_of_line[id(line)] = i
-            offset += len(group_actions)
+        def build(*, group_headings: bool, notes: bool):
+            """One body variant. Returns `(lines, selected_line, action_of_line)`.
+
+            Which action each body line belongs to is keyed by the identity of the
+            line object. `fit` returns the very strings handed to it, so after
+            clipping the surviving lines map back without re-deriving anything.
+            """
+            lines: list[str] = []
+            selected_at = 0
+            seen = 0
+            of_line: dict[int, int] = {}
+            for group, group_actions in groups:
+                if group_headings:
+                    lines.append(f"  {M.DIM}{group}{M.RST}{M.EL}")
+                for action, label, note in group_actions:
+                    i = actions.index((action, label, note), seen)
+                    arrow = "▸" if i == sel else " "
+                    shown = note if notes else ""
+                    if i == sel:
+                        selected_at = len(lines)
+                        line = f"  {M.SEL} {arrow} {label:<14} {shown} {M.RST}{M.EL}"
+                    else:
+                        line = f"   {arrow} {label:<14} {M.DIM}{shown}{M.RST}{M.EL}"
+                    lines.append(line)
+                    of_line[id(line)] = i
+                seen += len(group_actions)
+            return lines, selected_at, of_line
+
+        # DECORATION GOES BEFORE CONTENT. A phone with its keyboard up reports 23
+        # rows, which is a 19-row popup interior; the full body is 13 rows of list
+        # plus 3 of header and a footer that wraps to two, and `repair` and
+        # `archive` fell off the bottom behind a `more` marker. An action the user
+        # cannot see is an action they cannot reach -- there is no scrolling on
+        # that screen -- while a group heading and a one-line note are things they
+        # can do without. So: drop the three group headings, then the notes, and
+        # only then let `fit` window the list as it always has.
         footer: list[str] = []
         if rename_value:
             # Trimmed to its row like the new-session fields: a valid 24-char
@@ -330,6 +354,15 @@ class IdeOptionsModal:
             f"  {M.DIM}↑/↓ or j/k · Enter · Esc → cancel"
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
+        body, selected_line, action_of_line = build(group_headings=True, notes=True)
+        chrome = modal_io.wrapped_rows(header, width) + modal_io.wrapped_rows(
+            footer, width
+        )
+        for variant in ({"group_headings": False, "notes": True},
+                        {"group_headings": False, "notes": False}):
+            if modal_io.wrapped_rows(body, width) + chrome <= rows:
+                break
+            body, selected_line, action_of_line = build(**variant)
         lines = modal_io.fit(
             header, body, footer, selected=selected_line, rows=rows, width=width,
             pin_selection=True,

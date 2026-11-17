@@ -6,6 +6,7 @@ import argparse
 import subprocess
 import sys
 
+from .layout import IdeLayout
 from .python_cmd import PythonCommand
 
 #: Below this a popup has no room for a title, one row and a footer, so there is
@@ -124,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.tmux_socket:
         tmux.extend(["-L", args.tmux_socket])
     width_cells, height_cells = _client_size(tmux)
-    if width_cells is not None and width_cells < 120:
+    # The SAME threshold the frame lays out by — a second copy of the number here
+    # would be the drift `layout.py` exists to prevent, and this modal is sized on
+    # one side of it while the columns are laid out on the other.
+    if width_cells is not None and IdeLayout.is_mobile(width_cells):
         width, height = "96%", "92%"
     # Size the HEIGHT from the content where the modal can say what it needs.
     # The percentages were the whole defect on a short screen: 92% of a handheld

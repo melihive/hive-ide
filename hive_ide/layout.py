@@ -69,6 +69,65 @@ class IdeLayout:
     def is_mobile(cls, window_width: int) -> bool:
         return window_width < cls.mobile_threshold()
 
+    #: Window option carrying `is_mobile` for the running frame. Python decides it
+    #: (one owner, one comparison) and tmux only ever reads a "1" or a "0", so no
+    #: tmux expression has to compare numbers — see `tmux_mobile_flag_format`.
+    MOBILE_OPTION = "@hive_ide_mobile"
+
+    @classmethod
+    def tmux_mobile_flag_format(cls) -> str:
+        """The frame's mobile state as a tmux format: synchronous, and version-proof.
+
+        Every other form has a flaw. `#{<:X,Y}` compares as TEXT — the defect this
+        replaced, false on every phone. `#{e|<:X,Y}` is correct but needs tmux 3.2,
+        and on an older tmux it renders literally, which reads as TRUE: a desktop
+        would zoom on every focus change. A shell test is portable but YIELDS, and
+        a guard that yields is stale when it lands — with two clients on one frame,
+        a selection can slip between the check and the resize (Codex review,
+        2026-11-17).
+
+        An option read is none of those: `#{==:}` on a value this package wrote.
+        Written by the relayout ladder and by `rebuild`, which are exactly the two
+        places that already run whenever the geometry can change.
+        """
+        return "#{==:#{" + cls.MOBILE_OPTION + "},1}"
+
+    @classmethod
+    def mobile_flag_value(cls, window_width: int) -> str:
+        """What to store in `MOBILE_OPTION` for a window of this width."""
+        return "1" if cls.is_mobile(window_width) else "0"
+
+    # `shell_mobile_test` (`[ ... -lt ... ]`) lived here and is gone: it yields
+    # mid-guard, and a guard that yields is stale when it lands.
+
+    @classmethod
+    def tmux_popup_mobile_format(cls) -> str:
+        """Mobile for POPUP SIZING: the window's flag, or the invoking client's width.
+
+        A popup is sized once, when it opens, for whichever client opened it — so
+        unlike the zoom it cannot wait for the ladder. A client that has just
+        attached may press a key before the relayout that writes the flag has run,
+        and would then get a desktop-sized popup it cannot read (Codex review,
+        2026-11-17). The client arm closes that gap.
+
+        The client arm is guarded on `#{client_width}` being set at all: asked
+        without a client — a hook, a test — it is empty, and an empty value read as
+        a number is zero, which is "mobile" for every frame on the server.
+
+        It uses `#{e|<:}`, which needs tmux 3.2. STATED LIMIT: on an older tmux the
+        modifier is not understood, and if it renders literally the arm reads as
+        true — popups would then always take the mobile size, which is oversized on
+        a desktop and nothing worse. The ZOOM never reads this; it stays on the
+        flag alone, so no tmux version can be talked into zooming a wide screen.
+        """
+        return (
+            "#{||:"
+            + cls.tmux_mobile_flag_format()
+            + ",#{&&:#{client_width},#{e|<:#{client_width},"
+            + str(cls.mobile_threshold())
+            + "}}}"
+        )
+
     @classmethod
     def plan_width(cls, window_width: int, side: int | None = None) -> int:
         """The plan column for a window — the AGENT has priority for the slack.

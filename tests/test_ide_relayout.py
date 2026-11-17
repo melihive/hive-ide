@@ -661,3 +661,48 @@ def test_breaker_still_catches_a_sustained_runaway(tmp_path):
     tripped = [IdeRelayout._breaker_tripped(state, t + i * 0.02)
                for i in range(IdeRelayout.BREAKER_MAX + 25)]
     assert any(tripped), "a sustained runaway must still be caught"
+
+
+def test_every_zoom_the_ladder_issues_is_one_guarded_command(monkeypatch):
+    """A `resize-pane -Z` from the ladder must carry its own guard, in one command.
+
+    Not observable from outside — sequentially, "ask then toggle" and "ask and
+    toggle in one command" behave identically; only a hook landing in the gap
+    tells them apart, and that gap is what the frame's `after-select-pane` hook
+    now lives in. So the contract is asserted on the COMMANDS, which is where it
+    is real: no bare `-Z`, every one inside an `if-shell -F` on the zoom flag.
+    """
+    from hive_ide.relayout import IdeRelayout
+
+    issued: list[list[str]] = []
+
+    def record(socket, args, **kwargs):  # noqa: ARG001
+        issued.append(list(args))
+        # Answer the branch probes: the window is zoomed, on some other pane.
+        if args[:2] == ["display-message", "-p"]:
+            return "1" if "window_zoomed_flag" in args[-1] else "%99"
+        return ""
+
+    monkeypatch.setattr(IdeRelayout, "_tmux", staticmethod(record))
+    IdeRelayout._set_zoom("sock", "@1", True, "%1")
+    IdeRelayout._set_zoom("sock", "@1", False, "%1")
+
+    bare = [
+        args for args in issued
+        if args and args[0] == "resize-pane" and "-Z" in args
+    ]
+    assert not bare, f"the ladder toggles zoom without a guard: {bare}"
+    guarded = [args for args in issued if args and args[0] == "if-shell"]
+    assert guarded, "the ladder issued no guarded zoom at all"
+    for args in guarded:
+        assert "-F" in args, args
+        assert "window_zoomed_flag" in " ".join(args), args
+        assert "resize-pane -Z" in " ".join(args), args
+        # The guard must be asked about the pane being resized. Without `-t` the
+        # format answers for whatever window is current, and the ladder walks all
+        # of them — one zoomed foreground window would veto every background one.
+        assert "-t" in args, f"the guard is not targeted: {args}"
+        target = args[args.index("-t") + 1]
+        assert args[-1].endswith(target), (
+            f"guard asks about {target} but resizes {args[-1]!r}"
+        )
