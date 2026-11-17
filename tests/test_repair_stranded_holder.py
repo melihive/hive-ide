@@ -550,6 +550,35 @@ def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
     assert _stranded(rows) == [], "a driver resuming ANOTHER conversation was selected"
 
 
+def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
+    """`codex resume --no-daemon OTHER TARGET` resumes OTHER, not TARGET.
+
+    A boolean flag takes no value, so skipping one shifted the window left and
+    read the PROMPT as the session — which authorized a SIGTERM against a live
+    agent on another conversation. Which flags take a value is the driver's
+    business, so an argv where a swallowed token could itself be a session is
+    declined outright (cross-model review, 2026-11-18).
+    """
+    other = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+    argv = ["codex", "resume", "--no-daemon", other, REFERENCE]
+
+    assert not ConversationHolders.selects_exactly(argv, REFERENCE), (
+        "the prompt was read as the session this argv selects"
+    )
+
+    rows = [
+        (100, 1, f"tmux -L {RETIRED_SOCKET} new-session -d"),
+        (201, 100, " ".join(argv)),
+    ]
+    assert _stranded(rows, argv_of=lambda pid: argv if pid == 201 else None) == [], (
+        "a driver resuming ANOTHER conversation was authorized for a signal"
+    )
+    # Positive control: the same shape with a real option VALUE still releases,
+    # so the guard narrows the ambiguous argv and nothing else.
+    works = ["codex", "resume", "--no-daemon", "-C", "/w", REFERENCE]
+    assert ConversationHolders.selects_exactly(works, REFERENCE)
+
+
 @pytest.mark.parametrize(
     "argv, selected",
     [
@@ -563,6 +592,13 @@ def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
         # `codex resume OTHER TARGET` resumes OTHER and passes TARGET as the
         # PROMPT. Only the first positional is the session.
         (["codex", "resume", "other-session-id", REFERENCE], False),
+        # A boolean flag swallows the real session and promotes the prompt into
+        # its slot. A swallowed token that could be a session means the argv is
+        # ambiguous, so nothing is selected.
+        (["codex", "resume", "--no-daemon",
+          "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", REFERENCE], False),
+        (["codex", "resume", "--sandbox",
+          "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", REFERENCE], False),
         (["claude", "--resume", "other", "-p", f"see {REFERENCE}"], False),
         (["claude", "-p", REFERENCE], False),
         # `resume` is a SUBCOMMAND, never a flag whose next argument is a

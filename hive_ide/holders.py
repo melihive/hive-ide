@@ -303,11 +303,23 @@ class ConversationHolders:
         #
         # An option's VALUE is skipped with it. Which options take one is the
         # driver's business, not ours, so the conservative reading is used: a
-        # `-x`/`--x` token consumes a following non-option token. STATED LIMIT —
-        # after a boolean flag (`resume --no-daemon <id>`) the id is read as that
-        # flag's value, no positional is found, and this answers False. That
-        # leaves the holder unreleased, which is inert; the opposite error would
-        # signal somebody else's agent.
+        # `-x`/`--x` token consumes a following non-option token.
+        #
+        # That reading can be wrong in the DANGEROUS direction, and saying it
+        # merely left a holder unreleased was the error. A BOOLEAN flag takes no
+        # value, so swallowing one shifts the whole window left and promotes the
+        # next token into the session slot: `codex resume --no-daemon OTHER
+        # TARGET` resumes OTHER and passes TARGET as the prompt, yet this read
+        # TARGET as the session and so authorized a SIGTERM against a live agent
+        # on another conversation (cross-model review, 2026-11-18).
+        #
+        # Shape cannot tell `--no-daemon OTHER` from `-C <dir>` apart without
+        # per-driver flag knowledge, so the answer is not a cleverer parse but a
+        # narrower one: only a token SWALLOWED as an option's value is in doubt,
+        # and if one of those could be a session itself the argv is ambiguous and
+        # nothing is selected. The real argv this package generates carries a
+        # working directory there, never a second id, so the release still works;
+        # an ambiguous argv leaves the holder alone, which is inert.
         # Only for a driver that HAS a `resume` subcommand. `claude` does not —
         # it selects with `--resume` — so for it the word is ordinary prompt
         # text, and `claude -p resume <id>` must not select anything. Without
@@ -316,6 +328,7 @@ class ConversationHolders:
         if os.path.basename(argv[0]).lower().split(".")[0] not in cls.SUBCOMMAND_DRIVERS:
             return False
         positionals: list[str] = []
+        swallowed: list[str] = []
         index = 1
         while index < len(argv):
             token = argv[index]
@@ -327,14 +340,43 @@ class ConversationHolders:
                     and not argv[following].startswith("-")
                     and argv[following] != "resume"     # a subcommand, not a value
                 ):
+                    swallowed.append(argv[following])
                     index = following + 1
                 else:
                     index += 1
                 continue
             positionals.append(token)
             index += 1
-        return len(positionals) >= 2 and positionals[0] == "resume" and (
-            positionals[1] == reference
+        if not (
+            len(positionals) >= 2
+            and positionals[0] == "resume"
+            and positionals[1] == reference
+        ):
+            return False
+        return not any(
+            cls._could_be_a_session(token, reference) for token in swallowed
+        )
+
+    #: Characters an id is built from. Used only to compare one token's SHAPE
+    #: with another's, never to validate an id.
+    _HEX = frozenset("0123456789abcdefABCDEF")
+
+    @classmethod
+    def _could_be_a_session(cls, token: str, reference: str) -> bool:
+        """Could `token` be the session that `reference` is?
+
+        Shape is derived from the reference UNDER TEST, not from a list of known
+        id formats: a driver whose ids are not UUIDs is covered by the same rule,
+        and there is no format table to keep current. Two tokens have one shape
+        when, at every position, either both are id characters or both are the
+        same literal separator — so another UUID matches a UUID, while `/w` or a
+        prompt does not.
+        """
+        if len(token) != len(reference):
+            return False
+        return all(
+            (left in cls._HEX and right in cls._HEX) or left == right
+            for left, right in zip(token, reference)
         )
 
     @classmethod
