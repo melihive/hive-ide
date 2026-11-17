@@ -70,6 +70,44 @@ class IdeLayout:
         return window_width < cls.mobile_threshold()
 
     @classmethod
+    def tmux_mobile_format(cls, width: str = "#{client_width}") -> str:
+        """`is_mobile` as a tmux FORMAT, for the places that can only take a format.
+
+        `#{<:X,Y}` compares as TEXT, not as numbers: `#{<:49,120}` is false, because
+        "4" sorts after "1". The three mobile predicates written that way were true
+        only for widths 10-11 and 100-119, and so never on a phone. A 49-column
+        client therefore got desktop popup geometry — a 52%-wide modal drawing 2 of
+        10 session actions — and the zoom-preserving branch of every pane key was
+        dead, so focus dropped the mobile zoom and the frame fell back into three
+        crushed columns. Two reports from a phone, one predicate.
+
+        `#{e|<:X,Y}` is the arithmetic comparison and answers the question asked.
+        `shell_mobile_test` is the same predicate for a command branch; a real-tmux
+        test holds the two to the same answer at widths either side of the threshold.
+        """
+        return "#{e|<:" + width + "," + str(cls.mobile_threshold()) + "}"
+
+    @classmethod
+    def shell_mobile_test(cls, width: str = "#{window_width}") -> str:
+        """`is_mobile` as a `[ ... ]` test for `if-shell`, which expands the format first.
+
+        Preferred wherever a COMMAND (not a value) is being chosen: the shell owns the
+        comparison, so no tmux version can read it as text, and the arithmetic format
+        modifier is not required. Reads the WINDOW by default — a hook runs without a
+        client of its own, and tmux sizes the window to the narrow client anyway.
+        """
+        return f"[ {width} -lt {cls.mobile_threshold()} ]"
+
+    @classmethod
+    def shell_mobile_unzoomed_test(cls, width: str = "#{window_width}") -> str:
+        """Mobile AND not already zoomed — the guard a zoom-follows-focus hook needs.
+
+        `resize-pane -Z` TOGGLES, so a hook that fired on an already-zoomed window
+        would unzoom it, the exact opposite of its job.
+        """
+        return f"{cls.shell_mobile_test(width)} && [ #{{window_zoomed_flag}} = 0 ]"
+
+    @classmethod
     def plan_width(cls, window_width: int, side: int | None = None) -> int:
         """The plan column for a window — the AGENT has priority for the slack.
 

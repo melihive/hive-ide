@@ -3193,7 +3193,8 @@ class Frame:
                 self.socket,
             ],
         )
-        mobile_popup = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
+        # A FORMAT here, not an if-shell: tmux chooses the VALUE of -w/-h.
+        mobile_popup = IdeLayout.tmux_mobile_format()
         new_popup_width = "#{?" + mobile_popup + ",96%,52%}"
         new_popup_height = "#{?" + mobile_popup + ",92%,42%}"
         if key := keys.get("new"):
@@ -3559,18 +3560,44 @@ class Frame:
                 attention_hook(focus_elect),
             ]
         )
-        self.tmux(["set-hook", "-t", self.target, "-u", "after-select-pane"])
+        # ZOOM FOLLOWS FOCUS while the frame is mobile. Every other way of moving
+        # focus -- a tap on a pane, `ide_nav`, a driver launch, a modal handing
+        # focus back -- goes through plain `select-pane`, and tmux drops the zoom
+        # on any of them. One drop was permanent: nothing re-zoomed, so the phone
+        # sat in three crushed columns (sidebar 1 col, agent 27, plan 19) for the
+        # rest of the session. The pane keys above carry the zoom themselves; this
+        # covers every path that is not a key.
+        #
+        # This hook was UNSET here before, and a test asserted its absence, because
+        # an older one ran a full relayout and stormed. This one runs `resize-pane
+        # -Z` and nothing else, only while the window is under the mobile threshold
+        # and only when it is not already zoomed -- `-Z` toggles, so without that
+        # second clause the hook would unzoom what the ladder just zoomed. Zoom
+        # raises no pane-selection event, so it cannot re-enter: measured at 40
+        # selects, no extra server children (`temp/scripts/repro-focushook3.py`).
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "after-select-pane",
+                "if-shell '"
+                + IdeLayout.shell_mobile_unzoomed_test()
+                + "' 'resize-pane -Z'",
+            ]
+        )
         sidebar_key = keys.get("sidebar")
         if sidebar_key:
             self.tmux(
                 [
                     "bind-key",
                     sidebar_key,
-                    "if-shell",
-                    "-F",
-                    f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    "if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z ; select-pane -t .0 ; resize-pane -Z' 'select-pane -t .0 ; resize-pane -Z'",
-                    "select-pane -t .0",
+                    # Just select. The `after-select-pane` hook re-zooms when the
+                    # window is mobile, so a key that also toggled `-Z` itself would
+                    # now toggle the hook's zoom straight back off.
+                    "select-pane",
+                    "-t",
+                    ".0",
                 ]
             )
         for action, index in (("chat", "1"), ("plan", "2")):
@@ -3581,13 +3608,10 @@ class Frame:
                 [
                     "bind-key",
                     key,
-                    "if-shell",
-                    "-F",
-                    f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z ; select-pane -t .{index} ; resize-pane -Z' 'select-pane -t .{index} ; resize-pane -Z'",
-                    "if-shell -F '#{window_zoomed_flag}' "
-                    f"'resize-pane -Z ; select-pane -t .{index}' "
-                    f"'select-pane -t .{index}'",
+                    # Same as the sidebar key: selection only, zoom is the hook's.
+                    "select-pane",
+                    "-t",
+                    f".{index}",
                 ]
             )
         bound = sorted({key for key in keys.values() if key})
@@ -3674,6 +3698,10 @@ class Frame:
         "client-detached",
         "client-focus-in",
         "client-active",
+        # Zoom follows focus on a mobile frame. Listed here so a frame opened by
+        # an older package — which left the three crushed columns behind on any
+        # focus change — is reported stale and repaired without reopening.
+        "after-select-pane",
     )
 
     def installed_frame_hooks(self) -> set[str] | None:
