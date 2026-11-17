@@ -22,7 +22,9 @@ signal — see `holders()` for what is excluded and why.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+from pathlib import Path
 
 
 class ConversationHolders:
@@ -90,7 +92,14 @@ class ConversationHolders:
         """
         try:
             result = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,command="],
+                # `-ww` or the command is TRUNCATED to $COLUMNS, and this package
+                # runs inside tmux panes, which export it. At 80 columns a
+                # driver's argv is cut long before its `--resume <uuid>`, so the
+                # holder becomes invisible and the guard fails OPEN — two drivers
+                # on one conversation, the permanently blank pane this module
+                # exists to prevent. `socket_gc` already learned this (`-axww`);
+                # here it was missed until a narrow-pane test reproduced it.
+                ["ps", "-ww", "-eo", "pid=,ppid=,command="],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -182,6 +191,331 @@ class ConversationHolders:
                     "orphaned": ppid == 1 and not background,
                 }
             )
+        return found
+
+    #: A socket name this package would recognise. Matched WHOLE: a name that
+    #: only partly matches is not a name we may act on. `hive-ide-old:active`
+    #: once yielded `hive-ide-old` under a search, which addresses a DIFFERENT
+    #: server — and a clientless one of that name would then have authorized a
+    #: signal (cross-model review, 2026-11-17).
+    _SOCKET_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+    @classmethod
+    def _socket_from_tmux_argv(cls, command: str) -> str | None:
+        """The `-L` name a tmux server was started with, or None if not plainly one.
+
+        Parsed as OPTIONS, not searched for. tmux takes the LAST of a repeated
+        option, so `-L a -L b` is server `b`, while a search returns `a` — the
+        wrong server, and the whole point of this walk is to decide whether to
+        signal something inside it.
+
+        `-S <path>` addresses a socket by path instead. A frame never uses it,
+        and mixing the two (`-L a -S /elsewhere`) means the name says nothing
+        about where the server actually is, so both cases answer None.
+        """
+        tokens = command.split()
+        name: str | None = None
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "-S" or (token.startswith("-S") and len(token) > 2):
+                return None
+            if token == "-L":
+                if index + 1 >= len(tokens):
+                    return None
+                name, index = tokens[index + 1], index + 2
+                continue
+            if token.startswith("-L") and len(token) > 2:
+                name, index = token[2:], index + 1
+                continue
+            index += 1
+        if name is None or not cls._SOCKET_NAME.fullmatch(name):
+            return None
+        return name
+
+    #: Flags whose VALUE is a conversation. The bare word `resume` is NOT here:
+    #: it is a subcommand, and treating it as a selector let ordinary prose do
+    #: the selecting — `-p "how to resume <id> safely"` named a conversation the
+    #: driver was not resuming (cross-model review, 2026-11-17).
+    #:
+    #: `--continue` is NOT here either, and that was a defect: it is BOOLEAN
+    #: (`claude -c`/`--continue` resumes the most recent conversation and takes
+    #: no id), so reading the next token as its value turned a PROMPT into a
+    #: selection and authorized a signal against whatever conversation that
+    #: prompt happened to name (cross-model review, 2026-11-18). A `--continue`
+    #: process does hold a conversation, but nothing in its argv says WHICH, so
+    #: this path cannot name it and must leave it alone.
+    SELECTION_FLAGS = frozenset({"--resume", "--session-id"})
+
+    #: Options that make the invocation a FORK: it starts a NEW conversation from
+    #: the one it resumes, so that id is the fork's SOURCE and not what the
+    #: process holds. Signalling it would kill a live agent on a conversation
+    #: nobody asked to release (cross-model review, 2026-11-18).
+    FORK_FLAGS = frozenset({"--fork-session"})
+
+    #: Options that pick the session THEMSELVES, so the first positional after
+    #: `resume` is a PROMPT and names nothing: `codex resume --last <text>`
+    #: resumes the most recent session and passes <text> as the prompt. They take
+    #: no value, so the parse walked straight past them and read that prompt as
+    #: the session (cross-model review, 2026-11-18).
+    IMPLICIT_SELECTION_OPTIONS = frozenset({"--last"})
+
+    #: Flags whose value is a fork's SOURCE once the invocation is a fork, and so
+    #: selects nothing. `--session-id` is deliberately NOT here: it names the NEW
+    #: conversation, the one the process really holds. The real background-host
+    #: shape in `tests/test_background_session_attach.py` carries both at once, so
+    #: rejecting a fork outright would blind this path to a genuine holder.
+    FORK_SOURCE_FLAGS = frozenset({"--resume", "--continue"})
+
+    #: Options of a `resume` driver that CONSUME the following token, so that
+    #: token is a value and never the session. Declared from `codex --help` and
+    #: `codex resume --help` rather than guessed: the session id may be a NAME as
+    #: well as a UUID, so no shape test can tell a swallowed session from a
+    #: swallowed directory, and the guess read a PROMPT as the session
+    #: (cross-model review, 2026-11-18).
+    VALUE_OPTIONS = frozenset({
+        "-c", "--config", "--enable", "--disable", "--remote",
+        "--remote-auth-token-env", "-m", "--model", "--local-provider",
+        "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
+        "-a", "--ask-for-approval",
+    })
+
+    #: Options of a `resume` driver that consume NOTHING. An option in NEITHER
+    #: set is unknown — including a VARIADIC one such as `-i/--image <FILE>...`,
+    #: which consumes an unknowable number of tokens — and an unknown option puts
+    #: the session's position beyond proof, so the holder is left alone.
+    BOOLEAN_OPTIONS = frozenset({
+        "--strict-config", "--oss", "--approve-for-me",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust", "--worktree", "--search",
+        "--no-alt-screen", "--no-daemon", "--last", "--all",
+        "--include-non-interactive", "-h", "--help", "-V", "--version",
+    })
+
+    #: Drivers whose conversation is selected by a `resume` SUBCOMMAND with a
+    #: positional id, rather than by a flag. For anything else the bare word is
+    #: ordinary text and selects nothing.
+    SUBCOMMAND_DRIVERS = frozenset({"codex"})
+
+    @staticmethod
+    def argv_of(pid: int) -> list[str] | None:
+        """The process's REAL argv, with argument boundaries intact.
+
+        `ps` flattens argv into one space-joined line, which throws away the
+        boundaries this decision rests on: a prompt is a single argument, but
+        flattened it reads as a row of tokens, and any two of them can look like
+        a flag and its value. `/proc/<pid>/cmdline` is NUL-separated, so a
+        prompt stays one element and cannot select anything.
+
+        None where it cannot be read — a platform without /proc, or a process
+        already gone — and on this path None protects: no argv, no signal.
+        """
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        if not raw.strip(b"\0"):
+            return None
+        return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+    @classmethod
+    def selects_exactly(cls, argv: list[str], reference: str) -> bool:
+        """Is `reference` the conversation this argv actually SELECTS?
+
+        `holders()` accepts a looser reading on purpose: it feeds the launch
+        guard, where a false positive only REFUSES a launch, and refusing is
+        safe. The kill path cannot afford it — there the same false positive
+        signals somebody's live agent — so this asks the strict question of a
+        real argv:
+
+        - the value of a selection FLAG (`--resume <id>`, `--resume=<id>`), or
+        - a positional argument of the `resume` SUBCOMMAND, which is the form
+          the bundled Codex driver launches:
+          `codex resume --no-daemon -C <dir> <id>`. Rejecting that left Codex
+          sessions permanently stuck, since the guard recognised the holder
+          while this did not (cross-model review, 2026-11-17).
+        """
+        if not argv:
+            return False
+        # A fork resumes one conversation to start another. Judged on the KILL
+        # path only: the loose `holders()` guard may go on treating a fork as a
+        # holder, where the cost is a refused launch and not a signal.
+        forking = any(token.partition("=")[0] in cls.FORK_FLAGS for token in argv)
+        # EVERY selection is collected before any is believed. Returning on the
+        # first match read `--resume TARGET --resume OTHER` as selecting TARGET,
+        # while the CLI itself takes the LAST — the same trap already fixed for
+        # tmux's repeated `-L` above, which this missed (cross-model review,
+        # 2026-11-18). Two selections that disagree are not resolved here: the
+        # argv no longer names one conversation, so it names none.
+        selections: set[str] = set()
+        for index, token in enumerate(argv):
+            flag = token.partition("=")[0]
+            if forking and flag in cls.FORK_SOURCE_FLAGS:
+                continue                       # the source, not what is held
+            if token in cls.SELECTION_FLAGS:
+                if index + 1 < len(argv):
+                    selections.add(argv[index + 1])
+            elif "=" in token and flag in cls.SELECTION_FLAGS:
+                selections.add(token.partition("=")[2])
+        if selections:
+            return selections == {reference}
+        # The subcommand form, `… resume [options] <session> [prompt]`.
+        #
+        # The session is the FIRST positional after `resume` — never merely one
+        # of them. `codex resume OTHER TARGET` resumes OTHER and passes TARGET
+        # as the prompt, so accepting any positional would have signalled a live
+        # agent on another conversation. Global options may precede `resume`
+        # (`codex --no-daemon resume -C /w <id>` is what this package generates),
+        # so the subcommand is located rather than assumed at argv[1].
+        #
+        # An option's VALUE is skipped with it, so WHICH options take one decides
+        # where the session sits. Guessing that was the defect: a BOOLEAN flag
+        # takes no value, so swallowing one shifts the window left and promotes
+        # the next token into the session slot. `codex resume --no-daemon OTHER
+        # TARGET` resumes OTHER and passes TARGET as the prompt, yet the guess
+        # read TARGET as the session and authorized a SIGTERM against a live
+        # agent on another conversation. Shape cannot rescue it either — a codex
+        # session id may be a NAME as much as a UUID, so a swallowed session is
+        # indistinguishable from a swallowed directory (cross-model review,
+        # 2026-11-18, two rounds).
+        #
+        # So the options are DECLARED, from the drivers' own `--help`, and an
+        # option in neither set is unknown. An unknown option puts the session's
+        # position beyond proof, and this path acts only on proof, so it answers
+        # False and the holder is left alone — inert, and the release of every
+        # argv shape this package actually generates is unaffected.
+        # Only for a driver that HAS a `resume` subcommand. `claude` does not —
+        # it selects with `--resume` — so for it the word is ordinary prompt
+        # text, and `claude -p resume <id>` must not select anything. Without
+        # this gate the two cannot be told apart: `-p resume` and
+        # `--no-daemon resume` are the same shape with opposite meanings.
+        if os.path.basename(argv[0]).lower().split(".")[0] not in cls.SUBCOMMAND_DRIVERS:
+            return False
+        if any(
+            token.partition("=")[0] in cls.IMPLICIT_SELECTION_OPTIONS
+            for token in argv
+        ):
+            return False
+        positionals: list[str] = []
+        index = 1
+        while index < len(argv):
+            token = argv[index]
+            if token.startswith("-"):
+                flag = token.partition("=")[0]
+                known = flag in cls.VALUE_OPTIONS or flag in cls.BOOLEAN_OPTIONS
+                if not known:
+                    return False
+                # `--flag=value` carries its value inside the token.
+                takes_one = flag in cls.VALUE_OPTIONS and "=" not in token
+                index += 2 if takes_one else 1
+                continue
+            positionals.append(token)
+            index += 1
+        return (
+            len(positionals) >= 2
+            and positionals[0] == "resume"
+            and positionals[1] == reference
+        )
+
+    @classmethod
+    def server_of(
+        cls, pid: int, rows: list[tuple[int, int, str]] | None = None
+    ) -> tuple[str | None, int | None]:
+        """`(socket, pid)` of the tmux server that ultimately owns `pid`.
+
+        Walks PARENTS, not children: a driver sits under its `sh -c` wrapper,
+        which sits under the pane, which sits under the server. That chain is the
+        only thing tying a process to the frame it belongs to — ppid alone says
+        nothing, which is why `orphaned` (ppid 1) misses a driver stranded in a
+        retired server entirely.
+
+        The server's PID comes back with the name because a name alone cannot be
+        verified: the same `-L` name in a different socket directory is a
+        different server. Whoever probes it has to confirm it answered.
+        """
+        rows = cls._ps() if rows is None else rows
+        parents = {pid_: ppid for pid_, ppid, _command in rows}
+        commands = {pid_: command for pid_, _ppid, command in rows}
+        seen: set[int] = set()
+        current: int | None = pid
+        while current and current > 1 and current not in seen:
+            seen.add(current)
+            command = commands.get(current) or ""
+            head = command.split(None, 1)[0] if command else ""
+            if head.rsplit("/", 1)[-1] == "tmux":
+                return cls._socket_from_tmux_argv(command), current
+            current = parents.get(current)
+        return None, None
+
+    @classmethod
+    def stranded(
+        cls,
+        reference: str,
+        *,
+        live_socket: str | None,
+        has_clients,
+        live_server_pid: int | None = None,
+        argv_of=None,
+        rows: list[tuple[int, int, str]] | None = None,
+        exclude_tree: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Holders NOTHING can reach: a retired frame, no client, not the live one.
+
+        The shape found in the field on 2026-11-17. A frame had been rebuilt onto the
+        current socket while the pre-2.0 server kept running with the session's
+        driver alive inside it for 31 days. It held the conversation, so every
+        relaunch hit the holder guard and every repair rebuilt a frame whose
+        driver could never start — a stalemate no amount of repairing resolves.
+
+        `orphaned` does not describe it: the driver's ppid is its own `sh -c`
+        wrapper, so it reads as perfectly parented. What makes it provably
+        abandoned is the three together:
+
+        1. it lives under a tmux server that is NOT the live frame's,
+        2. that server has no client attached, so no human can see or type at it,
+        3. the socket is one this package hands out, so the server is ours.
+
+        `has_clients(socket) -> bool | None` answers (2). None means the question
+        could not be answered, and an unanswered question PROTECTS: only a
+        positive "no clients" makes a candidate. A backgrounded host is excluded
+        for the same reason it is excluded from the launch guard — it is held on
+        purpose, and the remedy for it is `attach`, never a signal.
+        """
+        from .socket_gc import SocketReaper
+
+        rows = cls._ps() if rows is None else rows
+        # The host AND everything under it, exactly as the launch guard does. The
+        # host spawns the real driver as a child that carries no marker of its
+        # own, so exempting only the host leaves that child looking stranded —
+        # and here the consequence is not a refused launch but a SIGTERM to a
+        # session the user backgrounded on purpose (cross-model review,
+        # 2026-11-17).
+        backgrounded = cls.background_tree(reference, rows=rows)
+        found: list[dict[str, object]] = []
+        for holder in cls.holders(reference, exclude_tree=exclude_tree, rows=rows):
+            if holder.get("background") or int(holder["pid"]) in backgrounded:
+                continue
+            argv = (argv_of or cls.argv_of)(int(holder["pid"]))
+            if argv is None or not cls.selects_exactly(argv, reference):
+                # No readable argv is not evidence, and a mention is not a
+                # selection. Either way: not something to signal.
+                continue
+            socket_name, server_pid = cls.server_of(int(holder["pid"]), rows)
+            if not socket_name or server_pid is None:
+                continue
+            if live_server_pid is not None:
+                # Identity, not spelling. The same `-L` name under a different
+                # `TMUX_TMPDIR` is a DIFFERENT server, so comparing names alone
+                # would hide a genuinely stranded holder behind a coincidence.
+                if server_pid == live_server_pid:
+                    continue
+            elif socket_name == live_socket:
+                continue        # no identity to compare: fall back to the name
+            if not SocketReaper.ours(socket_name):
+                continue        # someone else's tmux: never ours to touch
+            if has_clients(socket_name, server_pid) is not False:
+                continue        # True is in use, None is unknown; both protect
+            found.append({**holder, "socket": socket_name, "server_pid": server_pid})
         return found
 
     @classmethod

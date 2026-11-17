@@ -2226,7 +2226,7 @@ def test_repair_warns_for_stale_partial_status_hooks(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _self, _args, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(
@@ -2463,7 +2463,7 @@ def test_repair_retitles_healthy_existing_window(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _self, _args, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
@@ -2589,7 +2589,7 @@ def test_repair_refreshes_stale_sidebar_wrapper_without_rebuilding(
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _self, _args, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
@@ -2692,7 +2692,7 @@ def test_repair_preserves_live_panes_when_only_cwd_differs(tmp_path, monkeypatch
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{old_worktree}\n"
@@ -2773,7 +2773,7 @@ def test_repair_respawns_non_terminal_agent_pane_that_fell_back_to_shell(
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -2841,7 +2841,7 @@ def test_repair_preserves_shell_wrapper_with_live_driver_child(tmp_path, monkeyp
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -2905,7 +2905,7 @@ def test_repair_preserves_intentionally_sleeping_shell_agent(tmp_path, monkeypat
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -2953,7 +2953,7 @@ def test_repair_does_not_build_missing_sleeping_window(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _self, _args, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
     result = SessionRepair(store, Frame(store, socket="test")).repair(record)
@@ -3014,7 +3014,7 @@ def test_repair_preserves_shell_wrapper_with_nested_live_driver_child(
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -3101,7 +3101,7 @@ def test_repair_preserves_live_shell_driver_despite_stale_agent_env(
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -3151,7 +3151,7 @@ def test_repair_does_not_respawn_terminal_session_shell_pane(tmp_path, monkeypat
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -3190,7 +3190,7 @@ def test_repair_dry_run_reports_deleted_sidebar_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=f"sidebar\t%1\t{deleted} (deleted)\nagent\t%2\t{workspace}\nplan\t%3\t{workspace}\n",
             stderr="",
@@ -3245,7 +3245,7 @@ def test_repair_respawns_only_the_sidebar_pane_with_deleted_cwd(tmp_path, monkey
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=f"sidebar\t%1\t{deleted} (deleted)\nagent\t%2\t{workspace}\nplan\t%3\t{workspace}\n",
             stderr="",
@@ -3297,7 +3297,7 @@ def test_repair_rebuilds_window_with_deleted_agent_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=f"sidebar\t%1\t{workspace}\nagent\t%2\t{deleted} (deleted)\nplan\t%3\t{workspace}\n",
             stderr="",
@@ -3354,7 +3354,7 @@ def test_repair_rebuilds_window_with_stale_agent_environment(tmp_path, monkeypat
     monkeypatch.setattr(
         Frame,
         "tmux",
-        lambda _self, _args: SimpleNamespace(
+        lambda _self, _args, **_kw: SimpleNamespace(
             returncode=0,
             stdout=(
                 f"sidebar\t%1\t{workspace}\n"
@@ -4482,7 +4482,7 @@ def test_current_plan_marks_live_micro_readonly_without_respawning(
     monkeypatch.setenv("TMUX_PANE", "%2")
     calls = []
 
-    def fake_tmux(argv):
+    def fake_tmux(argv, **_kwargs):
         calls.append(argv)
         if argv == ["display-message", "-p", "-t", "%3", "#{pane_current_command}"]:
             return SimpleNamespace(returncode=0, stdout="micro\n", stderr="")
@@ -4522,7 +4522,7 @@ def test_current_plan_preserves_shell_wrapped_live_micro(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%2")
     calls = []
 
-    def fake_tmux(argv):
+    def fake_tmux(argv, **_kwargs):
         calls.append(argv)
         if argv == ["display-message", "-p", "-t", "%3", "#{pane_current_command}"]:
             return SimpleNamespace(returncode=0, stdout="sh\n", stderr="")
@@ -4678,7 +4678,7 @@ def test_scratchpad_popup_uses_micro_at_scratchpad_line(tmp_path, monkeypatch):
     monkeypatch.setattr("hive_ide.frame.shutil.which", lambda command: "/usr/bin/micro")
     calls = []
 
-    def fake_tmux(argv):
+    def fake_tmux(argv, **_kwargs):
         calls.append(argv)
         if argv == ["display-message", "-p", "#{client_width}"]:
             return SimpleNamespace(returncode=0, stdout="160", stderr="")
@@ -4721,7 +4721,7 @@ def test_plan_popup_opens_plan_at_top(tmp_path, monkeypatch):
     monkeypatch.setattr("hive_ide.frame.shutil.which", lambda command: "/usr/bin/micro")
     calls = []
 
-    def fake_tmux(argv):
+    def fake_tmux(argv, **_kwargs):
         calls.append(argv)
         if argv == ["display-message", "-p", "#{client_width}"]:
             return SimpleNamespace(returncode=0, stdout="160", stderr="")
@@ -4756,7 +4756,7 @@ def test_tasks_popup_opens_first_unfinished_task(tmp_path, monkeypatch):
     monkeypatch.setattr("hive_ide.frame.shutil.which", lambda command: "/usr/bin/micro")
     calls = []
 
-    def fake_tmux(argv):
+    def fake_tmux(argv, **_kwargs):
         calls.append(argv)
         if argv == ["display-message", "-p", "#{client_width}"]:
             return SimpleNamespace(returncode=0, stdout="160", stderr="")

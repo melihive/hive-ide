@@ -677,20 +677,25 @@ def test_which_action_enter_will_run_survives_a_screen_too_small(tmp_path):
     interior height eleven — well above the sub-height-eight limitation this
     file already documents.
 
-    The selected row now outranks everything but the title and the footer.
+    The selected row now outranks everything but the title and a footer line
+    that is not a key hint.
 
-    GUARANTEED, no exceptions: every interior at least 6 rows tall AND at least
-    34 cells wide draws all twelve actions distinguishably — swept, 0 of 735
-    violations.
+    GUARANTEED, no exceptions and no size floor: EVERY swept interior — from
+    14x4, the popup floor, up — draws all twelve actions distinguishably.
 
-    LIMIT, stated not hidden: 43 sizes below that still draw some selections
-    alike — interiors 4-5 rows tall at any width, and interiors 24 cells or
-    narrower at 6-11 rows. There the footer, wrapped at that width, fills the
-    screen before the selection gets a row. Letting the selection outrank the
-    footer is a trade this phase did not take: the footer carries the escape
-    hint and, while renaming, the field being typed into. It is a task on the
-    plan, not a silent gap. (An interior of 4 rows means a client terminal of
-    6 — the popup floor.)
+    The earlier guarantee started at 6 rows AND 34 cells, and 16 sizes under it
+    drew some selections alike: interiors 4-5 rows at any width, and 14-20 cells
+    at 6-9 rows. There the key-hint line, wrapped at that width, filled the
+    screen before the selection got a row — at 20x6 it takes four rows and left
+    the title alone on screen. The trade the user settled on 2026-11-17: a
+    screen that small does not get hints. `fit` sheds the hint line, and only
+    the hint line, and only when keeping it would cost the selected row — at
+    20x8, where both fit, the hint is still drawn (asserted below).
+
+    What is NOT shed is a footer line carrying a field: the rename field lives
+    in this footer above the hint, and typing blind into a field Enter commits
+    is the defect that ordering exists to stop
+    (`test_the_rename_field_survives_a_screen_too_small_for_the_chrome`).
     """
     store, record = _session(tmp_path)
     repo = store.workspace_key
@@ -704,10 +709,10 @@ def test_which_action_enter_will_run_survives_a_screen_too_small(tmp_path):
                 _options_frame(record, repo, rows, width, sel)
                 for sel in range(len(actions))
             }
-            if len(frames) != len(actions) and rows >= 6 and width >= 34:
+            if len(frames) != len(actions):
                 blind.append(f"{width}x{rows}: {len(frames)} of {len(actions)}")
     assert not blind, "\n  ".join(
-        ["selections were indistinguishable inside the guarantee:"] + blind[:12]
+        [f"selections were indistinguishable at {len(blind)} size(s):"] + blind[:12]
     )
 
     # The size Codex reported is fully distinguishable, archive included.
@@ -715,6 +720,19 @@ def test_which_action_enter_will_run_survives_a_screen_too_small(tmp_path):
         _options_frame(record, repo, 8, 20, sel) for sel in range(len(actions))
     }
     assert len(frames) == len(actions), f"20x8: {len(frames)} of {len(actions)}"
+
+    # The hint is spent to BUY the selection, never dropped on principle: at
+    # 20x8 both fit and the hint is still drawn, while at 20x6 — where the
+    # wrapped hint would take the whole screen — it goes and the selection stays.
+    roomy = _drawn_at(record, repo, rows=8, width=20)
+    assert any("Esc" in line for line in roomy), (
+        "20x8: the hint was shed although the selection fits beside it"
+    )
+    assert any("chat" in line for line in roomy), "20x8: the selection is missing"
+    tight = _drawn_at(record, repo, rows=6, width=20)
+    assert any("chat" in line for line in tight), (
+        "20x6: the selected row is still missing — the hint was not shed"
+    )
 
 
 def _drawn_at(record: dict, repo: str, rows: int, width: int) -> list[str]:

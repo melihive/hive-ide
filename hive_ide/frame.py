@@ -178,6 +178,45 @@ class Frame:
                 argv, 124, stdout="", stderr=f"tmux timed out after {timeout}s"
             )
 
+    def tmux_on(
+        self,
+        socket: str,
+        args: list[str],
+        *,
+        tmpdir: str | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run tmux against ANOTHER socket in this frame's socket directory.
+
+        Repair has to question a server that is not the live frame's — a retired
+        one still holding a session's conversation — and the first safe question
+        to ask it is whether anyone is attached.
+
+        `tmpdir` is that server's OWN socket directory, and passing it is not
+        optional: a `-L` name resolves under `TMUX_TMPDIR`, so asking in the live
+        frame's directory answers about a different server of the same name, or
+        about an empty one this very call just brought into being. A retired
+        frame predating the pinned socket directory lives in `/tmp` while the
+        live one does not, which is exactly the case this has to reach
+        (cross-model review, 2026-11-17). Without `tmpdir` the frame's own
+        directory is used, which is right only for the frame's own socket.
+        """
+        env = None
+        root = tmpdir if tmpdir is not None else self.socket_tmpdir
+        if root:
+            if tmpdir is None:
+                self._ensure_socket_tmpdir()
+            env = {**os.environ, "TMUX_TMPDIR": root}
+        argv = ["tmux", "-L", socket, *args]
+        try:
+            return subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, env=env
+            )
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                argv, 124, stdout="", stderr=f"tmux timed out after {timeout}s"
+            )
+
     def _ensure_socket_tmpdir(self) -> None:
         """Create the pinned socket directory, private, once per frame.
 

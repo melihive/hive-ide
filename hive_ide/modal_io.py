@@ -394,6 +394,7 @@ def fit(
     width: int | None = None,
     also_selected: int | None = None,
     pin_selection: bool = False,
+    footer_hints: int = 0,
     more_above: str = "   ↑ more",
     more_below: str = "   ↓ more",
     more_both: str = "   ↕ more",
@@ -407,6 +408,21 @@ def fit(
 
     A screen too short even for the chrome keeps the header and as much else as
     fits — something readable beats a correct layout nobody can see.
+
+    `footer_hints` names the last N footer lines as KEY HINTS, which a screen
+    this small does not get. They are the only part of the chrome that may be
+    dropped, and only when keeping them would cost the selected row: at a 20x6
+    options interior the hint line wraps to four rows and left the title alone
+    on screen, so all twelve actions drew one frame while Enter still ran the
+    invisible one. A hint says how to act; the selected row says what you are
+    acting ON, and only the second is unrecoverable — Escape still works
+    unadvertised.
+
+    A footer line that is NOT a hint is never shed. The options modal's rename
+    field lives there, and typing blind into a field Enter will commit is the
+    defect this ordering exists to stop. A caller passes `footer_hints=0` once
+    its footer has become load-bearing, as the new-session modal does when it
+    names a selection the window cut.
     """
     rows = rows_available() if rows is None else rows
     width = cols_available() if width is None else width
@@ -418,42 +434,57 @@ def fit(
     def height(lines: list[str]) -> int:
         return wrapped_rows(lines, width)
 
-    chrome = height(header) + height(footer)
-    if rows <= chrome:
-        return _sacrifice(
-            header,
-            body,
-            footer,
-            max(1, rows),
-            width,
-            selected=selected,
-            also_selected=also_selected,
-            pin_selection=pin_selection,
-        )
-    budget = rows - chrome
-    if height(body) <= budget:
-        return header + body + footer
-    # A row is spent on a marker ONLY when that end is actually cut: reserving
-    # both unconditionally wastes a row on a blank end, which on a 10-row screen
-    # is a tenth of the modal. But the reserve CHANGES which ends are cut, so it
-    # cannot be settled by iterating to a fixed point — it oscillates. Walk the
-    # body height DOWN instead and take the first one whose markers also fit:
-    # fewer body rows can only ever add markers, never remove the overflow, so
-    # the first fit is the tallest honest layout and the walk cannot overrun.
-    for take in range(len(body), 0, -1):
-        visible, above, below = window(body, selected, take, also_selected)
-        middle = (
-            ([more_above] if above else [])
-            + visible
-            + ([more_below] if below else [])
-        )
-        if height(middle) <= budget:
-            return header + middle + footer
-    # No body row fits beside its own markers. Spend the budget on the selection
-    # and, if there is a row left, ONE marker saying the list is cut both ways —
-    # drawing both would overrun, and overrunning is what loses the title.
-    visible, _, _ = window(body, selected, 1, also_selected)
-    middle = [more_both] + visible
-    if height(middle) > budget:
-        middle = clip_to_rows(visible, budget, width)
-    return header + middle + footer
+    def layout(foot: list[str]) -> list[str]:
+        chrome = height(header) + height(foot)
+        if rows <= chrome:
+            return _sacrifice(
+                header,
+                body,
+                foot,
+                max(1, rows),
+                width,
+                selected=selected,
+                also_selected=also_selected,
+                pin_selection=pin_selection,
+            )
+        budget = rows - chrome
+        if height(body) <= budget:
+            return header + body + foot
+        # A row is spent on a marker ONLY when that end is actually cut:
+        # reserving both unconditionally wastes a row on a blank end, which on a
+        # 10-row screen is a tenth of the modal. But the reserve CHANGES which
+        # ends are cut, so it cannot be settled by iterating to a fixed point —
+        # it oscillates. Walk the body height DOWN instead and take the first one
+        # whose markers also fit: fewer body rows can only ever add markers,
+        # never remove the overflow, so the first fit is the tallest honest
+        # layout and the walk cannot overrun.
+        for take in range(len(body), 0, -1):
+            visible, above, below = window(body, selected, take, also_selected)
+            middle = (
+                ([more_above] if above else [])
+                + visible
+                + ([more_below] if below else [])
+            )
+            if height(middle) <= budget:
+                return header + middle + foot
+        # No body row fits beside its own markers. Spend the budget on the
+        # selection and, if there is a row left, ONE marker saying the list is
+        # cut both ways — drawing both would overrun, and overrunning is what
+        # loses the title.
+        visible, _, _ = window(body, selected, 1, also_selected)
+        middle = [more_both] + visible
+        if height(middle) > budget:
+            middle = clip_to_rows(visible, budget, width)
+        return header + middle + foot
+
+    drawn = layout(footer)
+    if not footer_hints or not pin_selection:
+        return drawn
+    # The hints are spent only to BUY the selected row, never on principle: at
+    # any size where both fit, both are drawn. `in` is the honest test — a
+    # selection clipped down to a prefix it shares with its neighbours is not
+    # on screen in the only sense that matters, which is that the reader can
+    # tell it apart.
+    if not body or not 0 <= selected < len(body) or body[selected] in drawn:
+        return drawn
+    return layout(footer[:-footer_hints])

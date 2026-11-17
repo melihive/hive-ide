@@ -639,6 +639,10 @@ class IdeNewModal:
         lines = modal_io.fit(
             header, body, footer, selected=selected_line,
             also_selected=also_selected, pin_selection=pin_selection,
+            # A stage footer is pure key hints at this point, so a screen too
+            # small may spend it on the selected row instead. It stops being a
+            # hint the moment it carries a cut summary — see the second fit.
+            footer_hints=1,
         )
         # EVERY selection that was cut gets named in the footer, not just the
         # second one. The driver can be windowed out too — at narrow widths all
@@ -684,11 +688,15 @@ class IdeNewModal:
                         f"{modal_io.truncate_to_rows(f'{cut} · {standing}', spare, cols_now - 2)}"
                         f"{C.RST}{C.EL}"
                     ]
+                # No `footer_hints` here, deliberately. This footer now NAMES a
+                # selection the window cut, so it is the only thing on screen
+                # saying what Enter will do — shedding it would restore the very
+                # defect it was added to fix.
                 lines = modal_io.fit(
                     header, body, footer, selected=selected_line,
                     also_selected=also_selected, pin_selection=pin_selection,
                 )
-        
+
         sys.stdout.write(C.CLR + "\n".join(lines))
         sys.stdout.flush()
 

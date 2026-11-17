@@ -366,6 +366,10 @@ class IdeOptionsModal:
         lines = modal_io.fit(
             header, body, footer, selected=selected_line, rows=rows, width=width,
             pin_selection=True,
+            # Only the key-hint line, which is always appended last. The rename
+            # field and the `also rename` checkbox sit above it in this same
+            # footer and are NOT hints — they are where the keystrokes land.
+            footer_hints=1,
         )
         # The click map MUST come from what was drawn. Deriving it from the full
         # action list independently was a real defect: once the list is windowed,

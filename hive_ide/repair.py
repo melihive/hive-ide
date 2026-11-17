@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import time
 import uuid
 import sys
 from pathlib import Path
@@ -16,6 +20,7 @@ from .frame import Frame
 from .health import SessionHealth
 from .holders import ConversationHolders
 from .pane_lease import LeaseStore, PaneLeases, serialized
+from .socket_gc import OrphanSweeper
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
 
@@ -93,6 +98,10 @@ class SessionRepair:
         actions.extend(checked["actions"])
         warnings.extend(checked["warnings"])
         self.refresh_driver(repaired, actions, apply=apply)
+        # Before anything tries to start an agent: a driver stranded in a retired
+        # frame owns this conversation, and the launch guard will refuse every
+        # relaunch while it does. Rebuilding cannot clear it — only releasing it can.
+        self._release_stranded_holder(repaired, actions, warnings, apply=apply)
 
         source = repaired.get("source") or {}
         interpreter = source.get("interpreter")
@@ -880,6 +889,263 @@ class SessionRepair:
         if self._shell_agent_has_live_driver_child(record):
             return None
         return pane_id
+
+    #: How long a stranded driver gets to exit after SIGTERM. It only has to
+    #: flush its transcript and close. One that ignores the signal is a fault to
+    #: REPORT, never one to escalate to SIGKILL behind the user's back — the
+    #: conversation is on disk either way, and a kill is not repair's to decide.
+    STRANDED_GRACE_SECONDS = 10.0
+    STRANDED_POLL_SECONDS = 0.25
+
+    @staticmethod
+    def _socket_root_of(server_pid: int) -> str | None:
+        """The socket directory that server itself was started with.
+
+        Read from the server's OWN environment, never ours: `-L <name>` resolves
+        under `TMUX_TMPDIR`, and a retired frame predating the pinned socket
+        directory keeps its socket in `/tmp` while the live frame's is
+        elsewhere. None where it cannot be read, which protects.
+
+        STATED LIMIT — only `/proc` is consulted, the same choice `socket_gc`
+        makes for the same question. On a platform without it this answers None,
+        so every holder reads as unknown and this whole repair is INERT rather
+        than wrong: a macOS frame keeps the stalemate and the manual remedy the
+        launch guard already prints. Reading another process's environment there
+        needs machinery this has no way to exercise from here, so it is a stated
+        gap with a task on the plan, not a guess shipped untested.
+        """
+        try:
+            raw = Path(f"/proc/{server_pid}/environ").read_bytes()
+        except OSError:
+            return None
+        return OrphanSweeper.root_from_environ(raw)
+
+    def _socket_has_clients(self, socket_name: str, server_pid: int) -> bool | None:
+        """Is anyone attached to THAT server? None whenever it cannot be certain.
+
+        Two questions hide in this one, and a wrong answer to either ends with a
+        signal sent to a process somebody is using:
+
+        1. does this name, in that server's own socket directory, actually reach
+           the server we walked to? A `-L` name is not an identity — the same
+           name in another directory is a different server — so the answer is
+           trusted only when the server reports back the PID we expect;
+        2. does it have a client attached?
+
+        Everything unprovable answers None, a dead socket included: nothing to
+        detach from is also nothing to stop.
+        """
+        root = self._socket_root_of(server_pid)
+        if root is None:
+            return None     # includes every platform without /proc — see above
+        identity = self.frame.tmux_on(
+            socket_name, ["display-message", "-p", "#{pid}"], tmpdir=root, timeout=10
+        )
+        if identity.returncode != 0 or identity.stdout.strip() != str(server_pid):
+            return None     # a different server answers there; not ours to judge
+        result = self.frame.tmux_on(
+            socket_name, ["list-clients", "-F", "#{client_tty}"],
+            tmpdir=root, timeout=10
+        )
+        if result.returncode != 0:
+            return None
+        return bool(result.stdout.strip())
+
+    def _release_stranded_holder(
+        self,
+        record: dict[str, Any],
+        actions: list[str],
+        warnings: list[str],
+        *,
+        apply: bool,
+    ) -> None:
+        """Stop a driver stranded in a retired frame, so this session can start.
+
+        The stalemate of 2026-11-17: a pre-2.0 tmux server kept running beside
+        the rebuilt frame with the session's driver alive inside it for 31 days.
+        Nothing could reach that driver — no client was attached — but it still
+        owned the conversation, so the launch guard refused every relaunch and
+        repair rebuilt a frame whose agent could never start. Repairing harder
+        does not help; the holder has to go.
+
+        Three gates, and the work happens only if ALL of them pass:
+
+        1. the live pane has NO driver of its own, so nothing here is replacing a
+           working agent;
+        2. `ConversationHolders.stranded` proves the holder unreachable — another
+           server, no client attached, a socket this package hands out;
+        3. the process is still the one that was chosen when the signal is sent.
+
+        SIGTERM only, then confirm it exited. Everything stopped is named with
+        its age, because a month-old agent disappearing silently is worse than
+        the stalemate it resolves.
+        """
+        reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        if not reference:
+            return
+        if self._has_live_shell_agent(record) or self._pane_runs_a_driver(record):
+            return      # a live driver is already running: nothing is stranded
+        rows = ConversationHolders.snapshot()
+        if not rows:
+            return      # an unreadable process table proves nothing
+        pane_pid = self.frame.agent_pane_pid(record)
+        stranded = ConversationHolders.stranded(
+            reference,
+            live_socket=self.frame.socket,
+            live_server_pid=self._live_server_pid(),
+            has_clients=self._socket_has_clients,
+            rows=rows,
+            exclude_tree=pane_pid,
+        )
+        if not stranded:
+            return
+        for holder in stranded:
+            pid = int(holder["pid"])
+            age = self._process_age(pid)
+            where = f"pid {pid} on retired socket {holder['socket']}"
+            if not apply:
+                actions.append(f"agent: would stop stranded driver — {where}{age}")
+                continue
+            if not self._still_stranded(holder):
+                # Chosen a moment ago, not now. Probing this candidate took two
+                # tmux round trips and a `ps`, and both facts it rests on can
+                # change inside that window: a client can attach, and the PID can
+                # be recycled onto something else entirely. Re-asked here, as
+                # late as it can be asked.
+                continue
+            if not self._stop_and_confirm(pid, str(holder.get("command") or "")):
+                warnings.append(
+                    f"agent: stranded driver did not exit — {where}{age}. "
+                    "It still holds this conversation, so the agent cannot start; "
+                    "stop it by hand, then repair again."
+                )
+                continue
+            actions.append(
+                f"agent: stopped stranded driver — {where}{age}; "
+                "conversation released"
+            )
+
+    def _pane_runs_a_driver(self, record: dict[str, Any]) -> bool:
+        """Is the agent pane's own command a driver, with no shell in between?
+
+        `_has_live_shell_agent` answers only for a pane running a SHELL that
+        spawned a driver. A pane whose root process IS the driver answers False
+        there, which read as "no agent running" and let this walk start looking
+        for something to signal. The other gates still protected the pane's own
+        process, but the first gate is supposed to be "a live agent means
+        nothing here is stranded", and it was not true for that shape
+        (cross-model review, 2026-11-17).
+        """
+        command = self.frame.agent_pane_command(record)
+        return bool(command) and ConversationHolders._is_driver(command)
+
+    def _live_server_pid(self) -> int | None:
+        """The PID of the frame's own tmux server, or None if it will not say.
+
+        A server's identity is its PID, not its `-L` name: the same name under a
+        different `TMUX_TMPDIR` is a different server, so excluding "the live
+        one" by name would hide a genuinely stranded holder whenever the two
+        happen to share a spelling. None falls back to the name, which is
+        protective — it can only ever exclude more.
+        """
+        result = self.frame.tmux(["display-message", "-p", "#{pid}"], timeout=10)
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        return int(raw) if raw.isdigit() else None
+
+    def _still_stranded(self, holder: dict[str, Any]) -> bool:
+        """Is this candidate STILL the thing we decided to stop?
+
+        Re-read immediately before the signal, because the two facts the verdict
+        rests on each expire:
+
+        - IDENTITY. `kill(pid, 0)` proves only that the number is live. A PID
+          recycled between the `ps` that chose it and the signal belongs to some
+          other program, so the argv must still be the exact one observed.
+        - ATTACHMENT. A client can attach while the probes run. That turns an
+          abandoned server into one a human is sitting at, and signalling into
+          exactly the thing every gate here exists to prevent.
+        """
+        pid = int(holder["pid"])
+        expected = str(holder.get("command") or "")
+        socket_name = str(holder.get("socket") or "")
+        server_pid = holder.get("server_pid")
+        if not expected or not socket_name or not isinstance(server_pid, int):
+            return False
+        # ATTACHMENT FIRST, because it is the slow question: two tmux round
+        # trips, ten seconds apiece. Asking it after the identity check would
+        # leave that check stale by exactly that long.
+        if self._socket_has_clients(socket_name, server_pid) is not False:
+            return False
+        current = {row[0]: row[2] for row in ConversationHolders.snapshot()}
+        return current.get(pid) == expected
+
+    def _stop_and_confirm(self, pid: int, expected: str = "") -> bool:
+        """SIGTERM `pid` and wait for it to actually go. False if it stayed.
+
+        The signal goes through a PIDFD where the kernel offers one. A PID is a
+        number the kernel is free to reuse the moment its process is reaped, so
+        `kill(pid, …)` after any gap at all can land on a stranger. A pidfd is
+        opened BEFORE the last identity check and refers to that one process for
+        as long as it is held: if the process exited meanwhile the send fails
+        with ESRCH instead of hitting whatever inherited its number. Where
+        pidfds are unavailable this falls back to `kill`, which is the behaviour
+        every other signal in this package already has.
+        """
+        handle = None
+        try:
+            handle = os.pidfd_open(pid)
+        except (AttributeError, OSError, ValueError):
+            handle = None
+        try:
+            if expected:
+                # Re-read as the very last thing before signalling, with the
+                # pidfd already pinning the identity it refers to.
+                current = {row[0]: row[2] for row in ConversationHolders.snapshot()}
+                if current.get(pid) != expected:
+                    return False
+            try:
+                if handle is not None:
+                    signal.pidfd_send_signal(handle, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return True         # already gone is the outcome we wanted
+            except OSError:
+                return False
+        finally:
+            if handle is not None:
+                os.close(handle)
+        deadline = time.monotonic() + self.STRANDED_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+            time.sleep(self.STRANDED_POLL_SECONDS)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def _process_age(pid: int) -> str:
+        """` (31d old)` for the report, or empty when `ps` will not say."""
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "etime=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        raw = result.stdout.strip()
+        return f" ({raw} old)" if result.returncode == 0 and raw else ""
 
     def _has_live_shell_agent(self, record: dict[str, Any]) -> bool:
         command = self.frame.agent_pane_command(record)
