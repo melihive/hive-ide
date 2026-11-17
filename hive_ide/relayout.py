@@ -99,17 +99,27 @@ class IdeRelayout:
     def _set_zoom(socket: str, win: str, want: bool, target: str | None = None) -> None:
         # `resize-pane -Z` TOGGLES, so guard on the current flag — that is what stops
         # repeated resize events (tmux fires many) from flapping in and out of zoom.
+        # EVERY toggle re-reads the flag first. The frame now carries an
+        # `after-select-pane` hook that zooms a mobile window by itself, so a
+        # `select-pane` in the middle of this method can change the very state the
+        # decision was made on: the old code selected the target and then toggled
+        # unconditionally, which turned the hook's zoom straight back off and left
+        # the phone in the squeezed layout this hook exists to prevent (Codex
+        # review, 2026-11-17).
         target = target or f"{win}.1"
-        zoomed = IdeRelayout._zoomed(socket, win)
-        if want and zoomed:
+
+        def toggle_to(state: bool) -> None:
+            if IdeRelayout._zoomed(socket, win) != state:
+                IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
+
+        if want and IdeRelayout._zoomed(socket, win):
             active = IdeRelayout._tmux(socket, ["display-message", "-p", "-t", win, "#{pane_id}"])
             if active != target:
                 IdeRelayout._tmux(socket, ["resize-pane", "-t", active or f"{win}.1", "-Z"])
                 IdeRelayout._tmux(socket, ["select-pane", "-t", target])
-                IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
+                toggle_to(True)
             return
-        if zoomed != want:
-            IdeRelayout._tmux(socket, ["resize-pane", "-t", target, "-Z"])
+        toggle_to(want)
 
     @staticmethod
     def _role_panes(socket: str, win: str) -> dict[str, str]:

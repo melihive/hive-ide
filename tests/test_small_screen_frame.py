@@ -376,3 +376,120 @@ def _if_shell_args(command: str) -> list[str]:
     import shlex
 
     return shlex.split(command)[1:]
+
+
+def test_installing_bindings_seeds_the_mobile_flag_on_existing_windows(tmp_path):
+    """Upgrading a RUNNING frame has to fix it, not just claim to.
+
+    A tmux server keeps the hooks and options it was given, so the upgrade path is
+    `bind_keys` against a live frame. Until it wrote the flag, the new hook and
+    the new keys read an option nobody had set — which reads as "not mobile", the
+    three crushed columns — and `activate` relays out only when the controller
+    changes, so upgrading from the same client reported success and changed
+    nothing the user could see.
+    """
+    frame, store = _frame(tmp_path, names=("ALPHA",))
+    try:
+        frame.open(no_attach=True)
+        window = sorted(frame.windows().values())[0]
+        # A frame as an older package left it: narrow, with no flag.
+        frame.tmux(["resize-window", "-t", window, "-x", str(PHONE[0]), "-y", str(PHONE[1])])
+        frame.tmux(["set-option", "-w", "-t", window, "-u", IdeLayout.MOBILE_OPTION])
+        assert frame.tmux(
+            ["display-message", "-p", "-t", window, "#{" + IdeLayout.MOBILE_OPTION + "}"]
+        ).stdout.strip() == "", "the flag was not actually cleared"
+
+        frame.bind_keys()
+
+        assert frame.tmux(
+            ["display-message", "-p", "-t", window, "#{" + IdeLayout.MOBILE_OPTION + "}"]
+        ).stdout.strip() == "1", "installing the bindings left the frame believing it is wide"
+
+        # And the behaviour that depends on it works immediately, with no relayout.
+        pane = frame.tmux(
+            ["display-message", "-p", "-t", f"{window}.2", "#{pane_id}"]
+        ).stdout.strip()
+        frame.tmux(["select-pane", "-t", pane])
+        assert _zoomed(frame, window) == "1", (
+            "an upgraded frame still needs a resize before focus zooms"
+        )
+    finally:
+        frame.tmux(["kill-server"])
+
+
+def test_the_ladder_does_not_undo_the_zoom_the_hook_just_applied(tmp_path):
+    """Relayout's own zoom must re-read the flag, because the hook moves it.
+
+    The ladder re-homes the zoom onto the pane it believes is focused: it unzooms,
+    selects, then zooms. With an `after-select-pane` hook in the server, that
+    middle step zooms by itself, and the ladder's unconditional toggle turned it
+    straight back off — the phone ending in exactly the squeezed layout both
+    pieces exist to prevent.
+    """
+    frame, store = _frame(tmp_path, names=("ALPHA",))
+    try:
+        frame.open(no_attach=True)
+        window = sorted(frame.windows().values())[0]
+        _ladder(frame, store, window, *PHONE)
+        panes = [
+            line.split()[0]
+            for line in frame.tmux(
+                ["list-panes", "-t", window, "-F", "#{pane_id}"]
+            ).stdout.splitlines()
+        ]
+        for pane in panes:
+            frame.tmux(["select-pane", "-t", pane])
+            assert _zoomed(frame, window) == "1"
+            _ladder(frame, store, window, *PHONE)
+            assert _zoomed(frame, window) == "1", (
+                f"the ladder unzoomed the frame with {pane} focused"
+            )
+            active = frame.tmux(
+                ["display-message", "-p", "-t", window, "#{pane_id}"]
+            ).stdout.strip()
+            assert active == pane, f"the ladder moved focus from {pane} to {active}"
+    finally:
+        frame.tmux(["kill-server"])
+
+
+def test_relayouts_zoom_survives_the_hook_zooming_first(tmp_path):
+    """`_set_zoom` must end zoomed even when its own `select-pane` zoomed already.
+
+    This is the branch the ladder takes when the pane it wants zoomed is not the
+    one focused — reachable whenever focus moves after the ladder reads it, which
+    two clients on one frame can do. It unzooms, selects, and zooms; the hook
+    zooms on that selection, so the last step has to re-read the flag instead of
+    toggling. Driven directly, because going through the ladder lands on the
+    early return where the target IS the active pane and proves nothing: a blind
+    toggle survived that test (mutation-checked, 2026-11-17).
+    """
+    from hive_ide.relayout import IdeRelayout
+
+    frame, store = _frame(tmp_path, names=("ALPHA",))
+    try:
+        frame.open(no_attach=True)
+        window = sorted(frame.windows().values())[0]
+        _ladder(frame, store, window, *PHONE)
+        panes = [
+            line.split()[0]
+            for line in frame.tmux(
+                ["list-panes", "-t", window, "-F", "#{pane_id}"]
+            ).stdout.splitlines()
+        ]
+        wanted, elsewhere = panes[1], panes[2]
+
+        frame.tmux(["select-pane", "-t", elsewhere])
+        assert _zoomed(frame, window) == "1", "the hook did not zoom the frame"
+
+        # want=True, already zoomed, and the target is NOT the active pane.
+        IdeRelayout._set_zoom(frame.socket, window, True, wanted)
+
+        assert _zoomed(frame, window) == "1", (
+            "relayout unzoomed a mobile frame while moving the zoom"
+        )
+        active = frame.tmux(
+            ["display-message", "-p", "-t", window, "#{pane_id}"]
+        ).stdout.strip()
+        assert active == wanted, f"the zoom landed on {active}, not {wanted}"
+    finally:
+        frame.tmux(["kill-server"])

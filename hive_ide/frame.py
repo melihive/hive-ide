@@ -3119,6 +3119,27 @@ class Frame:
         self.bind_keys()
         return True
 
+    def _seed_mobile_flags(self) -> None:
+        """Write `@hive_ide_mobile` on every window this server already has.
+
+        Installing bindings on a RUNNING frame is the upgrade path, and until this
+        ran, the hook and the pane keys read an option nobody had written — which
+        is "not mobile", the three crushed columns. `activate` only relays out when
+        the controller changes, so an upgrade from the same client reported success
+        and changed nothing a phone could see (Codex review, 2026-11-17). The ladder
+        keeps the flag current afterwards; this is what gives it a value to keep.
+        """
+        rows = self.tmux(
+            ["list-windows", "-t", self.target, "-F", "#{window_id}\t#{window_width}"]
+        ).stdout
+        for line in rows.splitlines():
+            window, _, width = line.partition("\t")
+            if window and width.strip().isdigit():
+                self.tmux(
+                    ["set-option", "-w", "-t", window, IdeLayout.MOBILE_OPTION,
+                     IdeLayout.mobile_flag_value(int(width.strip()))]
+                )
+
     def bind_keys(self) -> None:
         self._normalize_frame_environment()
         self._normalize_status_rows()
@@ -3617,6 +3638,7 @@ class Frame:
                 ]
             )
         bound = sorted({key for key in keys.values() if key})
+        self._seed_mobile_flags()
         self.tmux(
             ["set-option", "-g", "@hive_ide_bound_keys", " ".join(bound)]
         )
