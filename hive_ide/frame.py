@@ -2621,6 +2621,16 @@ class Frame:
             ["display-message", "-p", "-t", target, "#{window_width}"]
         ).stdout.strip()
         columns = IdeLayout.columns(int(width)) if width.isdigit() else None
+        if width.isdigit():
+            # Leave the answer on the window for the zoom hook and the pane keys.
+            # Set HERE as well as in the relayout ladder because a window built
+            # while a narrow client is attached gets no resize event of its own,
+            # and an unset option reads as "not mobile" — the three crushed
+            # columns, which is the state this whole phase is about.
+            self.tmux(
+                ["set-option", "-w", "-t", target, IdeLayout.MOBILE_OPTION,
+                 IdeLayout.mobile_flag_value(int(width))]
+            )
         if columns is None:
             self.tmux(["select-pane", "-t", sidebar_pane])
             zoomed = self.tmux(
@@ -3109,6 +3119,27 @@ class Frame:
         self.bind_keys()
         return True
 
+    def _seed_mobile_flags(self) -> None:
+        """Write `@hive_ide_mobile` on every window this server already has.
+
+        Installing bindings on a RUNNING frame is the upgrade path, and until this
+        ran, the hook and the pane keys read an option nobody had written — which
+        is "not mobile", the three crushed columns. `activate` only relays out when
+        the controller changes, so an upgrade from the same client reported success
+        and changed nothing a phone could see (Codex review, 2026-11-17). The ladder
+        keeps the flag current afterwards; this is what gives it a value to keep.
+        """
+        rows = self.tmux(
+            ["list-windows", "-t", self.target, "-F", "#{window_id}\t#{window_width}"]
+        ).stdout
+        for line in rows.splitlines():
+            window, _, width = line.partition("\t")
+            if window and width.strip().isdigit():
+                self.tmux(
+                    ["set-option", "-w", "-t", window, IdeLayout.MOBILE_OPTION,
+                     IdeLayout.mobile_flag_value(int(width.strip()))]
+                )
+
     def bind_keys(self) -> None:
         self._normalize_frame_environment()
         self._normalize_status_rows()
@@ -3193,7 +3224,8 @@ class Frame:
                 self.socket,
             ],
         )
-        mobile_popup = f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}"
+        # A FORMAT here, not an if-shell: tmux chooses the VALUE of -w/-h.
+        mobile_popup = IdeLayout.tmux_popup_mobile_format()
         new_popup_width = "#{?" + mobile_popup + ",96%,52%}"
         new_popup_height = "#{?" + mobile_popup + ",92%,42%}"
         if key := keys.get("new"):
@@ -3559,18 +3591,37 @@ class Frame:
                 attention_hook(focus_elect),
             ]
         )
-        self.tmux(["set-hook", "-t", self.target, "-u", "after-select-pane"])
+        # ZOOM FOLLOWS FOCUS while the frame is mobile. Every other way of moving
+        # focus -- a tap on a pane, `ide_nav`, a driver launch, a modal handing
+        # focus back -- goes through plain `select-pane`, and tmux drops the zoom
+        # on any of them. One drop was permanent: nothing re-zoomed, so the phone
+        # sat in three crushed columns (sidebar 1 col, agent 27, plan 19) for the
+        # rest of the session. The pane keys above carry the zoom themselves; this
+        # covers every path that is not a key.
+        #
+        # This hook was UNSET here before, and a test asserted its absence, because
+        # an older one ran a full relayout and stormed. This one runs `resize-pane
+        # -Z` and nothing else, only while the window is under the mobile threshold
+        # and only when it is not already zoomed -- `-Z` toggles, so without that
+        # second clause the hook would unzoom what the ladder just zoomed. Zoom
+        # raises no pane-selection event, so it cannot re-enter: measured at 40
+        # selects, no extra server children (`temp/scripts/repro-focushook3.py`).
+        self.tmux(
+            [
+                "set-hook",
+                "-t",
+                self.target,
+                "after-select-pane",
+                self.zoom_when_mobile(),
+            ]
+        )
         sidebar_key = keys.get("sidebar")
         if sidebar_key:
             self.tmux(
                 [
                     "bind-key",
                     sidebar_key,
-                    "if-shell",
-                    "-F",
-                    f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    "if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z ; select-pane -t .0 ; resize-pane -Z' 'select-pane -t .0 ; resize-pane -Z'",
-                    "select-pane -t .0",
+                    *self.select_pane_keeping_mobile_zoom("0"),
                 ]
             )
         for action, index in (("chat", "1"), ("plan", "2")):
@@ -3581,16 +3632,13 @@ class Frame:
                 [
                     "bind-key",
                     key,
-                    "if-shell",
-                    "-F",
-                    f"#{{<:#{{client_width}},{self.SIDEBAR_ZOOM_MAX}}}",
-                    f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z ; select-pane -t .{index} ; resize-pane -Z' 'select-pane -t .{index} ; resize-pane -Z'",
-                    "if-shell -F '#{window_zoomed_flag}' "
-                    f"'resize-pane -Z ; select-pane -t .{index}' "
-                    f"'select-pane -t .{index}'",
+                    *self.select_pane_keeping_mobile_zoom(
+                        index, unzoom_on_desktop=True
+                    ),
                 ]
             )
         bound = sorted({key for key in keys.values() if key})
+        self._seed_mobile_flags()
         self.tmux(
             ["set-option", "-g", "@hive_ide_bound_keys", " ".join(bound)]
         )
@@ -3674,7 +3722,82 @@ class Frame:
         "client-detached",
         "client-focus-in",
         "client-active",
+        # Zoom follows focus on a mobile frame. Listed here so a frame opened by
+        # an older package — which left the three crushed columns behind on any
+        # focus change — is reported stale and repaired without reopening.
+        "after-select-pane",
     )
+
+    @staticmethod
+    def zoom_when_mobile() -> str:
+        """Zoom the focused pane IF the window is mobile and not already zoomed.
+
+        IDEMPOTENT on purpose: `resize-pane -Z` is a TOGGLE, and this command is
+        issued from two places at once — the `after-select-pane` hook and the pane
+        keys — so a bare toggle would have them undo each other. Applying this one
+        three times running leaves the window zoomed (measured).
+
+        The width is tested by the shell, which no tmux version can read as text;
+        the zoom flag is tested by a FORMAT, which tmux evaluates synchronously in
+        its own command queue, immediately before the resize. The shell's answer
+        is necessarily stale by the time the subprocess returns — two overlapping
+        selections can both see "not zoomed" — and the inner check is what closes
+        that window (Codex review, 2026-11-17).
+        """
+        return (
+            "if-shell -F '#{&&:"
+            + IdeLayout.tmux_mobile_flag_format()
+            + ",#{==:#{window_zoomed_flag},0}}' 'resize-pane -Z'"
+        )
+
+    @staticmethod
+    def zoom_if_unzoomed() -> str:
+        """`resize-pane -Z`, but only from unzoomed — the half that makes it idempotent.
+
+        A bare toggle cannot be issued from two places, and this one is: the
+        `after-select-pane` hook and the pane keys both ask for the same thing.
+        Evaluated by tmux in its own command queue, so there is no yield between
+        reading the flag and resizing, and nothing can slip in between — which is
+        what a shell guard could not promise (Codex review, 2026-11-17).
+        """
+        return 'if-shell -F "#{==:#{window_zoomed_flag},0}" "resize-pane -Z"'
+
+    @staticmethod
+    def select_pane_keeping_mobile_zoom(
+        index: str, *, unzoom_on_desktop: bool = False
+    ) -> list[str]:
+        """`if-shell` args for a pane key: select, and on a mobile window zoom too.
+
+        The hook alone is not enough. tmux returns EARLY from `select-pane` when
+        the target is already the active pane, and fires no `after-select-pane`
+        with it — so after a manual `prefix z` on a mobile window, pressing the
+        key for the pane you are already in left you unzoomed, where the binding
+        this replaced would have zoomed it (Codex review, 2026-11-17). Pressing a
+        pane's own key is exactly how someone asks for that pane.
+
+        Safe beside the hook because the zoom half is idempotent: when the hook
+        has already zoomed, the inner check sees it and does nothing.
+        """
+        desktop = (
+            # Kept from the binding this replaced: on a WIDE screen the pane keys
+            # are also how you leave a zoom, and tmux fires no `after-select-pane`
+            # for the pane already active, so pressing `chat` on an already-zoomed
+            # chat pane simply stayed zoomed with the other columns hidden (Codex
+            # review, 2026-11-17). The sidebar key never did this and still does
+            # not: it is how you reach the list, not how you toggle the layout.
+            "if-shell -F '#{window_zoomed_flag}' "
+            f"'resize-pane -Z ; select-pane -t .{index}' "
+            f"'select-pane -t .{index}'"
+            if unzoom_on_desktop
+            else f"select-pane -t .{index}"
+        )
+        return [
+            "if-shell",
+            "-F",
+            IdeLayout.tmux_mobile_flag_format(),
+            f"select-pane -t .{index} ; {Frame.zoom_if_unzoomed()}",
+            desktop,
+        ]
 
     def installed_frame_hooks(self) -> set[str] | None:
         """Hook names the live server carries, or None when it could not be read.

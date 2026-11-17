@@ -29,10 +29,16 @@ def test_no_geometry_defined_outside_the_owner():
     """THE GATE. A geometry name assigned a LITERAL anywhere but `ide_layout.py` is a
     second source of truth — exactly how render and hit-testing drifted apart. Aliases
     (`SIDEBAR_W = IdeLayout.SIDEBAR_W`) are fine; literals are not."""
+    scanned = [
+        path for path in sorted((LIB / "hive_ide").glob("*.py"))
+        if path.name != "layout.py"
+    ]
+    # The gate scanned `ide_*.py` beside this file and `../ide/*.py` — neither of
+    # which has existed since the package was renamed, so it had been passing by
+    # scanning NOTHING. Counting what it opened is what makes it a gate again.
+    assert len(scanned) > 10, f"the gate scanned {len(scanned)} files; it is dead again"
     offenders = []
-    for path in list(LIB.glob("ide_*.py")) + list(SKILL_DIR.glob("*.py")):
-        if path.name == "ide_layout.py":
-            continue
+    for path in scanned:
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             for name in OWNED:
                 # `NAME = 20` or `NAME, OTHER = 2, 3` — a literal, not an alias

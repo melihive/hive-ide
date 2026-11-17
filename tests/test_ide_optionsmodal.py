@@ -715,3 +715,161 @@ def test_which_action_enter_will_run_survives_a_screen_too_small(tmp_path):
         _options_frame(record, repo, 8, 20, sel) for sel in range(len(actions))
     }
     assert len(frames) == len(actions), f"20x8: {len(frames)} of {len(actions)}"
+
+
+def _drawn_at(record: dict, repo: str, rows: int, width: int) -> list[str]:
+    """What `_draw` puts on a terminal of this size, ANSI stripped.
+
+    Terminal size is given the way the popup gives it — through the environment —
+    so the modal resolves its own rows and columns exactly as it does in a popup.
+    """
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeOptionsModal._draw(record, repo, 0)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [modal_io.strip_ansi(line) for line in text.split("\n")]
+
+
+#: The client in the report — a phone terminal over SSH — and the popup
+#: percentages `frame.py` binds for a mobile client. Asserted against the source
+#: below, so a change there fails here instead of quietly drifting.
+PHONE_CLIENT = (49, 44)
+MOBILE_POPUP_PCT = (0.96, 0.92)
+POPUP_BORDER = 2
+
+
+def _mobile_popup_interior(client: tuple[int, int]) -> tuple[int, int]:
+    width = int(client[0] * MOBILE_POPUP_PCT[0]) - POPUP_BORDER
+    rows = int(client[1] * MOBILE_POPUP_PCT[1]) - POPUP_BORDER
+    return width, rows
+
+
+def test_the_popup_percentages_this_file_assumes_are_the_ones_frame_binds():
+    """Guards the two numbers below; without it this test could pass on a size nobody gets."""
+    source = (Path(__file__).resolve().parents[1] / "hive_ide" / "frame.py").read_text(
+        encoding="utf-8"
+    )
+    flat = source.replace(" ", "").replace("\n", "")
+    assert ',96%,52%}' in flat, "the new-session popup no longer carries 96%/52%"
+    assert ',92%,42%}' in flat, "the new-session popup no longer carries 92%/42%"
+
+
+def test_every_session_action_is_drawn_at_the_popup_a_phone_opens(tmp_path):
+    """All ten actions, at the interior a 49x44 client actually gets: 45x38.
+
+    It drew TWO before, with a `more` marker under them. The popup's mobile
+    branch was gated on `#{<:#{client_width},120}`, a TEXT comparison that is
+    false at 49 columns, so a phone opened the DESKTOP popup — 52% of 49 is 25
+    columns, a 23x16 interior. `archive` was four scrolls below the fold on a
+    screen with no scrolling.
+
+    The fix is in `frame.py`'s geometry; this pins what the user sees, which is
+    the only part of it they can check.
+    """
+    store, record = _session(tmp_path)
+    actions = IdeOptionsModal._actions(record)
+    width, rows = _mobile_popup_interior(PHONE_CLIENT)
+    assert (width, rows) == (45, 38), (width, rows)
+
+    # THROUGH `_draw`, the path the popup actually runs. Passing rows and width
+    # into `_lines` is what let the first version of this fix pass every test
+    # while the popup went on cutting `repair` and `archive`: the compaction was
+    # gated on an argument only tests supply (Codex review, 2026-11-17).
+    text = _drawn_at(record, store.workspace_key, rows, width)
+    missing = [label for _action, label, _note in actions
+               if not any(label in line for line in text)]
+    assert not missing, f"not drawn at {width}x{rows}: {missing}"
+    assert not any("more" in line for line in text), (
+        "the action list is still cut short on a phone:\n" + "\n".join(text)
+    )
+
+    # And the size the defect produced is genuinely too small — so the assertion
+    # above is observing the fix, not a modal that would fit anywhere.
+    desktop_pct_on_a_phone = (int(49 * 0.52) - 2, int(44 * 0.42) - 2)
+    cramped_text = _drawn_at(
+        record, store.workspace_key,
+        desktop_pct_on_a_phone[1], desktop_pct_on_a_phone[0],
+    )
+    cut = [label for _action, label, _note in actions
+           if not any(label in line for line in cramped_text)]
+    assert cut, "the old geometry showed everything after all — re-check this test"
+
+
+def test_decoration_is_dropped_before_any_action_is(tmp_path):
+    """The order is group headings, then notes, then — only then — actions.
+
+    GUARANTEED, swept: for a claude session — twelve actions, the longest list
+    this modal draws — every interior at least 17 rows tall AND at least 38 cells
+    wide draws all twelve, with no `more` marker.
+
+    LIMIT, stated not hidden: narrower interiors need more rows, because the
+    footer and then the list itself wrap — 18 rows at 28-36 cells, 19-21 at
+    20-26, and 33-34 at 16-18. A 49-column phone has a 45-cell interior, so the
+    17-row floor is the one the report falls under: with the on-screen keyboard
+    up that client is 23 rows, which is a 19-row interior, and with it down 44
+    rows. Below a 17-row interior the list is windowed and marked `more`, as
+    before — the floor is where "all of them" starts, not where drawing does.
+
+    An action that is not drawn is an action that cannot be reached — the popup
+    does not scroll on that screen — so the cheapest thing on the screen goes
+    first and the list goes last.
+    """
+    store, record = _session(tmp_path)
+    actions = IdeOptionsModal._actions(record)
+
+    def drawn(rows: int, width: int) -> list[str]:
+        return _drawn_at(record, store.workspace_key, rows, width)
+
+    def labels_missing(rows: int, width: int) -> list[str]:
+        text = drawn(rows, width)
+        return [lbl for _a, lbl, _n in actions if not any(lbl in line for line in text)]
+
+    short = []
+    for rows in range(17, 32):
+        for width in range(38, 86, 2):
+            if labels_missing(rows, width):
+                short.append(f"{width}x{rows}: {labels_missing(rows, width)}")
+    assert not short, "\n  ".join(["actions missing inside the guarantee:"] + short[:12])
+
+    def has_headings(text: list[str]) -> bool:
+        return any(line.strip() == "Open" for line in text)
+
+    def has_notes(text: list[str]) -> bool:
+        return any("focus the agent pane" in line for line in text)
+
+    # Roomy keeps both.
+    roomy = drawn(38, 45)
+    assert has_headings(roomy), "group headings vanished when there was room"
+    assert has_notes(roomy), "notes vanished when there was room"
+
+    # The middle rung exists: headings gone, notes still there. At 70 cells a
+    # note does not wrap, so the headings alone buy the rows needed.
+    middle = drawn(17, 70)
+    assert not has_headings(middle), "headings outlived the rows they cost"
+    assert has_notes(middle), "notes went before the headings did"
+    assert not labels_missing(17, 70)
+
+    # THE CONTRACT, swept: no action is ever cut while decoration is still drawn.
+    violations = []
+    for rows in range(5, 30):
+        for width in range(20, 86, 2):
+            text = drawn(rows, width)
+            if labels_missing(rows, width) and (has_headings(text) or has_notes(text)):
+                violations.append(
+                    f"{width}x{rows}: cut {labels_missing(rows, width)} with "
+                    f"{'headings' if has_headings(text) else 'notes'} still on screen"
+                )
+    assert not violations, "\n  ".join(
+        ["decoration outlived an action:"] + violations[:12]
+    )
+
+    # And the reported screen — a phone with its keyboard up — shows every one.
+    phone = drawn(19, 45)
+    assert not labels_missing(19, 45), "an action is still cut on the reported screen"
+    assert not any("more" in line for line in phone), phone
