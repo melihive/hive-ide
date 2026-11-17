@@ -225,3 +225,69 @@ def test_truncation_cuts_a_straddling_wide_character_too():
     cut = modal_io.truncate_to_rows("\u754c\u754c\u754c", 1, 3)
     assert modal_io.line_rows(cut, 3) == 1
     assert cut == "\u754c", f"expected one wide char, got {cut!r}"
+
+
+def test_a_hint_footer_is_shed_only_when_it_costs_the_selected_row():
+    """`footer_hints` buys the selection with the hint — never on principle.
+
+    The trade the user settled on 2026-11-17: a screen too small for both does
+    not get key hints. So the hint goes ONLY where keeping it would push the
+    selected row off, and a roomy screen still draws both.
+    """
+    header = ["Session options"]
+    body = [f"  action {n}" for n in range(12)]
+    hint = ["  " + "up/down or j/k . Enter . Esc -> cancel" * 2]
+
+    roomy = modal_io.fit(
+        header, body, hint, selected=4, rows=12, width=60,
+        pin_selection=True, footer_hints=1,
+    )
+    assert hint[0] in roomy, "the hint was shed although both fit"
+    assert body[4] in roomy, "the selection is missing on a roomy screen"
+
+    # 5 rows at 20 cells: the title takes one and the wrapped hint takes four,
+    # so the selected row has nowhere to go until the hint gives way. (At 6 rows
+    # all three fit exactly, which is why that size keeps its hint.)
+    assert modal_io.wrapped_rows(hint, 20) == 4, "the fixture stopped over-filling"
+    tight = modal_io.fit(
+        header, body, hint, selected=4, rows=5, width=20,
+        pin_selection=True, footer_hints=1,
+    )
+    assert body[4] in tight, "the selection was lost to a hint that could be shed"
+    assert hint[0] not in tight, "the hint survived at the cost of the selection"
+
+
+def test_a_footer_that_is_not_a_hint_is_never_shed():
+    """The options modal's rename field lives in the footer, above the hint.
+
+    Typing blind into a field Enter will commit is the defect the pinning order
+    exists to stop, so only the trailing `footer_hints` lines may go — the field
+    above them stays even when that costs the selected row.
+    """
+    header = ["Session options"]
+    body = [f"  action {n}" for n in range(12)]
+    field = "  new name: ALPHA"
+    hint = "  " + "up/down or j/k . Enter . Esc -> cancel" * 2
+
+    drawn = modal_io.fit(
+        header, body, [field, hint], selected=4, rows=6, width=20,
+        pin_selection=True, footer_hints=1,
+    )
+    assert field in drawn, "the rename field was shed as if it were a hint"
+    assert hint not in drawn, "the hint should have gone first"
+
+
+def test_without_footer_hints_the_footer_is_pinned_exactly_as_before():
+    """Default `footer_hints=0` keeps the old contract for every other caller.
+
+    The new-session modal relies on this once its footer names a selection the
+    window cut: that line is the only thing saying what Enter will do.
+    """
+    header = ["New session"]
+    body = [f"  driver {n}" for n in range(8)]
+    footer = ["  " + "claude . codex . adopt existing . Esc -> cancel" * 2]
+
+    drawn = modal_io.fit(
+        header, body, footer, selected=3, rows=6, width=20, pin_selection=True,
+    )
+    assert footer[0] in drawn, "a non-hint footer was dropped"
