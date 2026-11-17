@@ -475,18 +475,6 @@ class IdeRelayout:
             return False
 
     @staticmethod
-    def _breaker_hits(prev: list, now: float, window: float) -> list:
-        """The invocation ledger pruned to `window` with this call appended.
-
-        Split out as a pure function so the breaker is unit-testable without sleeping or
-        touching the filesystem. Non-numeric junk in a corrupted ledger is dropped rather
-        than raising — a bad file must never block a legitimate relayout.
-        """
-        kept = [t for t in prev if isinstance(t, (int, float)) and not isinstance(t, bool)
-                and 0 <= now - t < window]
-        return kept + [now]
-
-    @staticmethod
     def _breaker_tripped(path: str, now: float | None = None) -> bool:
         """True when this script is being invoked far too often — i.e. something is feeding
         it. FAIL-OPEN by construction: no path, an unreadable ledger, or an unwritable dir

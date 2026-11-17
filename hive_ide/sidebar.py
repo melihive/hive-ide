@@ -398,18 +398,6 @@ class IdeSidebar:
         return icons.get(value, icons.get("default", "")) if value else ""
 
     @staticmethod
-    def _plan_mark(s: dict) -> str:
-        return IdeSidebar._provider_mark(
-            Path("."), s, "plan", _DEFAULT_SIDEBAR, _DEFAULT_PROVIDERS
-        )
-
-    @staticmethod
-    def _checkout_mark(s: dict) -> str:
-        return IdeSidebar._provider_mark(
-            Path("."), s, "checkout", _DEFAULT_SIDEBAR, _DEFAULT_PROVIDERS
-        )
-
-    @staticmethod
     def _status_dot(
         skill_dir: Path,
         s: dict,
@@ -447,12 +435,6 @@ class IdeSidebar:
     @staticmethod
     def _strip_ansi(text: str) -> str:
         return IdeSidebar.ANSI_RE.sub("", text)
-
-    @staticmethod
-    def _activity_mark(skill_dir: Path, s: dict) -> str:
-        return IdeSidebar._provider_mark(
-            skill_dir, s, "activity", _DEFAULT_SIDEBAR, _DEFAULT_PROVIDERS
-        )
 
     @staticmethod
     def _tmux_alerts() -> dict[str, str]:
@@ -653,11 +635,6 @@ class IdeSidebar:
         return max(0, width - status_width)
 
     @staticmethod
-    def _initial_focus() -> bool:
-        """tmux only reports focus on CHANGE, so seed the state for this pane."""
-        return IdeSidebar._pane_active()
-
-    @staticmethod
     def _pane_visibility() -> tuple[bool, bool]:
         """Return (visible_window, focused_sidebar_pane) for this sidebar pane.
 
@@ -727,10 +704,6 @@ class IdeSidebar:
     @staticmethod
     def _cli(skill_dir: Path, args: list[str]) -> bool:
         return SidebarCommandRunner(skill_dir, IdeSidebar._repo_hint).cli(args)
-
-    @staticmethod
-    def _window_id(session_id: str) -> str | None:
-        return SidebarCommandRunner(Path("."), IdeSidebar._repo_hint).window_id(session_id)
 
     @staticmethod
     def _switch(session_id: str, skill_dir: Path | None = None) -> bool:
@@ -1230,7 +1203,7 @@ class IdeSidebar:
 
     @staticmethod
     def _reload_watch() -> dict:
-        """Compatibility shim for the old render loop, now keyed by package identity."""
+        """Package identity plus module mtimes: the render loop exits to reload when it changes."""
         module_dir = Path(__file__).resolve().parent
         watched = (
             module_dir / name

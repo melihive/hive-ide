@@ -18,7 +18,6 @@ usage: python -m hive_ide.agentmodal --state-home <state> --workspace-key <repo>
 """
 from __future__ import annotations
 
-import subprocess
 import argparse
 import sys
 
