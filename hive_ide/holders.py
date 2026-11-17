@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from pathlib import Path
 
 
 class ConversationHolders:
@@ -232,26 +233,64 @@ class ConversationHolders:
             return None
         return name
 
-    @classmethod
-    def selects_exactly(cls, command: str, reference: str) -> bool:
-        """Is `reference` the VALUE of a selection flag, not just a token in argv?
+    #: Flags whose VALUE is a conversation. The bare word `resume` is NOT here:
+    #: it is a subcommand, and treating it as a selector let ordinary prose do
+    #: the selecting — `-p "how to resume <id> safely"` named a conversation the
+    #: driver was not resuming (cross-model review, 2026-11-17).
+    SELECTION_FLAGS = frozenset({"--resume", "--continue", "--session-id"})
 
-        `holders()` accepts the looser reading on purpose: it feeds the launch
-        guard, where a false positive only REFUSES a launch, and refusing is
-        safe. The kill path cannot afford it. `claude --resume OTHER -p 'see
-        TARGET'` resumes OTHER while carrying TARGET in a prompt, and under the
-        loose reading repair would have signalled that live, unrelated agent
-        (cross-model review, 2026-11-17).
+    @staticmethod
+    def argv_of(pid: int) -> list[str] | None:
+        """The process's REAL argv, with argument boundaries intact.
+
+        `ps` flattens argv into one space-joined line, which throws away the
+        boundaries this decision rests on: a prompt is a single argument, but
+        flattened it reads as a row of tokens, and any two of them can look like
+        a flag and its value. `/proc/<pid>/cmdline` is NUL-separated, so a
+        prompt stays one element and cannot select anything.
+
+        None where it cannot be read — a platform without /proc, or a process
+        already gone — and on this path None protects: no argv, no signal.
         """
-        tokens = command.split()
-        for index, token in enumerate(tokens):
-            if token in cls.SELECTION_TOKENS:
-                if index + 1 < len(tokens) and tokens[index + 1] == reference:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        if not raw.strip(b"\0"):
+            return None
+        return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+    @classmethod
+    def selects_exactly(cls, argv: list[str], reference: str) -> bool:
+        """Is `reference` the conversation this argv actually SELECTS?
+
+        `holders()` accepts a looser reading on purpose: it feeds the launch
+        guard, where a false positive only REFUSES a launch, and refusing is
+        safe. The kill path cannot afford it — there the same false positive
+        signals somebody's live agent — so this asks the strict question of a
+        real argv:
+
+        - the value of a selection FLAG (`--resume <id>`, `--resume=<id>`), or
+        - a positional argument of the `resume` SUBCOMMAND, which is the form
+          the bundled Codex driver launches:
+          `codex resume --no-daemon -C <dir> <id>`. Rejecting that left Codex
+          sessions permanently stuck, since the guard recognised the holder
+          while this did not (cross-model review, 2026-11-17).
+        """
+        if not argv:
+            return False
+        for index, token in enumerate(argv):
+            if token in cls.SELECTION_FLAGS:
+                if index + 1 < len(argv) and argv[index + 1] == reference:
                     return True
             elif "=" in token:
                 flag, _, value = token.partition("=")
-                if flag in cls.SELECTION_TOKENS and value == reference:
+                if flag in cls.SELECTION_FLAGS and value == reference:
                     return True
+        # The subcommand form. Only a POSITIONAL match counts, and only after
+        # `resume` itself, so a flag's value elsewhere cannot stand in for it.
+        if len(argv) > 1 and argv[1] == "resume":
+            return reference in argv[2:]
         return False
 
     @classmethod
@@ -292,6 +331,7 @@ class ConversationHolders:
         live_socket: str | None,
         has_clients,
         live_server_pid: int | None = None,
+        argv_of=None,
         rows: list[tuple[int, int, str]] | None = None,
         exclude_tree: int | None = None,
     ) -> list[dict[str, object]]:
@@ -331,8 +371,11 @@ class ConversationHolders:
         for holder in cls.holders(reference, exclude_tree=exclude_tree, rows=rows):
             if holder.get("background") or int(holder["pid"]) in backgrounded:
                 continue
-            if not cls.selects_exactly(str(holder.get("command") or ""), reference):
-                continue        # mentions this conversation; is not resuming it
+            argv = (argv_of or cls.argv_of)(int(holder["pid"]))
+            if argv is None or not cls.selects_exactly(argv, reference):
+                # No readable argv is not evidence, and a mention is not a
+                # selection. Either way: not something to signal.
+                continue
             socket_name, server_pid = cls.server_of(int(holder["pid"]), rows)
             if not socket_name or server_pid is None:
                 continue

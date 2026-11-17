@@ -53,10 +53,27 @@ def _rows(*, server_argv: str = f"tmux -L {RETIRED_SOCKET} -f /x/ide.conf new-se
     ]
 
 
+def _argv_from(rows, pid):
+    """argv for a fabricated row — the stand-in for the `/proc` reader."""
+    for candidate, _ppid, command in rows:
+        if candidate == pid:
+            return command.split() or None
+    return None
+
+
 def _stranded(rows, *, live_socket=LIVE_SOCKET,
-              has_clients=lambda _socket, _server: False):
+              has_clients=lambda _socket, _server: False, argv_of=None):
+    """`stranded` over fabricated rows, reading argv from those same rows.
+
+    The production reader is `/proc`, which fabricated PIDs do not have. Splitting
+    the row's command is the honest stand-in for a shape with no quoted argument
+    in it; the tests that care about ARGUMENT BOUNDARIES pass real argv lists.
+    """
+    commands = {pid: command for pid, _ppid, command in rows}
+    default = lambda pid: (commands.get(pid) or "").split() or None
     return ConversationHolders.stranded(
-        REFERENCE, live_socket=live_socket, has_clients=has_clients, rows=rows
+        REFERENCE, live_socket=live_socket, has_clients=has_clients,
+        argv_of=argv_of or default, rows=rows,
     )
 
 
@@ -495,6 +512,7 @@ def test_the_live_server_is_excluded_by_identity_not_by_name():
         live_socket=RETIRED_SOCKET,      # the live frame happens to share the name
         live_server_pid=999_999,         # but it is a different server
         has_clients=lambda _s, _p: False,
+        argv_of=lambda pid: _argv_from(rows, pid),
         rows=rows,
     )
     assert [h["pid"] for h in found] == [201], (
@@ -506,6 +524,7 @@ def test_the_live_server_is_excluded_by_identity_not_by_name():
         live_socket="unrelated-name",
         live_server_pid=100,             # this IS the live frame's own server
         has_clients=lambda _s, _p: False,
+        argv_of=lambda pid: _argv_from(rows, pid),
         rows=rows,
     )
     assert mine == [], "the live frame's own driver was treated as stranded"
@@ -534,15 +553,25 @@ def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
 @pytest.mark.parametrize(
     "argv, selected",
     [
-        (f"claude --resume {REFERENCE}", True),
-        (f"claude --resume={REFERENCE}", True),
-        (f"claude --session-id {REFERENCE}", True),
-        (f"claude --resume other -p see {REFERENCE}", False),
-        (f"claude -p {REFERENCE}", False),
-        (f"claude --resume {REFERENCE}x", False),
+        (["claude", "--resume", REFERENCE], True),
+        (["claude", f"--resume={REFERENCE}"], True),
+        (["claude", "--session-id", REFERENCE], True),
+        # The bundled Codex driver puts the reference LAST, positionally.
+        (["codex", "resume", "--no-daemon", "-C", "/w", REFERENCE], True),
+        (["claude", "--resume", "other", "-p", f"see {REFERENCE}"], False),
+        (["claude", "-p", REFERENCE], False),
+        # `resume` is a SUBCOMMAND, never a flag whose next argument is a
+        # conversation. Treating it as one let an argument that merely reads
+        # `resume <id>` do the selecting.
+        (["claude", "-p", "resume", REFERENCE], False),
+        (["claude", "--resume", f"{REFERENCE}x"], False),
+        # A PROMPT is one argument. Flattened by `ps` it reads as a flag and a
+        # value; with real boundaries it can never select anything.
+        (["claude", "--resume", "other", "-p",
+          f"Explain how to resume {REFERENCE} safely"], False),
     ],
 )
-def test_the_reference_must_be_the_value_of_a_selection_flag(argv, selected):
+def test_the_reference_must_be_the_one_the_argv_actually_selects(argv, selected):
     assert ConversationHolders.selects_exactly(argv, REFERENCE) is selected
 
 
@@ -564,3 +593,37 @@ def test_the_signal_is_withheld_when_the_argv_changed_at_the_last_moment(
 
     assert sent is False, "a process whose argv no longer matched was signalled"
     assert _alive(pid), "the signal went out despite the identity having changed"
+
+
+@pytestmark_tmux
+def test_a_pane_already_running_a_driver_stops_the_walk(tmp_path, retired_server, monkeypatch):
+    """A live agent means nothing is stranded — including a pane with no shell.
+
+    `_has_live_shell_agent` answers only for a pane running a shell that spawned
+    a driver. A pane whose root process IS the driver answered False there, so
+    the first gate did not hold for that shape.
+    """
+    _socket, pid = retired_server
+    repair, record = _repair_for(tmp_path)
+    monkeypatch.setattr(
+        repair.frame, "agent_pane_command", lambda _record: "claude --resume x"
+    )
+    actions: list[str] = []
+
+    repair._release_stranded_holder(record, actions, [], apply=True)
+
+    assert _alive(pid), "the walk ran although the pane was running a driver"
+    assert actions == []
+
+
+@pytestmark_tmux
+def test_the_real_argv_is_read_with_its_boundaries_intact(retired_server):
+    """`/proc` keeps arguments separate; `ps` flattens them into one line."""
+    _socket, pid = retired_server
+
+    argv = ConversationHolders.argv_of(pid)
+
+    assert argv is not None, "the driver's argv could not be read"
+    assert argv[0].endswith("/claude"), argv
+    assert REFERENCE in argv, argv
+    assert ConversationHolders.selects_exactly(argv, REFERENCE)

@@ -983,7 +983,7 @@ class SessionRepair:
         reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
         if not reference:
             return
-        if self._has_live_shell_agent(record):
+        if self._has_live_shell_agent(record) or self._pane_runs_a_driver(record):
             return      # a live driver is already running: nothing is stranded
         rows = ConversationHolders.snapshot()
         if not rows:
@@ -1024,6 +1024,20 @@ class SessionRepair:
                 f"agent: stopped stranded driver — {where}{age}; "
                 "conversation released"
             )
+
+    def _pane_runs_a_driver(self, record: dict[str, Any]) -> bool:
+        """Is the agent pane's own command a driver, with no shell in between?
+
+        `_has_live_shell_agent` answers only for a pane running a SHELL that
+        spawned a driver. A pane whose root process IS the driver answers False
+        there, which read as "no agent running" and let this walk start looking
+        for something to signal. The other gates still protected the pane's own
+        process, but the first gate is supposed to be "a live agent means
+        nothing here is stranded", and it was not true for that shape
+        (cross-model review, 2026-11-17).
+        """
+        command = self.frame.agent_pane_command(record)
+        return bool(command) and ConversationHolders._is_driver(command)
 
     def _live_server_pid(self) -> int | None:
         """The PID of the frame's own tmux server, or None if it will not say.
