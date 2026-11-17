@@ -22,8 +22,10 @@ pinned by its own test, and `unknown` protects rather than acts.
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -51,7 +53,8 @@ def _rows(*, server_argv: str = f"tmux -L {RETIRED_SOCKET} -f /x/ide.conf new-se
     ]
 
 
-def _stranded(rows, *, live_socket=LIVE_SOCKET, has_clients=lambda _socket: False):
+def _stranded(rows, *, live_socket=LIVE_SOCKET,
+              has_clients=lambda _socket, _server: False):
     return ConversationHolders.stranded(
         REFERENCE, live_socket=live_socket, has_clients=has_clients, rows=rows
     )
@@ -67,8 +70,8 @@ def test_the_server_is_found_by_walking_parents_not_by_ppid():
     chain has ppid 1 until the server itself.
     """
     rows = _rows()
-    assert ConversationHolders.server_socket_of(201, rows) == RETIRED_SOCKET
-    assert ConversationHolders.server_socket_of(200, rows) == RETIRED_SOCKET
+    assert ConversationHolders.server_of(201, rows) == (RETIRED_SOCKET, 100)
+    assert ConversationHolders.server_of(200, rows) == (RETIRED_SOCKET, 100)
     assert all(ppid != 1 for pid, ppid, _ in rows if pid != 100)
 
 
@@ -79,12 +82,12 @@ def test_a_driver_in_a_retired_clientless_server_is_stranded():
 
 def test_a_server_someone_is_attached_to_is_never_touched():
     """A client means a human can see it. That is use, not abandonment."""
-    assert _stranded(_rows(), has_clients=lambda _socket: True) == []
+    assert _stranded(_rows(), has_clients=lambda _socket, _server: True) == []
 
 
 def test_an_unanswerable_client_question_protects_the_process():
     """None is not False. An unreadable answer must never authorize a signal."""
-    assert _stranded(_rows(), has_clients=lambda _socket: None) == []
+    assert _stranded(_rows(), has_clients=lambda _socket, _server: None) == []
 
 
 def test_the_live_frames_own_driver_is_never_stranded():
@@ -238,7 +241,7 @@ def test_repair_leaves_the_driver_alone_when_a_client_is_attached(
     """The gate that decides this is `_socket_has_clients`; hold it True."""
     _socket, pid = retired_server
     repair, record = _repair_for(tmp_path)
-    monkeypatch.setattr(repair, "_socket_has_clients", lambda _socket: True)
+    monkeypatch.setattr(repair, "_socket_has_clients", lambda _s, _p: True)
     actions: list[str] = []
 
     repair._release_stranded_holder(record, actions, [], apply=True)
@@ -254,7 +257,7 @@ def test_repair_leaves_the_driver_alone_when_the_question_cannot_be_answered(
     """Unknown protects — the same rule the orphan sweeper already lives by."""
     _socket, pid = retired_server
     repair, record = _repair_for(tmp_path)
-    monkeypatch.setattr(repair, "_socket_has_clients", lambda _socket: None)
+    monkeypatch.setattr(repair, "_socket_has_clients", lambda _s, _p: None)
     actions: list[str] = []
 
     repair._release_stranded_holder(record, actions, [], apply=True)
@@ -296,13 +299,20 @@ def test_the_client_question_tells_no_clients_apart_from_no_server(tmp_path):
         ["tmux", "-L", socket, "new-session", "-d", "-s", "s", "sh -c 'sleep 30'"],
         check=True, capture_output=True, text=True,
     )
+    server_pid = int(subprocess.run(
+        ["tmux", "-L", socket, "display-message", "-p", "#{pid}"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip())
     try:
-        assert repair._socket_has_clients(socket) is False, (
+        assert repair._socket_has_clients(socket, server_pid) is False, (
             "a live server with nobody attached must answer False"
+        )
+        assert repair._socket_has_clients(socket, server_pid + 10_000_000) is None, (
+            "a server that is not the one we walked to must answer None"
         )
     finally:
         subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
-    assert repair._socket_has_clients(socket) is None, (
+    assert repair._socket_has_clients(socket, server_pid) is None, (
         "a socket with no server must answer None, not False"
     )
 
@@ -327,3 +337,120 @@ def test_a_holder_is_still_found_when_the_pane_is_narrow(retired_server, monkeyp
     assert any(pid == row[0] and REFERENCE in row[2] for row in rows), (
         "the holder's row was truncated before its conversation reference"
     )
+
+
+# ------------------------------------- what a `-L` name is, and is not (review)
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (f"tmux -L {RETIRED_SOCKET} new-session -d", RETIRED_SOCKET),
+        (f"tmux -L{RETIRED_SOCKET} new-session -d", RETIRED_SOCKET),
+        # tmux takes the LAST of a repeated option. A search returns the first,
+        # which names a different server than the one actually running.
+        (f"tmux -L {RETIRED_SOCKET} -L hive-ide-other new-session", "hive-ide-other"),
+        # A name that only PARTLY matches is not this name: `hive-ide-old` is a
+        # real and different socket from `hive-ide-old:active`.
+        (f"tmux -L {RETIRED_SOCKET}:active new-session", None),
+        # `-S` addresses a socket by path, so the name says nothing about where
+        # the server is — including when both are given.
+        ("tmux -S /elsewhere/active new-session", None),
+        (f"tmux -L {RETIRED_SOCKET} -S /elsewhere/active new-session", None),
+        ("tmux -L", None),
+    ],
+)
+def test_the_socket_name_is_parsed_as_an_option_not_searched_for(argv, expected):
+    assert ConversationHolders._socket_from_tmux_argv(argv) == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        f"tmux -L {RETIRED_SOCKET} -L hive-ide-other new-session",
+        f"tmux -L {RETIRED_SOCKET}:active new-session",
+        f"tmux -L {RETIRED_SOCKET} -S /elsewhere/active new-session",
+    ],
+)
+def test_a_misread_socket_name_cannot_strand_the_wrong_server(argv):
+    """The parse decides what gets signalled, so a wrong read must not reach it."""
+    found = _stranded(_rows(server_argv=argv))
+    assert [h.get("socket") for h in found] != [RETIRED_SOCKET]
+
+
+@pytestmark_tmux
+def test_a_server_in_another_socket_directory_is_still_reached(tmp_path, monkeypatch):
+    """The reported case: the retired frame's socket is NOT where the live one's is.
+
+    A frame from before the pinned socket directory keeps its socket in the
+    default location while the live frame's lives elsewhere. Probing in the live
+    frame's directory finds nothing there, answers "unknown", and the stranded
+    session stays stuck forever — the feature failing on the exact shape it was
+    built for (cross-model review, 2026-11-17).
+    """
+    # A unix socket path is capped near 108 bytes, so this root and this name
+    # both stay short — a pytest tmp_path plus a descriptive name overruns it.
+    elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="hv"))
+    driver = _fake_driver(tmp_path)
+    socket = f"hive-ide-e{uuid.uuid4().hex[:6]}"
+    env = {**os.environ, "TMUX_TMPDIR": str(elsewhere)}
+    started = subprocess.run(
+        ["tmux", "-L", socket, "new-session", "-d", "-s", "stale",
+         f"{driver} -c 'while :; do sleep 0.2; done' --resume {REFERENCE}"],
+        capture_output=True, text=True, env=env,
+    )
+    assert started.returncode == 0, f"tmux refused: {started.stderr!r}"
+    repair, record = _repair_for(tmp_path)
+    assert repair.frame.socket_tmpdir != str(elsewhere)
+    actions: list[str] = []
+    try:
+        repair._release_stranded_holder(record, actions, [], apply=True)
+        assert any("stopped stranded driver" in line for line in actions), (
+            f"a retired server in another socket directory was never reached: {actions}"
+        )
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"],
+                       capture_output=True, env=env)
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+@pytestmark_tmux
+def test_a_client_that_attaches_while_we_probe_calls_the_signal_off(
+    tmp_path, retired_server, monkeypatch
+):
+    """Selection and signal are different moments, and the gap is not small.
+
+    Choosing a candidate costs two tmux round trips and a `ps`; a client can
+    attach inside that window, turning an abandoned server into one a human is
+    sitting at. The verdict is therefore re-asked as late as it can be.
+    """
+    _socket, pid = retired_server
+    repair, record = _repair_for(tmp_path)
+    answers = iter([False, True])       # free when chosen, attached when signalled
+
+    monkeypatch.setattr(
+        repair, "_socket_has_clients", lambda _s, _p: next(answers, True)
+    )
+    actions: list[str] = []
+    repair._release_stranded_holder(record, actions, [], apply=True)
+
+    assert _alive(pid), "a client attached mid-probe and the driver was signalled anyway"
+    assert actions == []
+
+
+@pytestmark_tmux
+def test_a_recycled_pid_is_not_the_process_we_chose(tmp_path, retired_server):
+    """`kill(pid, 0)` proves a number is live, never that it is the same program."""
+    _socket, pid = retired_server
+    repair, _record = _repair_for(tmp_path)
+    holder = {
+        "pid": pid,
+        "command": "something else entirely --resume other",
+        "socket": _socket,
+        "server_pid": 1,
+    }
+
+    assert repair._still_stranded(holder) is False, (
+        "a PID whose argv no longer matches was accepted as the same process"
+    )
+    assert _alive(pid)

@@ -20,6 +20,7 @@ from .frame import Frame
 from .health import SessionHealth
 from .holders import ConversationHolders
 from .pane_lease import LeaseStore, PaneLeases, serialized
+from .socket_gc import OrphanSweeper
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
 
@@ -896,15 +897,47 @@ class SessionRepair:
     STRANDED_GRACE_SECONDS = 10.0
     STRANDED_POLL_SECONDS = 0.25
 
-    def _socket_has_clients(self, socket_name: str) -> bool | None:
-        """Is anyone attached to that server? None when tmux will not say.
+    @staticmethod
+    def _socket_root_of(server_pid: int) -> str | None:
+        """The socket directory that server itself was started with.
 
-        None is the answer for a dead socket too, and that is right: nothing to
-        detach from means nothing to stop, and the caller treats unknown as a
-        reason to leave the process alone.
+        Read from the server's OWN environment, never ours: `-L <name>` resolves
+        under `TMUX_TMPDIR`, and a retired frame predating the pinned socket
+        directory keeps its socket in `/tmp` while the live frame's is
+        elsewhere. None where it cannot be read, which protects.
         """
+        try:
+            raw = Path(f"/proc/{server_pid}/environ").read_bytes()
+        except OSError:
+            return None
+        return OrphanSweeper.root_from_environ(raw)
+
+    def _socket_has_clients(self, socket_name: str, server_pid: int) -> bool | None:
+        """Is anyone attached to THAT server? None whenever it cannot be certain.
+
+        Two questions hide in this one, and a wrong answer to either ends with a
+        signal sent to a process somebody is using:
+
+        1. does this name, in that server's own socket directory, actually reach
+           the server we walked to? A `-L` name is not an identity — the same
+           name in another directory is a different server — so the answer is
+           trusted only when the server reports back the PID we expect;
+        2. does it have a client attached?
+
+        Everything unprovable answers None, a dead socket included: nothing to
+        detach from is also nothing to stop.
+        """
+        root = self._socket_root_of(server_pid)
+        if root is None:
+            return None
+        identity = self.frame.tmux_on(
+            socket_name, ["display-message", "-p", "#{pid}"], tmpdir=root, timeout=10
+        )
+        if identity.returncode != 0 or identity.stdout.strip() != str(server_pid):
+            return None     # a different server answers there; not ours to judge
         result = self.frame.tmux_on(
-            socket_name, ["list-clients", "-F", "#{client_tty}"], timeout=10
+            socket_name, ["list-clients", "-F", "#{client_tty}"],
+            tmpdir=root, timeout=10
         )
         if result.returncode != 0:
             return None
@@ -964,6 +997,13 @@ class SessionRepair:
             if not apply:
                 actions.append(f"agent: would stop stranded driver — {where}{age}")
                 continue
+            if not self._still_stranded(holder):
+                # Chosen a moment ago, not now. Probing this candidate took two
+                # tmux round trips and a `ps`, and both facts it rests on can
+                # change inside that window: a client can attach, and the PID can
+                # be recycled onto something else entirely. Re-asked here, as
+                # late as it can be asked.
+                continue
             if not self._stop_and_confirm(pid):
                 warnings.append(
                     f"agent: stranded driver did not exit — {where}{age}. "
@@ -975,6 +1015,30 @@ class SessionRepair:
                 f"agent: stopped stranded driver — {where}{age}; "
                 "conversation released"
             )
+
+    def _still_stranded(self, holder: dict[str, Any]) -> bool:
+        """Is this candidate STILL the thing we decided to stop?
+
+        Re-read immediately before the signal, because the two facts the verdict
+        rests on each expire:
+
+        - IDENTITY. `kill(pid, 0)` proves only that the number is live. A PID
+          recycled between the `ps` that chose it and the signal belongs to some
+          other program, so the argv must still be the exact one observed.
+        - ATTACHMENT. A client can attach while the probes run. That turns an
+          abandoned server into one a human is sitting at, and signalling into
+          exactly the thing every gate here exists to prevent.
+        """
+        pid = int(holder["pid"])
+        expected = str(holder.get("command") or "")
+        current = {row[0]: row[2] for row in ConversationHolders.snapshot()}
+        if current.get(pid) != expected or not expected:
+            return False
+        socket_name = str(holder.get("socket") or "")
+        server_pid = holder.get("server_pid")
+        if not socket_name or not isinstance(server_pid, int):
+            return False
+        return self._socket_has_clients(socket_name, server_pid) is False
 
     def _stop_and_confirm(self, pid: int) -> bool:
         """SIGTERM `pid` and wait for it to actually go. False if it stayed."""

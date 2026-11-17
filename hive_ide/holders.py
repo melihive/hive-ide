@@ -192,23 +192,61 @@ class ConversationHolders:
             )
         return found
 
-    #: `tmux -L <name>`: the socket a server was started on. `-S <path>` is the
-    #: other spelling; a frame never uses it, so a server that does is not ours
-    #: to reason about and falls through as "no socket".
-    _SERVER_SOCKET = re.compile(r"(?:^|\s)-L\s+([A-Za-z0-9._-]+)")
+    #: A socket name this package would recognise. Matched WHOLE: a name that
+    #: only partly matches is not a name we may act on. `hive-ide-old:active`
+    #: once yielded `hive-ide-old` under a search, which addresses a DIFFERENT
+    #: server — and a clientless one of that name would then have authorized a
+    #: signal (cross-model review, 2026-11-17).
+    _SOCKET_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
     @classmethod
-    def server_socket_of(
+    def _socket_from_tmux_argv(cls, command: str) -> str | None:
+        """The `-L` name a tmux server was started with, or None if not plainly one.
+
+        Parsed as OPTIONS, not searched for. tmux takes the LAST of a repeated
+        option, so `-L a -L b` is server `b`, while a search returns `a` — the
+        wrong server, and the whole point of this walk is to decide whether to
+        signal something inside it.
+
+        `-S <path>` addresses a socket by path instead. A frame never uses it,
+        and mixing the two (`-L a -S /elsewhere`) means the name says nothing
+        about where the server actually is, so both cases answer None.
+        """
+        tokens = command.split()
+        name: str | None = None
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "-S" or (token.startswith("-S") and len(token) > 2):
+                return None
+            if token == "-L":
+                if index + 1 >= len(tokens):
+                    return None
+                name, index = tokens[index + 1], index + 2
+                continue
+            if token.startswith("-L") and len(token) > 2:
+                name, index = token[2:], index + 1
+                continue
+            index += 1
+        if name is None or not cls._SOCKET_NAME.fullmatch(name):
+            return None
+        return name
+
+    @classmethod
+    def server_of(
         cls, pid: int, rows: list[tuple[int, int, str]] | None = None
-    ) -> str | None:
-        """The tmux socket of the server that ultimately owns `pid`, if any.
+    ) -> tuple[str | None, int | None]:
+        """`(socket, pid)` of the tmux server that ultimately owns `pid`.
 
         Walks PARENTS, not children: a driver sits under its `sh -c` wrapper,
         which sits under the pane, which sits under the server. That chain is the
         only thing tying a process to the frame it belongs to — ppid alone says
         nothing, which is why `orphaned` (ppid 1) misses a driver stranded in a
-        retired server entirely. Returns None when no tmux ancestor is found or
-        the chain cannot be walked, and the caller must read that as unknown.
+        retired server entirely.
+
+        The server's PID comes back with the name because a name alone cannot be
+        verified: the same `-L` name in a different socket directory is a
+        different server. Whoever probes it has to confirm it answered.
         """
         rows = cls._ps() if rows is None else rows
         parents = {pid_: ppid for pid_, ppid, _command in rows}
@@ -220,10 +258,9 @@ class ConversationHolders:
             command = commands.get(current) or ""
             head = command.split(None, 1)[0] if command else ""
             if head.rsplit("/", 1)[-1] == "tmux":
-                match = cls._SERVER_SOCKET.search(command)
-                return match.group(1) if match else None
+                return cls._socket_from_tmux_argv(command), current
             current = parents.get(current)
-        return None
+        return None, None
 
     @classmethod
     def stranded(
@@ -264,14 +301,14 @@ class ConversationHolders:
         for holder in cls.holders(reference, exclude_tree=exclude_tree, rows=rows):
             if holder.get("background"):
                 continue
-            socket_name = cls.server_socket_of(int(holder["pid"]), rows)
-            if not socket_name or socket_name == live_socket:
+            socket_name, server_pid = cls.server_of(int(holder["pid"]), rows)
+            if not socket_name or server_pid is None or socket_name == live_socket:
                 continue
             if not SocketReaper.ours(socket_name):
                 continue        # someone else's tmux: never ours to touch
-            if has_clients(socket_name) is not False:
+            if has_clients(socket_name, server_pid) is not False:
                 continue        # True is in use, None is unknown; both protect
-            found.append({**holder, "socket": socket_name})
+            found.append({**holder, "socket": socket_name, "server_pid": server_pid})
         return found
 
     @classmethod
