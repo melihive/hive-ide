@@ -717,6 +717,25 @@ def test_which_action_enter_will_run_survives_a_screen_too_small(tmp_path):
     assert len(frames) == len(actions), f"20x8: {len(frames)} of {len(actions)}"
 
 
+def _drawn_at(record: dict, repo: str, rows: int, width: int) -> list[str]:
+    """What `_draw` puts on a terminal of this size, ANSI stripped.
+
+    Terminal size is given the way the popup gives it — through the environment —
+    so the modal resolves its own rows and columns exactly as it does in a popup.
+    """
+    buffer = io.StringIO()
+    os.environ["LINES"] = str(rows)
+    os.environ["COLUMNS"] = str(width)
+    try:
+        with redirect_stdout(buffer):
+            IdeOptionsModal._draw(record, repo, 0)
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)
+    text = buffer.getvalue().replace("\x1b[2J", "").replace("\x1b[H", "")
+    return [modal_io.strip_ansi(line) for line in text.split("\n")]
+
+
 #: The client in the report — a phone terminal over SSH — and the popup
 #: percentages `frame.py` binds for a mobile client. Asserted against the source
 #: below, so a change there fails here instead of quietly drifting.
@@ -758,10 +777,11 @@ def test_every_session_action_is_drawn_at_the_popup_a_phone_opens(tmp_path):
     width, rows = _mobile_popup_interior(PHONE_CLIENT)
     assert (width, rows) == (45, 38), (width, rows)
 
-    lines, _ = IdeOptionsModal._lines(
-        record, store.workspace_key, 0, driver_too=False, rows=rows, width=width
-    )
-    text = [modal_io.strip_ansi(line) for line in lines]
+    # THROUGH `_draw`, the path the popup actually runs. Passing rows and width
+    # into `_lines` is what let the first version of this fix pass every test
+    # while the popup went on cutting `repair` and `archive`: the compaction was
+    # gated on an argument only tests supply (Codex review, 2026-11-17).
+    text = _drawn_at(record, store.workspace_key, rows, width)
     missing = [label for _action, label, _note in actions
                if not any(label in line for line in text)]
     assert not missing, f"not drawn at {width}x{rows}: {missing}"
@@ -772,11 +792,10 @@ def test_every_session_action_is_drawn_at_the_popup_a_phone_opens(tmp_path):
     # And the size the defect produced is genuinely too small — so the assertion
     # above is observing the fix, not a modal that would fit anywhere.
     desktop_pct_on_a_phone = (int(49 * 0.52) - 2, int(44 * 0.42) - 2)
-    cramped, _ = IdeOptionsModal._lines(
-        record, store.workspace_key, 0, driver_too=False,
-        rows=desktop_pct_on_a_phone[1], width=desktop_pct_on_a_phone[0],
+    cramped_text = _drawn_at(
+        record, store.workspace_key,
+        desktop_pct_on_a_phone[1], desktop_pct_on_a_phone[0],
     )
-    cramped_text = [modal_io.strip_ansi(line) for line in cramped]
     cut = [label for _action, label, _note in actions
            if not any(label in line for line in cramped_text)]
     assert cut, "the old geometry showed everything after all — re-check this test"
@@ -805,10 +824,7 @@ def test_decoration_is_dropped_before_any_action_is(tmp_path):
     actions = IdeOptionsModal._actions(record)
 
     def drawn(rows: int, width: int) -> list[str]:
-        lines, _ = IdeOptionsModal._lines(
-            record, store.workspace_key, 0, driver_too=False, rows=rows, width=width
-        )
-        return [modal_io.strip_ansi(line) for line in lines]
+        return _drawn_at(record, store.workspace_key, rows, width)
 
     def labels_missing(rows: int, width: int) -> list[str]:
         text = drawn(rows, width)

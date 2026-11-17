@@ -276,6 +276,14 @@ class IdeOptionsModal:
         M = IdeNewModal
         if width is None:
             width = modal_io.cols_available()
+        if rows is None:
+            # Resolved HERE, not left to `fit`. `_draw` — the only path a user
+            # ever sees — calls this without a row count, so a body variant
+            # chosen under `if rows is not None` was chosen in tests and never in
+            # production: the popup went on cutting `repair` and `archive` while
+            # every new test passed (Codex review, 2026-11-17). Width was already
+            # resolved on this line for the same reason; the two now match.
+            rows = modal_io.rows_available()
         driver = (record.get("driver") or {}).get("id") or "term"
         actions = IdeOptionsModal._actions(record)
         groups = IdeOptionsModal._grouped_actions(record)
@@ -347,15 +355,14 @@ class IdeOptionsModal:
             f" · rename types after selecting rename{M.RST}{M.EL}"
         )
         body, selected_line, action_of_line = build(group_headings=True, notes=True)
-        if rows is not None:
-            chrome = modal_io.wrapped_rows(header, width) + modal_io.wrapped_rows(
-                footer, width
-            )
-            for variant in ({"group_headings": False, "notes": True},
-                            {"group_headings": False, "notes": False}):
-                if modal_io.wrapped_rows(body, width) + chrome <= rows:
-                    break
-                body, selected_line, action_of_line = build(**variant)
+        chrome = modal_io.wrapped_rows(header, width) + modal_io.wrapped_rows(
+            footer, width
+        )
+        for variant in ({"group_headings": False, "notes": True},
+                        {"group_headings": False, "notes": False}):
+            if modal_io.wrapped_rows(body, width) + chrome <= rows:
+                break
+            body, selected_line, action_of_line = build(**variant)
         lines = modal_io.fit(
             header, body, footer, selected=selected_line, rows=rows, width=width,
             pin_selection=True,
