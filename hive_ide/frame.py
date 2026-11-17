@@ -3225,7 +3225,7 @@ class Frame:
             ],
         )
         # A FORMAT here, not an if-shell: tmux chooses the VALUE of -w/-h.
-        mobile_popup = IdeLayout.tmux_mobile_flag_format()
+        mobile_popup = IdeLayout.tmux_popup_mobile_format()
         new_popup_width = "#{?" + mobile_popup + ",96%,52%}"
         new_popup_height = "#{?" + mobile_popup + ",92%,42%}"
         if key := keys.get("new"):

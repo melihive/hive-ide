@@ -16,6 +16,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -493,3 +494,70 @@ def test_relayouts_zoom_survives_the_hook_zooming_first(tmp_path):
         assert active == wanted, f"the zoom landed on {active}, not {wanted}"
     finally:
         frame.tmux(["kill-server"])
+
+
+def test_the_popup_is_mobile_when_either_the_frame_or_the_client_says_so(tmp_path):
+    """A client that just attached has not been relayed out yet; the popup is sized anyway.
+
+    So popup sizing reads the window's flag OR the invoking client's width, while
+    the ZOOM stays on the flag alone — a popup that is too large is a nuisance, a
+    desktop that zooms is a broken frame.
+    """
+    socket = f"hive-ide-test-{uuid.uuid4().hex[:8]}"
+    _bare_tmux(socket, *PHONE)
+    try:
+        fmt = "#{?" + IdeLayout.tmux_popup_mobile_format() + ",96%,52%}"
+
+        def chosen() -> str:
+            return _ask(socket, fmt)
+
+        # No flag and NO client: nothing says mobile, so nothing claims it. An
+        # empty `#{client_width}` reads as zero, which would make every frame on
+        # the server mobile — the client arm is guarded against exactly that.
+        assert _ask(socket, "#{" + IdeLayout.MOBILE_OPTION + "}") == ""
+        assert chosen() == "52%", "an absent client was read as a narrow one"
+
+        # A REAL narrow client, still no flag — the handoff this arm exists for.
+        outer = f"outer-{uuid.uuid4().hex[:6]}"
+        subprocess.run(
+            ["tmux", "-L", outer, "new-session", "-d", "-x", "49", "-y", "44",
+             f"tmux -L {socket} attach -t 0"],
+            check=True, capture_output=True,
+        )
+        try:
+            time.sleep(1.0)
+            assert chosen() == "96%", (
+                "a 49-column client was handed a desktop popup because the window "
+                "flag had not caught up yet"
+            )
+        finally:
+            subprocess.run(["tmux", "-L", outer, "kill-server"], capture_output=True)
+            time.sleep(0.3)
+
+        # The flag alone carries it once the ladder has run.
+        subprocess.run(
+            ["tmux", "-L", socket, "set-option", "-w", "-t", "0",
+             IdeLayout.MOBILE_OPTION, "1"],
+            check=True, capture_output=True,
+        )
+        assert chosen() == "96%"
+
+        # Wide window and a flag that says desktop: the one desktop case.
+        subprocess.run(
+            ["tmux", "-L", socket, "resize-window", "-t", "0", "-x", "203", "-y", "60"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["tmux", "-L", socket, "set-option", "-w", "-t", "0",
+             IdeLayout.MOBILE_OPTION, "0"],
+            check=True, capture_output=True,
+        )
+        assert chosen() == "52%", "a wide desktop frame opened a mobile-sized popup"
+
+        # And the ZOOM predicate must NOT have grown the client arm.
+        assert "client_width" not in IdeLayout.tmux_mobile_flag_format(), (
+            "the zoom guard now depends on an arithmetic format; on tmux < 3.2 "
+            "that can read as true and zoom a desktop"
+        )
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)

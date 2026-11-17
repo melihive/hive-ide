@@ -97,10 +97,36 @@ class IdeLayout:
         """What to store in `MOBILE_OPTION` for a window of this width."""
         return "1" if cls.is_mobile(window_width) else "0"
 
-    # `tmux_mobile_format` (`#{e|<:}`) and `shell_mobile_test` (`[ ... -lt ... ]`)
-    # lived here and are gone: the first needs tmux 3.2 and reads as TRUE on an
-    # older one, and the second yields mid-guard. `tmux_mobile_flag_format` is
-    # what both became — see its docstring for why an option beats a comparison.
+    # `shell_mobile_test` (`[ ... -lt ... ]`) lived here and is gone: it yields
+    # mid-guard, and a guard that yields is stale when it lands.
+
+    @classmethod
+    def tmux_popup_mobile_format(cls) -> str:
+        """Mobile for POPUP SIZING: the window's flag, or the invoking client's width.
+
+        A popup is sized once, when it opens, for whichever client opened it — so
+        unlike the zoom it cannot wait for the ladder. A client that has just
+        attached may press a key before the relayout that writes the flag has run,
+        and would then get a desktop-sized popup it cannot read (Codex review,
+        2026-11-17). The client arm closes that gap.
+
+        The client arm is guarded on `#{client_width}` being set at all: asked
+        without a client — a hook, a test — it is empty, and an empty value read as
+        a number is zero, which is "mobile" for every frame on the server.
+
+        It uses `#{e|<:}`, which needs tmux 3.2. STATED LIMIT: on an older tmux the
+        modifier is not understood, and if it renders literally the arm reads as
+        true — popups would then always take the mobile size, which is oversized on
+        a desktop and nothing worse. The ZOOM never reads this; it stays on the
+        flag alone, so no tmux version can be talked into zooming a wide screen.
+        """
+        return (
+            "#{||:"
+            + cls.tmux_mobile_flag_format()
+            + ",#{&&:#{client_width},#{e|<:#{client_width},"
+            + str(cls.mobile_threshold())
+            + "}}}"
+        )
 
     @classmethod
     def plan_width(cls, window_width: int, side: int | None = None) -> int:
