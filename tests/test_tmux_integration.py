@@ -369,7 +369,9 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
         for key_name, pane_index in (("l", ".0"), ("c", ".1"), ("e", ".2")):
             line = key_lines.get(key_name, "")
             assert f"select-pane -t {pane_index}" in line, line
-            assert "-lt" in line and "window_width" in line, line
+            assert "@hive_ide_mobile" in line, (
+                f"the key no longer consults the frame's mobile flag: {line}"
+            )
             assert "window_zoomed_flag" in line, f"zoom is a bare toggle again: {line}"
             assert "#{<:" not in line, line
         for key in ("a", "o", "i", "k", "x"):

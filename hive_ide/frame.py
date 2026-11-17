@@ -2621,6 +2621,16 @@ class Frame:
             ["display-message", "-p", "-t", target, "#{window_width}"]
         ).stdout.strip()
         columns = IdeLayout.columns(int(width)) if width.isdigit() else None
+        if width.isdigit():
+            # Leave the answer on the window for the zoom hook and the pane keys.
+            # Set HERE as well as in the relayout ladder because a window built
+            # while a narrow client is attached gets no resize event of its own,
+            # and an unset option reads as "not mobile" — the three crushed
+            # columns, which is the state this whole phase is about.
+            self.tmux(
+                ["set-option", "-w", "-t", target, IdeLayout.MOBILE_OPTION,
+                 IdeLayout.mobile_flag_value(int(width))]
+            )
         if columns is None:
             self.tmux(["select-pane", "-t", sidebar_pane])
             zoomed = self.tmux(
@@ -3194,7 +3204,7 @@ class Frame:
             ],
         )
         # A FORMAT here, not an if-shell: tmux chooses the VALUE of -w/-h.
-        mobile_popup = IdeLayout.tmux_mobile_format()
+        mobile_popup = IdeLayout.tmux_mobile_flag_format()
         new_popup_width = "#{?" + mobile_popup + ",96%,52%}"
         new_popup_height = "#{?" + mobile_popup + ",92%,42%}"
         if key := keys.get("new"):
@@ -3601,7 +3611,9 @@ class Frame:
                 [
                     "bind-key",
                     key,
-                    *self.select_pane_keeping_mobile_zoom(index),
+                    *self.select_pane_keeping_mobile_zoom(
+                        index, unzoom_on_desktop=True
+                    ),
                 ]
             )
         bound = sorted({key for key in keys.values() if key})
@@ -3711,20 +3723,27 @@ class Frame:
         that window (Codex review, 2026-11-17).
         """
         return (
-            "if-shell '"
-            + IdeLayout.shell_mobile_test()
-            + "' '"
-            + Frame.zoom_if_unzoomed()
-            + "'"
+            "if-shell -F '#{&&:"
+            + IdeLayout.tmux_mobile_flag_format()
+            + ",#{==:#{window_zoomed_flag},0}}' 'resize-pane -Z'"
         )
 
     @staticmethod
     def zoom_if_unzoomed() -> str:
-        """`resize-pane -Z`, but only from unzoomed — the half that makes it idempotent."""
+        """`resize-pane -Z`, but only from unzoomed — the half that makes it idempotent.
+
+        A bare toggle cannot be issued from two places, and this one is: the
+        `after-select-pane` hook and the pane keys both ask for the same thing.
+        Evaluated by tmux in its own command queue, so there is no yield between
+        reading the flag and resizing, and nothing can slip in between — which is
+        what a shell guard could not promise (Codex review, 2026-11-17).
+        """
         return 'if-shell -F "#{==:#{window_zoomed_flag},0}" "resize-pane -Z"'
 
     @staticmethod
-    def select_pane_keeping_mobile_zoom(index: str) -> list[str]:
+    def select_pane_keeping_mobile_zoom(
+        index: str, *, unzoom_on_desktop: bool = False
+    ) -> list[str]:
         """`if-shell` args for a pane key: select, and on a mobile window zoom too.
 
         The hook alone is not enough. tmux returns EARLY from `select-pane` when
@@ -3737,11 +3756,25 @@ class Frame:
         Safe beside the hook because the zoom half is idempotent: when the hook
         has already zoomed, the inner check sees it and does nothing.
         """
+        desktop = (
+            # Kept from the binding this replaced: on a WIDE screen the pane keys
+            # are also how you leave a zoom, and tmux fires no `after-select-pane`
+            # for the pane already active, so pressing `chat` on an already-zoomed
+            # chat pane simply stayed zoomed with the other columns hidden (Codex
+            # review, 2026-11-17). The sidebar key never did this and still does
+            # not: it is how you reach the list, not how you toggle the layout.
+            "if-shell -F '#{window_zoomed_flag}' "
+            f"'resize-pane -Z ; select-pane -t .{index}' "
+            f"'select-pane -t .{index}'"
+            if unzoom_on_desktop
+            else f"select-pane -t .{index}"
+        )
         return [
             "if-shell",
-            IdeLayout.shell_mobile_test(),
+            "-F",
+            IdeLayout.tmux_mobile_flag_format(),
             f"select-pane -t .{index} ; {Frame.zoom_if_unzoomed()}",
-            f"select-pane -t .{index}",
+            desktop,
         ]
 
     def installed_frame_hooks(self) -> set[str] | None:

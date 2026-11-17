@@ -67,6 +67,32 @@ def _bare_tmux(socket: str, width: int, height: int) -> None:
     )
 
 
+def _ladder(frame: Frame, store: StateStore, window: str, width: int, height: int) -> None:
+    """Resize, then run the relayout ladder — exactly what `client-resized` does.
+
+    Tests resize through this, never with a bare `resize-window`: the ladder is
+    what records the frame's mobile state, so a test that skipped it would be
+    asking the hook to read a flag nobody wrote.
+    """
+    frame.tmux(["resize-window", "-t", window, "-x", str(width), "-y", str(height)])
+    subprocess.run(
+        [sys.executable, "-m", "hive_ide.relayout",
+         "--tmux-socket", frame.socket,
+         "--state-home", str(store.home),
+         "--workspace-key", store.workspace_key,
+         "--client-width", str(width), "--client-height", str(height),
+         "--window-id", window],
+        check=True, capture_output=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+
+
+def _zoomed(frame: Frame, window: str) -> str:
+    return frame.tmux(
+        ["display-message", "-p", "-t", window, "#{window_zoomed_flag}"]
+    ).stdout.strip()
+
+
 def _ask(socket: str, fmt: str) -> str:
     return subprocess.run(
         ["tmux", "-L", socket, "display-message", "-p", fmt],
@@ -74,48 +100,65 @@ def _ask(socket: str, fmt: str) -> str:
     ).stdout.strip()
 
 
-def test_the_mobile_predicate_is_numeric_not_textual_in_real_tmux():
-    """Both shipped forms must agree with `is_mobile` at every width — tmux's answer, not ours.
+def test_tmux_reads_the_mobile_flag_and_not_a_comparison():
+    """What the shipped predicate resolves to, asked of real tmux.
 
-    The retired form is exercised too, and at the width from the report: a test
-    that only checked the new one would pass against the old one as well on a
-    120-column terminal, which is how this survived.
+    Also pins the two forms that were tried and rejected, because the reason they
+    were rejected is a fact about tmux, not about this package:
+
+      * `#{<:49,120}` is FALSE — tmux compares those as text. That was the defect:
+        on a 49-column phone every mobile branch took the desktop arm.
+      * `#{e|<:}` is correct here but needs tmux 3.2, and an older tmux renders it
+        literally, which reads as TRUE — a desktop would zoom on every focus
+        change. Debian 11 still ships 3.1c.
+
+    An option read has neither problem, and tmux evaluates it synchronously.
     """
     socket = f"hive-ide-test-{uuid.uuid4().hex[:8]}"
     _bare_tmux(socket, *PHONE)
     try:
+        fmt = IdeLayout.tmux_mobile_flag_format()
+        assert _ask(socket, fmt) == "0", "an UNSET flag must read as not-mobile"
         for width in (20, 49, 80, 119, 120, 121, 203):
             subprocess.run(
-                ["tmux", "-L", socket, "resize-window", "-t", "0", "-x", str(width), "-y", "40"],
+                ["tmux", "-L", socket, "set-option", "-w", "-t", "0",
+                 IdeLayout.MOBILE_OPTION, IdeLayout.mobile_flag_value(width)],
                 check=True, capture_output=True,
             )
             expected = "1" if IdeLayout.is_mobile(width) else "0"
-            fmt = IdeLayout.tmux_mobile_format("#{window_width}")
-            assert _ask(socket, fmt) == expected, f"format form wrong at {width}"
+            assert _ask(socket, fmt) == expected, f"flag wrong for width {width}"
 
-            shell = subprocess.run(
-                ["tmux", "-L", socket, "if-shell", IdeLayout.shell_mobile_test(),
-                 "display-message -p MOBILE", "display-message -p WIDE"],
-                check=True, capture_output=True, text=True,
-            ).stdout.strip()
-            assert shell == ("MOBILE" if IdeLayout.is_mobile(width) else "WIDE"), (
-                f"shell form wrong at {width}: {shell!r}"
-            )
-
-        # The defect itself, pinned: the text comparison calls a 49-column phone
-        # "not mobile", which is why it took the desktop branch everywhere.
         subprocess.run(
             ["tmux", "-L", socket, "resize-window", "-t", "0", "-x", "49", "-y", "40"],
             check=True, capture_output=True,
         )
         retired = "#{<:#{window_width}," + str(IdeLayout.mobile_threshold()) + "}"
         assert _ask(socket, retired) == "0", (
-            "tmux now compares `#{<:}` numerically — re-check whether the helpers "
-            "are still needed before changing them"
+            "tmux now compares `#{<:}` numerically — the history in "
+            "`IdeLayout.tmux_mobile_flag_format` needs revisiting"
         )
         assert IdeLayout.is_mobile(49), "49 columns must be mobile, or this test is moot"
     finally:
         subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+def test_the_ladder_records_the_frames_mobile_state(tmp_path):
+    """The flag is only as good as the thing that writes it: the ladder, every pass."""
+    frame, store = _frame(tmp_path, names=("ALPHA",))
+    try:
+        frame.open(no_attach=True)
+        window = sorted(frame.windows().values())[0]
+        for width, height in ((49, 44), (119, 40), (120, 40), (203, 68)):
+            _ladder(frame, store, window, width, height)
+            got = frame.tmux(
+                ["display-message", "-p", "-t", window,
+                 "#{" + IdeLayout.MOBILE_OPTION + "}"]
+            ).stdout.strip()
+            assert got == IdeLayout.mobile_flag_value(width), (
+                f"at {width} columns the frame believes mobile={got!r}"
+            )
+    finally:
+        frame.tmux(["kill-server"])
 
 
 def test_no_mobile_predicate_compares_width_as_text():
@@ -132,8 +175,8 @@ def test_no_mobile_predicate_compares_width_as_text():
         if "{<:" in line or "{>:" in line
     ]
     assert not offenders, (
-        "a tmux TEXT comparison is back; use IdeLayout.tmux_mobile_format or "
-        "shell_mobile_test:\n  " + "\n  ".join(offenders)
+        "a tmux TEXT comparison is back; use IdeLayout.tmux_mobile_flag_format:"
+        "\n  " + "\n  ".join(offenders)
     )
 
 
@@ -144,11 +187,11 @@ def test_focus_keeps_a_phone_sized_frame_zoomed(tmp_path):
     handing focus back — dropped the zoom, and nothing put it back, so the phone
     sat in sidebar 1 / agent 27 / plan 19 for the rest of the session.
     """
-    frame, _ = _frame(tmp_path)
+    frame, store = _frame(tmp_path)
     try:
         frame.open(no_attach=True)
         window = sorted(frame.windows().values())[0]
-        frame.tmux(["resize-window", "-t", window, "-x", str(PHONE[0]), "-y", str(PHONE[1])])
+        _ladder(frame, store, window, *PHONE)
         panes = [
             line.split()[0]
             for line in frame.tmux(
@@ -174,17 +217,7 @@ def test_focus_keeps_a_phone_sized_frame_zoomed(tmp_path):
         # on a wide screen a zoom is the user's own `prefix z` and undoing it on
         # every focus change would be its own bug — so the LADDER owns that arm,
         # exactly as `client-resized` drives it when a phone detaches.
-        frame.tmux(["resize-window", "-t", window, "-x", str(DESKTOP[0]), "-y", str(DESKTOP[1])])
-        subprocess.run(
-            [sys.executable, "-m", "hive_ide.relayout",
-             "--tmux-socket", frame.socket,
-             "--state-home", str(frame.store.home),
-             "--workspace-key", frame.store.workspace_key,
-             "--client-width", str(DESKTOP[0]), "--client-height", str(DESKTOP[1]),
-             "--window-id", window],
-            check=True, capture_output=True,
-            cwd=str(Path(__file__).resolve().parents[1]),
-        )
+        _ladder(frame, store, window, *DESKTOP)
         assert frame.tmux(
             ["display-message", "-p", "-t", window, "#{window_zoomed_flag}"]
         ).stdout.strip() == "0", "the ladder left a 203-column window zoomed"
@@ -204,7 +237,7 @@ def test_the_popup_opens_at_the_size_the_client_can_show(tmp_path):
     Asserting the literal string would have passed throughout the defect; the
     question is what tmux RESOLVES it to on a 49-column client.
     """
-    frame, _ = _frame(tmp_path)
+    frame, store = _frame(tmp_path)
     try:
         frame.open(no_attach=True)
         frame.bind_keys()
@@ -219,11 +252,9 @@ def test_the_popup_opens_at_the_size_the_client_can_show(tmp_path):
         for (width, height), expected_w, expected_h in (
             (PHONE, "96%", "92%"), (DESKTOP, "52%", "42%")
         ):
-            frame.tmux(["resize-window", "-t", window, "-x", str(width), "-y", str(height)])
-            # The binding reads the CLIENT; with no client attached the window is
-            # the same number, so the format is asked about the window instead.
-            fmt_w = "#{?" + IdeLayout.tmux_mobile_format("#{window_width}") + ",96%,52%}"
-            fmt_h = "#{?" + IdeLayout.tmux_mobile_format("#{window_width}") + ",92%,42%}"
+            _ladder(frame, store, window, width, height)
+            fmt_w = "#{?" + IdeLayout.tmux_mobile_flag_format() + ",96%,52%}"
+            fmt_h = "#{?" + IdeLayout.tmux_mobile_flag_format() + ",92%,42%}"
             got_w = frame.tmux(["display-message", "-p", "-t", window, fmt_w]).stdout.strip()
             got_h = frame.tmux(["display-message", "-p", "-t", window, fmt_h]).stdout.strip()
             assert (got_w, got_h) == (expected_w, expected_h), (
@@ -241,7 +272,7 @@ def test_a_panes_own_key_restores_the_zoom_a_manual_unzoom_gave_up(tmp_path):
     having just asked, in the most direct way there is, for that pane. The key
     carries the zoom itself, idempotently, for exactly this case.
     """
-    frame, _ = _frame(tmp_path, names=("ALPHA",))
+    frame, store = _frame(tmp_path, names=("ALPHA",))
     try:
         frame.open(no_attach=True)
         frame.bind_keys()
@@ -250,7 +281,7 @@ def test_a_panes_own_key_restores_the_zoom_a_manual_unzoom_gave_up(tmp_path):
             ["display-message", "-p", "-t", f"{window}.1", "#{pane_id}"]
         ).stdout.strip()
 
-        frame.tmux(["resize-window", "-t", window, "-x", "100", "-y", "40"])
+        _ladder(frame, store, window, 100, 40)
         frame.tmux(["select-pane", "-t", agent])
         zoomed = lambda: frame.tmux(  # noqa: E731
             ["display-message", "-p", "-t", window, "#{window_zoomed_flag}"]
@@ -261,19 +292,42 @@ def test_a_panes_own_key_restores_the_zoom_a_manual_unzoom_gave_up(tmp_path):
         assert zoomed() == "0", "the manual unzoom did not take"
 
         # Exactly what the bound key runs.
-        frame.tmux(Frame.select_pane_keeping_mobile_zoom("1"))
+        key = Frame.select_pane_keeping_mobile_zoom("1", unzoom_on_desktop=True)
+        frame.tmux(key)
         assert zoomed() == "1", "the pane's own key left a mobile window unzoomed"
 
         # Pressing it again must not toggle the zoom back off.
-        frame.tmux(Frame.select_pane_keeping_mobile_zoom("1"))
+        frame.tmux(key)
         assert zoomed() == "1", "a second press toggled the zoom off"
 
-        # On a desktop window the same key must leave zoom alone, in both states.
-        frame.tmux(["resize-window", "-t", window, "-x", "200", "-y", "50"])
-        frame.tmux(["resize-pane", "-Z", "-t", agent])  # back to unzoomed
-        assert zoomed() == "0"
-        frame.tmux(Frame.select_pane_keeping_mobile_zoom("1"))
-        assert zoomed() == "0", "a 200-column window was zoomed by a pane key"
+        # DESKTOP, the other half of the same key: it must not zoom, and — the
+        # behaviour the first version of this change dropped — pressing it on an
+        # already-active, already-zoomed pane must UNZOOM, because on a wide
+        # screen that key is also how you get the other columns back.
+        _ladder(frame, store, window, *DESKTOP)
+        assert zoomed() == "0", "the ladder left a desktop window zoomed"
+        frame.tmux(key)
+        assert zoomed() == "0", "a desktop window was zoomed by a pane key"
+        frame.tmux(["resize-pane", "-Z", "-t", agent])
+        assert zoomed() == "1"
+        frame.tmux(key)
+        assert zoomed() == "0", (
+            "the pane key no longer unzooms a desktop window — pressing it on the "
+            "pane you are already in leaves the other columns hidden"
+        )
+
+        # The sidebar key never had the desktop unzoom arm and still must not —
+        # tested where it shows: on the sidebar itself, zoomed. (Moving to a
+        # DIFFERENT pane unzooms in tmux regardless of what we bind, so that case
+        # would say nothing about this binding.)
+        sidebar = frame.tmux(
+            ["display-message", "-p", "-t", f"{window}.0", "#{pane_id}"]
+        ).stdout.strip()
+        frame.tmux(["select-pane", "-t", sidebar])
+        frame.tmux(["resize-pane", "-Z", "-t", sidebar])
+        assert zoomed() == "1"
+        frame.tmux(Frame.select_pane_keeping_mobile_zoom("0"))
+        assert zoomed() == "1", "the sidebar key started unzooming desktop windows"
     finally:
         frame.tmux(["kill-server"])
 
@@ -286,11 +340,11 @@ def test_the_mobile_zoom_command_is_idempotent(tmp_path):
     is evaluated by tmux immediately before the resize, so the second one is a
     no-op instead of an unzoom.
     """
-    frame, _ = _frame(tmp_path, names=("ALPHA",))
+    frame, store = _frame(tmp_path, names=("ALPHA",))
     try:
         frame.open(no_attach=True)
         window = sorted(frame.windows().values())[0]
-        frame.tmux(["resize-window", "-t", window, "-x", "100", "-y", "40"])
+        _ladder(frame, store, window, 100, 40)
         pane = frame.tmux(
             ["display-message", "-p", "-t", f"{window}.1", "#{pane_id}"]
         ).stdout.strip()
@@ -307,8 +361,9 @@ def test_the_mobile_zoom_command_is_idempotent(tmp_path):
             frame.tmux(command.split(" ", 1)[0:1] + _if_shell_args(command))
             assert zoomed() == "1", f"flipped off after {applied} applications"
 
-        frame.tmux(["resize-window", "-t", window, "-x", "200", "-y", "50"])
-        frame.tmux(["resize-pane", "-Z", "-t", pane])
+        _ladder(frame, store, window, *DESKTOP)
+        if zoomed() == "1":
+            frame.tmux(["resize-pane", "-Z", "-t", pane])
         assert zoomed() == "0"
         frame.tmux(command.split(" ", 1)[0:1] + _if_shell_args(command))
         assert zoomed() == "0", "a 200-column window was zoomed"

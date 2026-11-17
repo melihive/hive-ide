@@ -713,6 +713,15 @@ class IdeRelayout:
                 width = canonical[0]
                 height = canonical[1]
                 resized_to = canonical
+            # The frame's mobile state, decided HERE in Python and left on the
+            # window for tmux to read. The zoom hook and the pane keys consult it
+            # instead of comparing numbers in a format or a shell: the first form
+            # cannot be written portably and the second yields mid-guard.
+            IdeRelayout._tmux(
+                sock,
+                ["set-option", "-w", "-t", win, IdeLayout.MOBILE_OPTION,
+                 IdeLayout.mobile_flag_value(width)],
+            )
             if width < sw + amin + pmin:
                 roles = IdeRelayout._order_role_panes(sock, win)
                 active_pane = IdeRelayout._tmux(

@@ -69,34 +69,38 @@ class IdeLayout:
     def is_mobile(cls, window_width: int) -> bool:
         return window_width < cls.mobile_threshold()
 
-    @classmethod
-    def tmux_mobile_format(cls, width: str = "#{client_width}") -> str:
-        """`is_mobile` as a tmux FORMAT, for the places that can only take a format.
-
-        `#{<:X,Y}` compares as TEXT, not as numbers: `#{<:49,120}` is false, because
-        "4" sorts after "1". The three mobile predicates written that way were true
-        only for widths 10-11 and 100-119, and so never on a phone. A 49-column
-        client therefore got desktop popup geometry — a 52%-wide modal drawing 2 of
-        10 session actions — and the zoom-preserving branch of every pane key was
-        dead, so focus dropped the mobile zoom and the frame fell back into three
-        crushed columns. Two reports from a phone, one predicate.
-
-        `#{e|<:X,Y}` is the arithmetic comparison and answers the question asked.
-        `shell_mobile_test` is the same predicate for a command branch; a real-tmux
-        test holds the two to the same answer at widths either side of the threshold.
-        """
-        return "#{e|<:" + width + "," + str(cls.mobile_threshold()) + "}"
+    #: Window option carrying `is_mobile` for the running frame. Python decides it
+    #: (one owner, one comparison) and tmux only ever reads a "1" or a "0", so no
+    #: tmux expression has to compare numbers — see `tmux_mobile_flag_format`.
+    MOBILE_OPTION = "@hive_ide_mobile"
 
     @classmethod
-    def shell_mobile_test(cls, width: str = "#{window_width}") -> str:
-        """`is_mobile` as a `[ ... ]` test for `if-shell`, which expands the format first.
+    def tmux_mobile_flag_format(cls) -> str:
+        """The frame's mobile state as a tmux format: synchronous, and version-proof.
 
-        Preferred wherever a COMMAND (not a value) is being chosen: the shell owns the
-        comparison, so no tmux version can read it as text, and the arithmetic format
-        modifier is not required. Reads the WINDOW by default — a hook runs without a
-        client of its own, and tmux sizes the window to the narrow client anyway.
+        Every other form has a flaw. `#{<:X,Y}` compares as TEXT — the defect this
+        replaced, false on every phone. `#{e|<:X,Y}` is correct but needs tmux 3.2,
+        and on an older tmux it renders literally, which reads as TRUE: a desktop
+        would zoom on every focus change. A shell test is portable but YIELDS, and
+        a guard that yields is stale when it lands — with two clients on one frame,
+        a selection can slip between the check and the resize (Codex review,
+        2026-11-17).
+
+        An option read is none of those: `#{==:}` on a value this package wrote.
+        Written by the relayout ladder and by `rebuild`, which are exactly the two
+        places that already run whenever the geometry can change.
         """
-        return f"[ {width} -lt {cls.mobile_threshold()} ]"
+        return "#{==:#{" + cls.MOBILE_OPTION + "},1}"
+
+    @classmethod
+    def mobile_flag_value(cls, window_width: int) -> str:
+        """What to store in `MOBILE_OPTION` for a window of this width."""
+        return "1" if cls.is_mobile(window_width) else "0"
+
+    # `tmux_mobile_format` (`#{e|<:}`) and `shell_mobile_test` (`[ ... -lt ... ]`)
+    # lived here and are gone: the first needs tmux 3.2 and reads as TRUE on an
+    # older one, and the second yields mid-guard. `tmux_mobile_flag_format` is
+    # what both became — see its docstring for why an option beats a comparison.
 
     @classmethod
     def plan_width(cls, window_width: int, side: int | None = None) -> int:
