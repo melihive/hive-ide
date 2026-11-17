@@ -713,3 +713,11 @@ def test_every_zoom_the_ladder_issues_is_one_guarded_command(monkeypatch):
         assert "-F" in args, args
         assert "window_zoomed_flag" in " ".join(args), args
         assert "resize-pane -Z" in " ".join(args), args
+        # The guard must be asked about the pane being resized. Without `-t` the
+        # format answers for whatever window is current, and the ladder walks all
+        # of them — one zoomed foreground window would veto every background one.
+        assert "-t" in args, f"the guard is not targeted: {args}"
+        target = args[args.index("-t") + 1]
+        assert args[-1].endswith(target), (
+            f"guard asks about {target} but resizes {args[-1]!r}"
+        )

@@ -561,3 +561,39 @@ def test_the_popup_is_mobile_when_either_the_frame_or_the_client_says_so(tmp_pat
         )
     finally:
         subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+def test_a_background_window_can_still_enter_mobile_zoom(tmp_path):
+    """The ladder walks every window; a zoomed foreground one must not veto the rest.
+
+    `if-shell -F` resolves its format against the CURRENT window unless it is
+    given `-t`. With the guard untargeted, a frame whose visible window happened
+    to be zoomed left every other window in the three-column squeeze — and those
+    are the windows you switch to next.
+    """
+    frame, store = _frame(tmp_path, names=("ALPHA", "BETA"))
+    try:
+        frame.open(no_attach=True)
+        windows = sorted(frame.windows().values())
+        assert len(windows) == 2, windows
+        front, back = windows
+        for window in windows:
+            _ladder(frame, store, window, *PHONE)
+
+        frame.tmux(["select-window", "-t", front])
+        assert _zoomed(frame, front) == "1", "the foreground window is not zoomed"
+
+        # Unzoom the background one behind the ladder's back, then let it run.
+        back_pane = frame.tmux(
+            ["display-message", "-p", "-t", f"{back}.1", "#{pane_id}"]
+        ).stdout.strip()
+        frame.tmux(["resize-pane", "-Z", "-t", back_pane])
+        assert _zoomed(frame, back) == "0"
+        _ladder(frame, store, back, *PHONE)
+        assert _zoomed(frame, back) == "1", (
+            "a background window stayed in three columns because the foreground "
+            "window was zoomed"
+        )
+        assert _zoomed(frame, front) == "1", "the foreground window lost its zoom"
+    finally:
+        frame.tmux(["kill-server"])

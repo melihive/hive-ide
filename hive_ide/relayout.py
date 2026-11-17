@@ -112,12 +112,20 @@ class IdeRelayout:
         target = target or f"{win}.1"
 
         def guarded(state: bool, pane: str) -> None:
-            # Toggle `pane` only while the window's zoom differs from `state`.
+            # Toggle `pane` only while ITS OWN window's zoom differs from `state`.
+            #
+            # `-t pane` is not decoration. Without it the format resolves against
+            # whatever window is current on the server, while the resize targets
+            # this one — and the ladder walks EVERY window, so one zoomed current
+            # window stopped every background window from entering mobile zoom
+            # (measured: @0 zoomed, @1 never zoomed; Codex review, 2026-11-17).
             unless = "0" if state else "1"
             IdeRelayout._tmux(
                 socket,
                 [
                     "if-shell",
+                    "-t",
+                    pane,
                     "-F",
                     "#{==:#{window_zoomed_flag}," + unless + "}",
                     f"resize-pane -Z -t {pane}",
