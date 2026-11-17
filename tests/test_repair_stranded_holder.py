@@ -602,6 +602,16 @@ def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
           "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", REFERENCE], False),
         (["codex", "resume", "--no-daemon", "my-other-session", REFERENCE], False),
         (["codex", "resume", "--last", "my-other-session", REFERENCE], False),
+        # `--last` picks the session ITSELF, so the first positional after
+        # `resume` is a prompt and the argv names no conversation at all.
+        (["codex", "resume", "--last", REFERENCE], False),
+        # A repeated selector: the CLI takes the LAST, so believing the FIRST
+        # match pointed this at a conversation the process had moved off.
+        (["claude", "--resume", REFERENCE, "--resume", "other"], False),
+        # The mirror image is INERT, not selected: the CLI really would resume
+        # the reference here, but two selectors no longer name one conversation
+        # and this path does not adjudicate between them.
+        (["claude", "--resume", "other", "--resume", REFERENCE], False),
         # A VALUE option really does consume the next token, so here the
         # reference IS the session — the declaration has to cut both ways.
         (["codex", "resume", "--sandbox", "read-only", REFERENCE], True),

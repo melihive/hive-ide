@@ -253,6 +253,13 @@ class ConversationHolders:
     #: nobody asked to release (cross-model review, 2026-11-18).
     FORK_FLAGS = frozenset({"--fork-session"})
 
+    #: Options that pick the session THEMSELVES, so the first positional after
+    #: `resume` is a PROMPT and names nothing: `codex resume --last <text>`
+    #: resumes the most recent session and passes <text> as the prompt. They take
+    #: no value, so the parse walked straight past them and read that prompt as
+    #: the session (cross-model review, 2026-11-18).
+    IMPLICIT_SELECTION_OPTIONS = frozenset({"--last"})
+
     #: Flags whose value is a fork's SOURCE once the invocation is a fork, and so
     #: selects nothing. `--session-id` is deliberately NOT here: it names the NEW
     #: conversation, the one the process really holds. The real background-host
@@ -334,16 +341,24 @@ class ConversationHolders:
         # path only: the loose `holders()` guard may go on treating a fork as a
         # holder, where the cost is a refused launch and not a signal.
         forking = any(token.partition("=")[0] in cls.FORK_FLAGS for token in argv)
+        # EVERY selection is collected before any is believed. Returning on the
+        # first match read `--resume TARGET --resume OTHER` as selecting TARGET,
+        # while the CLI itself takes the LAST — the same trap already fixed for
+        # tmux's repeated `-L` above, which this missed (cross-model review,
+        # 2026-11-18). Two selections that disagree are not resolved here: the
+        # argv no longer names one conversation, so it names none.
+        selections: set[str] = set()
         for index, token in enumerate(argv):
-            if forking and token.partition("=")[0] in cls.FORK_SOURCE_FLAGS:
+            flag = token.partition("=")[0]
+            if forking and flag in cls.FORK_SOURCE_FLAGS:
                 continue                       # the source, not what is held
             if token in cls.SELECTION_FLAGS:
-                if index + 1 < len(argv) and argv[index + 1] == reference:
-                    return True
-            elif "=" in token:
-                flag, _, value = token.partition("=")
-                if flag in cls.SELECTION_FLAGS and value == reference:
-                    return True
+                if index + 1 < len(argv):
+                    selections.add(argv[index + 1])
+            elif "=" in token and flag in cls.SELECTION_FLAGS:
+                selections.add(token.partition("=")[2])
+        if selections:
+            return selections == {reference}
         # The subcommand form, `… resume [options] <session> [prompt]`.
         #
         # The session is the FIRST positional after `resume` — never merely one
@@ -375,6 +390,11 @@ class ConversationHolders:
         # this gate the two cannot be told apart: `-p resume` and
         # `--no-daemon resume` are the same shape with opposite meanings.
         if os.path.basename(argv[0]).lower().split(".")[0] not in cls.SUBCOMMAND_DRIVERS:
+            return False
+        if any(
+            token.partition("=")[0] in cls.IMPLICIT_SELECTION_OPTIONS
+            for token in argv
+        ):
             return False
         positionals: list[str] = []
         index = 1
