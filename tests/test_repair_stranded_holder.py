@@ -509,3 +509,58 @@ def test_the_live_server_is_excluded_by_identity_not_by_name():
         rows=rows,
     )
     assert mine == [], "the live frame's own driver was treated as stranded"
+
+
+def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
+    """`--resume OTHER -p 'see TARGET'` resumes OTHER. Signalling it is wrong.
+
+    `holders()` matches the looser way on purpose — it feeds the launch guard,
+    where a false positive only refuses a launch. On the kill path the same
+    false positive terminates somebody's live, unrelated agent, so this path
+    demands the reference be the VALUE of the selection flag.
+    """
+    other = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+    rows = [
+        (100, 1, f"tmux -L {RETIRED_SOCKET} new-session -d"),
+        (201, 100, f"claude --resume {other} -p Explain transcript {REFERENCE}"),
+    ]
+    # The loose matcher — the one the guard uses — does consider it a holder.
+    assert ConversationHolders.holders(REFERENCE, rows=rows), (
+        "precondition: the guard still sees it, which is what makes this a trap"
+    )
+    assert _stranded(rows) == [], "a driver resuming ANOTHER conversation was selected"
+
+
+@pytest.mark.parametrize(
+    "argv, selected",
+    [
+        (f"claude --resume {REFERENCE}", True),
+        (f"claude --resume={REFERENCE}", True),
+        (f"claude --session-id {REFERENCE}", True),
+        (f"claude --resume other -p see {REFERENCE}", False),
+        (f"claude -p {REFERENCE}", False),
+        (f"claude --resume {REFERENCE}x", False),
+    ],
+)
+def test_the_reference_must_be_the_value_of_a_selection_flag(argv, selected):
+    assert ConversationHolders.selects_exactly(argv, REFERENCE) is selected
+
+
+@pytestmark_tmux
+def test_the_signal_is_withheld_when_the_argv_changed_at_the_last_moment(
+    tmp_path, retired_server
+):
+    """The final re-read is the only thing standing between a gap and a stranger.
+
+    Everything before it — two tmux probes at ten seconds apiece — happens while
+    the PID could be reaped and reissued to an unrelated program. So the argv is
+    read once more immediately before the signal, with a pidfd already pinning
+    the identity, and a mismatch calls the whole thing off.
+    """
+    _socket, pid = retired_server
+
+    repair, _record = _repair_for(tmp_path)
+    sent = repair._stop_and_confirm(pid, "some other program --flag")
+
+    assert sent is False, "a process whose argv no longer matched was signalled"
+    assert _alive(pid), "the signal went out despite the identity having changed"

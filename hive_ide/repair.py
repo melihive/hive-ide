@@ -1013,7 +1013,7 @@ class SessionRepair:
                 # be recycled onto something else entirely. Re-asked here, as
                 # late as it can be asked.
                 continue
-            if not self._stop_and_confirm(pid):
+            if not self._stop_and_confirm(pid, str(holder.get("command") or "")):
                 warnings.append(
                     f"agent: stranded driver did not exit — {where}{age}. "
                     "It still holds this conversation, so the agent cannot start; "
@@ -1055,23 +1055,54 @@ class SessionRepair:
         """
         pid = int(holder["pid"])
         expected = str(holder.get("command") or "")
-        current = {row[0]: row[2] for row in ConversationHolders.snapshot()}
-        if current.get(pid) != expected or not expected:
-            return False
         socket_name = str(holder.get("socket") or "")
         server_pid = holder.get("server_pid")
-        if not socket_name or not isinstance(server_pid, int):
+        if not expected or not socket_name or not isinstance(server_pid, int):
             return False
-        return self._socket_has_clients(socket_name, server_pid) is False
+        # ATTACHMENT FIRST, because it is the slow question: two tmux round
+        # trips, ten seconds apiece. Asking it after the identity check would
+        # leave that check stale by exactly that long.
+        if self._socket_has_clients(socket_name, server_pid) is not False:
+            return False
+        current = {row[0]: row[2] for row in ConversationHolders.snapshot()}
+        return current.get(pid) == expected
 
-    def _stop_and_confirm(self, pid: int) -> bool:
-        """SIGTERM `pid` and wait for it to actually go. False if it stayed."""
+    def _stop_and_confirm(self, pid: int, expected: str = "") -> bool:
+        """SIGTERM `pid` and wait for it to actually go. False if it stayed.
+
+        The signal goes through a PIDFD where the kernel offers one. A PID is a
+        number the kernel is free to reuse the moment its process is reaped, so
+        `kill(pid, …)` after any gap at all can land on a stranger. A pidfd is
+        opened BEFORE the last identity check and refers to that one process for
+        as long as it is held: if the process exited meanwhile the send fails
+        with ESRCH instead of hitting whatever inherited its number. Where
+        pidfds are unavailable this falls back to `kill`, which is the behaviour
+        every other signal in this package already has.
+        """
+        handle = None
         try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return True         # already gone is the outcome we wanted
-        except OSError:
-            return False
+            handle = os.pidfd_open(pid)
+        except (AttributeError, OSError, ValueError):
+            handle = None
+        try:
+            if expected:
+                # Re-read as the very last thing before signalling, with the
+                # pidfd already pinning the identity it refers to.
+                current = {row[0]: row[2] for row in ConversationHolders.snapshot()}
+                if current.get(pid) != expected:
+                    return False
+            try:
+                if handle is not None:
+                    signal.pidfd_send_signal(handle, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return True         # already gone is the outcome we wanted
+            except OSError:
+                return False
+        finally:
+            if handle is not None:
+                os.close(handle)
         deadline = time.monotonic() + self.STRANDED_GRACE_SECONDS
         while time.monotonic() < deadline:
             try:

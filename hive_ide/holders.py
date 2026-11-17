@@ -233,6 +233,28 @@ class ConversationHolders:
         return name
 
     @classmethod
+    def selects_exactly(cls, command: str, reference: str) -> bool:
+        """Is `reference` the VALUE of a selection flag, not just a token in argv?
+
+        `holders()` accepts the looser reading on purpose: it feeds the launch
+        guard, where a false positive only REFUSES a launch, and refusing is
+        safe. The kill path cannot afford it. `claude --resume OTHER -p 'see
+        TARGET'` resumes OTHER while carrying TARGET in a prompt, and under the
+        loose reading repair would have signalled that live, unrelated agent
+        (cross-model review, 2026-11-17).
+        """
+        tokens = command.split()
+        for index, token in enumerate(tokens):
+            if token in cls.SELECTION_TOKENS:
+                if index + 1 < len(tokens) and tokens[index + 1] == reference:
+                    return True
+            elif "=" in token:
+                flag, _, value = token.partition("=")
+                if flag in cls.SELECTION_TOKENS and value == reference:
+                    return True
+        return False
+
+    @classmethod
     def server_of(
         cls, pid: int, rows: list[tuple[int, int, str]] | None = None
     ) -> tuple[str | None, int | None]:
@@ -309,6 +331,8 @@ class ConversationHolders:
         for holder in cls.holders(reference, exclude_tree=exclude_tree, rows=rows):
             if holder.get("background") or int(holder["pid"]) in backgrounded:
                 continue
+            if not cls.selects_exactly(str(holder.get("command") or ""), reference):
+                continue        # mentions this conversation; is not resuming it
             socket_name, server_pid = cls.server_of(int(holder["pid"]), rows)
             if not socket_name or server_pid is None:
                 continue
