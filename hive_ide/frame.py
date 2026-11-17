@@ -178,6 +178,32 @@ class Frame:
                 argv, 124, stdout="", stderr=f"tmux timed out after {timeout}s"
             )
 
+    def tmux_on(
+        self, socket: str, args: list[str], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run tmux against ANOTHER socket in this frame's socket directory.
+
+        Repair has to question a server that is not the live frame's — a retired
+        one still holding a session's conversation — and the first safe question
+        to ask it is whether anyone is attached. `TMUX_TMPDIR` matters here
+        exactly as much as for the frame's own socket: without it `-L <name>`
+        resolves elsewhere, and the answer would describe a different server, or
+        an empty one this very call just brought into being.
+        """
+        env = None
+        if self.socket_tmpdir:
+            self._ensure_socket_tmpdir()
+            env = {**os.environ, "TMUX_TMPDIR": self.socket_tmpdir}
+        argv = ["tmux", "-L", socket, *args]
+        try:
+            return subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, env=env
+            )
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                argv, 124, stdout="", stderr=f"tmux timed out after {timeout}s"
+            )
+
     def _ensure_socket_tmpdir(self) -> None:
         """Create the pinned socket directory, private, once per frame.
 

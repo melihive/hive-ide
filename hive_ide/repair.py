@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import time
 import uuid
 import sys
 from pathlib import Path
@@ -93,6 +97,10 @@ class SessionRepair:
         actions.extend(checked["actions"])
         warnings.extend(checked["warnings"])
         self.refresh_driver(repaired, actions, apply=apply)
+        # Before anything tries to start an agent: a driver stranded in a retired
+        # frame owns this conversation, and the launch guard will refuse every
+        # relaunch while it does. Rebuilding cannot clear it — only releasing it can.
+        self._release_stranded_holder(repaired, actions, warnings, apply=apply)
 
         source = repaired.get("source") or {}
         interpreter = source.get("interpreter")
@@ -880,6 +888,131 @@ class SessionRepair:
         if self._shell_agent_has_live_driver_child(record):
             return None
         return pane_id
+
+    #: How long a stranded driver gets to exit after SIGTERM. It only has to
+    #: flush its transcript and close. One that ignores the signal is a fault to
+    #: REPORT, never one to escalate to SIGKILL behind the user's back — the
+    #: conversation is on disk either way, and a kill is not repair's to decide.
+    STRANDED_GRACE_SECONDS = 10.0
+    STRANDED_POLL_SECONDS = 0.25
+
+    def _socket_has_clients(self, socket_name: str) -> bool | None:
+        """Is anyone attached to that server? None when tmux will not say.
+
+        None is the answer for a dead socket too, and that is right: nothing to
+        detach from means nothing to stop, and the caller treats unknown as a
+        reason to leave the process alone.
+        """
+        result = self.frame.tmux_on(
+            socket_name, ["list-clients", "-F", "#{client_tty}"], timeout=10
+        )
+        if result.returncode != 0:
+            return None
+        return bool(result.stdout.strip())
+
+    def _release_stranded_holder(
+        self,
+        record: dict[str, Any],
+        actions: list[str],
+        warnings: list[str],
+        *,
+        apply: bool,
+    ) -> None:
+        """Stop a driver stranded in a retired frame, so this session can start.
+
+        The stalemate of 2026-11-17: a pre-2.0 tmux server kept running beside
+        the rebuilt frame with the session's driver alive inside it for 31 days.
+        Nothing could reach that driver — no client was attached — but it still
+        owned the conversation, so the launch guard refused every relaunch and
+        repair rebuilt a frame whose agent could never start. Repairing harder
+        does not help; the holder has to go.
+
+        Three gates, and the work happens only if ALL of them pass:
+
+        1. the live pane has NO driver of its own, so nothing here is replacing a
+           working agent;
+        2. `ConversationHolders.stranded` proves the holder unreachable — another
+           server, no client attached, a socket this package hands out;
+        3. the process is still the one that was chosen when the signal is sent.
+
+        SIGTERM only, then confirm it exited. Everything stopped is named with
+        its age, because a month-old agent disappearing silently is worse than
+        the stalemate it resolves.
+        """
+        reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        if not reference:
+            return
+        if self._has_live_shell_agent(record):
+            return      # a live driver is already running: nothing is stranded
+        rows = ConversationHolders.snapshot()
+        if not rows:
+            return      # an unreadable process table proves nothing
+        pane_pid = self.frame.agent_pane_pid(record)
+        stranded = ConversationHolders.stranded(
+            reference,
+            live_socket=self.frame.socket,
+            has_clients=self._socket_has_clients,
+            rows=rows,
+            exclude_tree=pane_pid,
+        )
+        if not stranded:
+            return
+        for holder in stranded:
+            pid = int(holder["pid"])
+            age = self._process_age(pid)
+            where = f"pid {pid} on retired socket {holder['socket']}"
+            if not apply:
+                actions.append(f"agent: would stop stranded driver — {where}{age}")
+                continue
+            if not self._stop_and_confirm(pid):
+                warnings.append(
+                    f"agent: stranded driver did not exit — {where}{age}. "
+                    "It still holds this conversation, so the agent cannot start; "
+                    "stop it by hand, then repair again."
+                )
+                continue
+            actions.append(
+                f"agent: stopped stranded driver — {where}{age}; "
+                "conversation released"
+            )
+
+    def _stop_and_confirm(self, pid: int) -> bool:
+        """SIGTERM `pid` and wait for it to actually go. False if it stayed."""
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True         # already gone is the outcome we wanted
+        except OSError:
+            return False
+        deadline = time.monotonic() + self.STRANDED_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+            time.sleep(self.STRANDED_POLL_SECONDS)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def _process_age(pid: int) -> str:
+        """` (31d old)` for the report, or empty when `ps` will not say."""
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "etime=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        raw = result.stdout.strip()
+        return f" ({raw} old)" if result.returncode == 0 and raw else ""
 
     def _has_live_shell_agent(self, record: dict[str, Any]) -> bool:
         command = self.frame.agent_pane_command(record)

@@ -22,6 +22,7 @@ signal — see `holders()` for what is excluded and why.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 
 
@@ -90,7 +91,14 @@ class ConversationHolders:
         """
         try:
             result = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,command="],
+                # `-ww` or the command is TRUNCATED to $COLUMNS, and this package
+                # runs inside tmux panes, which export it. At 80 columns a
+                # driver's argv is cut long before its `--resume <uuid>`, so the
+                # holder becomes invisible and the guard fails OPEN — two drivers
+                # on one conversation, the permanently blank pane this module
+                # exists to prevent. `socket_gc` already learned this (`-axww`);
+                # here it was missed until a narrow-pane test reproduced it.
+                ["ps", "-ww", "-eo", "pid=,ppid=,command="],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -182,6 +190,88 @@ class ConversationHolders:
                     "orphaned": ppid == 1 and not background,
                 }
             )
+        return found
+
+    #: `tmux -L <name>`: the socket a server was started on. `-S <path>` is the
+    #: other spelling; a frame never uses it, so a server that does is not ours
+    #: to reason about and falls through as "no socket".
+    _SERVER_SOCKET = re.compile(r"(?:^|\s)-L\s+([A-Za-z0-9._-]+)")
+
+    @classmethod
+    def server_socket_of(
+        cls, pid: int, rows: list[tuple[int, int, str]] | None = None
+    ) -> str | None:
+        """The tmux socket of the server that ultimately owns `pid`, if any.
+
+        Walks PARENTS, not children: a driver sits under its `sh -c` wrapper,
+        which sits under the pane, which sits under the server. That chain is the
+        only thing tying a process to the frame it belongs to — ppid alone says
+        nothing, which is why `orphaned` (ppid 1) misses a driver stranded in a
+        retired server entirely. Returns None when no tmux ancestor is found or
+        the chain cannot be walked, and the caller must read that as unknown.
+        """
+        rows = cls._ps() if rows is None else rows
+        parents = {pid_: ppid for pid_, ppid, _command in rows}
+        commands = {pid_: command for pid_, _ppid, command in rows}
+        seen: set[int] = set()
+        current: int | None = pid
+        while current and current > 1 and current not in seen:
+            seen.add(current)
+            command = commands.get(current) or ""
+            head = command.split(None, 1)[0] if command else ""
+            if head.rsplit("/", 1)[-1] == "tmux":
+                match = cls._SERVER_SOCKET.search(command)
+                return match.group(1) if match else None
+            current = parents.get(current)
+        return None
+
+    @classmethod
+    def stranded(
+        cls,
+        reference: str,
+        *,
+        live_socket: str | None,
+        has_clients,
+        rows: list[tuple[int, int, str]] | None = None,
+        exclude_tree: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Holders NOTHING can reach: a retired frame, no client, not the live one.
+
+        The shape found in the field on 2026-11-17. A frame had been rebuilt onto the
+        current socket while the pre-2.0 server kept running with the session's
+        driver alive inside it for 31 days. It held the conversation, so every
+        relaunch hit the holder guard and every repair rebuilt a frame whose
+        driver could never start — a stalemate no amount of repairing resolves.
+
+        `orphaned` does not describe it: the driver's ppid is its own `sh -c`
+        wrapper, so it reads as perfectly parented. What makes it provably
+        abandoned is the three together:
+
+        1. it lives under a tmux server that is NOT the live frame's,
+        2. that server has no client attached, so no human can see or type at it,
+        3. the socket is one this package hands out, so the server is ours.
+
+        `has_clients(socket) -> bool | None` answers (2). None means the question
+        could not be answered, and an unanswered question PROTECTS: only a
+        positive "no clients" makes a candidate. A backgrounded host is excluded
+        for the same reason it is excluded from the launch guard — it is held on
+        purpose, and the remedy for it is `attach`, never a signal.
+        """
+        from .socket_gc import SocketReaper
+
+        rows = cls._ps() if rows is None else rows
+        found: list[dict[str, object]] = []
+        for holder in cls.holders(reference, exclude_tree=exclude_tree, rows=rows):
+            if holder.get("background"):
+                continue
+            socket_name = cls.server_socket_of(int(holder["pid"]), rows)
+            if not socket_name or socket_name == live_socket:
+                continue
+            if not SocketReaper.ours(socket_name):
+                continue        # someone else's tmux: never ours to touch
+            if has_clients(socket_name) is not False:
+                continue        # True is in use, None is unknown; both protect
+            found.append({**holder, "socket": socket_name})
         return found
 
     @classmethod
