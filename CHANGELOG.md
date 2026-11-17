@@ -4,6 +4,23 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [2.0.2] - 2026-11-17
+
+### Removed
+
+- The pre-1.0.70 snapshot icon migration. Saved snapshots are rewritten on
+  open, and none older than 1.0.84 remains, so a stored snapshot is now read
+  back unchanged.
+- Dead legacy helpers with no callers: the old session-status write path, the
+  read-modify-write circuit-breaker ledger (the breaker uses its append-only
+  file), the pre-provider-registry sidebar mark wrappers, and two unused
+  sidebar and repair helpers.
+- Three unused imports.
+
+Live compatibility paths stay: legacy record readers, legacy activity files,
+the legacy socket address and binding stamp that running frames depend on, and
+the positional argument forms tmux bindings may still call.
+
 ## [2.0.1] - 2026-11-15
 
 2.0.0 was tagged but never published: its publish workflow failed the test gate
