@@ -556,8 +556,13 @@ def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
         (["claude", "--resume", REFERENCE], True),
         (["claude", f"--resume={REFERENCE}"], True),
         (["claude", "--session-id", REFERENCE], True),
-        # The bundled Codex driver puts the reference LAST, positionally.
-        (["codex", "resume", "--no-daemon", "-C", "/w", REFERENCE], True),
+        # The bundled Codex driver puts the reference positionally, and this
+        # package generates global options BEFORE the subcommand.
+        (["codex", "resume", "-C", "/w", REFERENCE], True),
+        (["codex", "--no-daemon", "resume", "-C", "/w", REFERENCE], True),
+        # `codex resume OTHER TARGET` resumes OTHER and passes TARGET as the
+        # PROMPT. Only the first positional is the session.
+        (["codex", "resume", "other-session-id", REFERENCE], False),
         (["claude", "--resume", "other", "-p", f"see {REFERENCE}"], False),
         (["claude", "-p", REFERENCE], False),
         # `resume` is a SUBCOMMAND, never a flag whose next argument is a
@@ -627,3 +632,28 @@ def test_the_real_argv_is_read_with_its_boundaries_intact(retired_server):
     assert argv[0].endswith("/claude"), argv
     assert REFERENCE in argv, argv
     assert ConversationHolders.selects_exactly(argv, REFERENCE)
+
+
+def test_the_argv_this_package_actually_launches_codex_with_is_recognised():
+    """Pinned against the real generator, not a copy of it.
+
+    The subcommand form was first written from a guess at the shape and rejected
+    the one this package emits, so the launch guard saw the holder while the
+    release path did not — leaving Codex sessions stuck for good. Deriving the
+    argv here means a change to the driver breaks this test instead of silently
+    disabling the repair (cross-model review, 2026-11-17).
+    """
+    from hive_ide.drivers import bundled_drivers
+
+    codex = bundled_drivers().get("codex")
+    assert codex is not None, "the bundled codex driver is gone"
+    resolved = codex.resolve(
+        name="SESSION", working_dir="/w", conversation_reference=REFERENCE
+    )
+    argv = [str(part) for part in resolved["launch_argv"]]
+
+    assert "resume" in argv, f"the codex launch no longer uses the subcommand: {argv}"
+    assert ConversationHolders.selects_exactly(argv, REFERENCE), (
+        f"the argv this package launches is not recognised as selecting: {argv}"
+    )
+    assert not ConversationHolders.selects_exactly(argv, "other-reference-id")

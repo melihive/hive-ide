@@ -239,6 +239,11 @@ class ConversationHolders:
     #: driver was not resuming (cross-model review, 2026-11-17).
     SELECTION_FLAGS = frozenset({"--resume", "--continue", "--session-id"})
 
+    #: Drivers whose conversation is selected by a `resume` SUBCOMMAND with a
+    #: positional id, rather than by a flag. For anything else the bare word is
+    #: ordinary text and selects nothing.
+    SUBCOMMAND_DRIVERS = frozenset({"codex"})
+
     @staticmethod
     def argv_of(pid: int) -> list[str] | None:
         """The process's REAL argv, with argument boundaries intact.
@@ -287,11 +292,50 @@ class ConversationHolders:
                 flag, _, value = token.partition("=")
                 if flag in cls.SELECTION_FLAGS and value == reference:
                     return True
-        # The subcommand form. Only a POSITIONAL match counts, and only after
-        # `resume` itself, so a flag's value elsewhere cannot stand in for it.
-        if len(argv) > 1 and argv[1] == "resume":
-            return reference in argv[2:]
-        return False
+        # The subcommand form, `… resume [options] <session> [prompt]`.
+        #
+        # The session is the FIRST positional after `resume` — never merely one
+        # of them. `codex resume OTHER TARGET` resumes OTHER and passes TARGET
+        # as the prompt, so accepting any positional would have signalled a live
+        # agent on another conversation. Global options may precede `resume`
+        # (`codex --no-daemon resume -C /w <id>` is what this package generates),
+        # so the subcommand is located rather than assumed at argv[1].
+        #
+        # An option's VALUE is skipped with it. Which options take one is the
+        # driver's business, not ours, so the conservative reading is used: a
+        # `-x`/`--x` token consumes a following non-option token. STATED LIMIT —
+        # after a boolean flag (`resume --no-daemon <id>`) the id is read as that
+        # flag's value, no positional is found, and this answers False. That
+        # leaves the holder unreleased, which is inert; the opposite error would
+        # signal somebody else's agent.
+        # Only for a driver that HAS a `resume` subcommand. `claude` does not —
+        # it selects with `--resume` — so for it the word is ordinary prompt
+        # text, and `claude -p resume <id>` must not select anything. Without
+        # this gate the two cannot be told apart: `-p resume` and
+        # `--no-daemon resume` are the same shape with opposite meanings.
+        if os.path.basename(argv[0]).lower().split(".")[0] not in cls.SUBCOMMAND_DRIVERS:
+            return False
+        positionals: list[str] = []
+        index = 1
+        while index < len(argv):
+            token = argv[index]
+            if token.startswith("-"):
+                following = index + 1
+                if (
+                    "=" not in token
+                    and following < len(argv)
+                    and not argv[following].startswith("-")
+                    and argv[following] != "resume"     # a subcommand, not a value
+                ):
+                    index = following + 1
+                else:
+                    index += 1
+                continue
+            positionals.append(token)
+            index += 1
+        return len(positionals) >= 2 and positionals[0] == "resume" and (
+            positionals[1] == reference
+        )
 
     @classmethod
     def server_of(
