@@ -968,13 +968,17 @@ class SessionRepair:
         repair rebuilt a frame whose agent could never start. Repairing harder
         does not help; the holder has to go.
 
-        Three gates, and the work happens only if ALL of them pass:
+        Four gates, and the work happens only if ALL of them pass:
 
         1. the live pane has NO driver of its own, so nothing here is replacing a
            working agent;
-        2. `ConversationHolders.stranded` proves the holder unreachable — another
+        2. this session's own record says we launched a driver on this
+           conversation, and the holder's argv IS that launch — ownership comes
+           from our records, not from reading a driver CLI's flags
+           (`ConversationHolders.selects_exactly`);
+        3. `ConversationHolders.stranded` proves the holder unreachable — another
            server, no client attached, a socket this package hands out;
-        3. the process is still the one that was chosen when the signal is sent.
+        4. the process is still the one that was chosen when the signal is sent.
 
         SIGTERM only, then confirm it exited. Everything stopped is named with
         its age, because a month-old agent disappearing silently is worse than
@@ -988,9 +992,16 @@ class SessionRepair:
         rows = ConversationHolders.snapshot()
         if not rows:
             return      # an unreadable process table proves nothing
+        # What we would launch for this session, right now: `refresh_driver` ran
+        # a moment ago and re-resolved this argv from the current driver config,
+        # so it is a live rendering rather than a stale copy. A record that names
+        # no conversation in its argv proves nothing about any process, and the
+        # holder is left alone.
+        launched_as = self.frame.agent_launch_argv(record)
         pane_pid = self.frame.agent_pane_pid(record)
         stranded = ConversationHolders.stranded(
             reference,
+            launched_as=launched_as,
             live_socket=self.frame.socket,
             live_server_pid=self._live_server_pid(),
             has_clients=self._socket_has_clients,

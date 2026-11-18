@@ -233,69 +233,6 @@ class ConversationHolders:
             return None
         return name
 
-    #: Flags whose VALUE is a conversation. The bare word `resume` is NOT here:
-    #: it is a subcommand, and treating it as a selector let ordinary prose do
-    #: the selecting — `-p "how to resume <id> safely"` named a conversation the
-    #: driver was not resuming (cross-model review, 2026-11-17).
-    #:
-    #: `--continue` is NOT here either, and that was a defect: it is BOOLEAN
-    #: (`claude -c`/`--continue` resumes the most recent conversation and takes
-    #: no id), so reading the next token as its value turned a PROMPT into a
-    #: selection and authorized a signal against whatever conversation that
-    #: prompt happened to name (cross-model review, 2026-11-18). A `--continue`
-    #: process does hold a conversation, but nothing in its argv says WHICH, so
-    #: this path cannot name it and must leave it alone.
-    SELECTION_FLAGS = frozenset({"--resume", "--session-id"})
-
-    #: Options that make the invocation a FORK: it starts a NEW conversation from
-    #: the one it resumes, so that id is the fork's SOURCE and not what the
-    #: process holds. Signalling it would kill a live agent on a conversation
-    #: nobody asked to release (cross-model review, 2026-11-18).
-    FORK_FLAGS = frozenset({"--fork-session"})
-
-    #: Options that pick the session THEMSELVES, so the first positional after
-    #: `resume` is a PROMPT and names nothing: `codex resume --last <text>`
-    #: resumes the most recent session and passes <text> as the prompt. They take
-    #: no value, so the parse walked straight past them and read that prompt as
-    #: the session (cross-model review, 2026-11-18).
-    IMPLICIT_SELECTION_OPTIONS = frozenset({"--last"})
-
-    #: Flags whose value is a fork's SOURCE once the invocation is a fork, and so
-    #: selects nothing. `--session-id` is deliberately NOT here: it names the NEW
-    #: conversation, the one the process really holds. The real background-host
-    #: shape in `tests/test_background_session_attach.py` carries both at once, so
-    #: rejecting a fork outright would blind this path to a genuine holder.
-    FORK_SOURCE_FLAGS = frozenset({"--resume", "--continue"})
-
-    #: Options of a `resume` driver that CONSUME the following token, so that
-    #: token is a value and never the session. Declared from `codex --help` and
-    #: `codex resume --help` rather than guessed: the session id may be a NAME as
-    #: well as a UUID, so no shape test can tell a swallowed session from a
-    #: swallowed directory, and the guess read a PROMPT as the session
-    #: (cross-model review, 2026-11-18).
-    VALUE_OPTIONS = frozenset({
-        "-c", "--config", "--enable", "--disable", "--remote",
-        "--remote-auth-token-env", "-m", "--model", "--local-provider",
-        "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
-        "-a", "--ask-for-approval",
-    })
-
-    #: Options of a `resume` driver that consume NOTHING. An option in NEITHER
-    #: set is unknown — including a VARIADIC one such as `-i/--image <FILE>...`,
-    #: which consumes an unknowable number of tokens — and an unknown option puts
-    #: the session's position beyond proof, so the holder is left alone.
-    BOOLEAN_OPTIONS = frozenset({
-        "--strict-config", "--oss", "--approve-for-me",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--dangerously-bypass-hook-trust", "--worktree", "--search",
-        "--no-alt-screen", "--no-daemon", "--last", "--all",
-        "--include-non-interactive", "-h", "--help", "-V", "--version",
-    })
-
-    #: Drivers whose conversation is selected by a `resume` SUBCOMMAND with a
-    #: positional id, rather than by a flag. For anything else the bare word is
-    #: ordinary text and selects nothing.
-    SUBCOMMAND_DRIVERS = frozenset({"codex"})
 
     @staticmethod
     def argv_of(pid: int) -> list[str] | None:
@@ -318,103 +255,79 @@ class ConversationHolders:
             return None
         return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
 
+    @staticmethod
+    def _executable_name(token: str) -> str:
+        """The comparable name of an argv[0]: `/opt/x/Claude.cmd` -> `claude`."""
+        return os.path.basename(token).lower().split(".")[0]
+
     @classmethod
-    def selects_exactly(cls, argv: list[str], reference: str) -> bool:
+    def selects_exactly(
+        cls, argv: list[str], reference: str, *, launched_as: list[str]
+    ) -> bool:
         """Is `reference` the conversation this argv actually SELECTS?
 
-        `holders()` accepts a looser reading on purpose: it feeds the launch
-        guard, where a false positive only REFUSES a launch, and refusing is
-        safe. The kill path cannot afford it — there the same false positive
-        signals somebody's live agent — so this asks the strict question of a
-        real argv:
+        Answered from THIS package's own record of what it launched, not by
+        parsing a driver CLI's flags. `launched_as` is the exact argv
+        `Frame.agent_launch_argv` builds for the session being repaired, which
+        is also the argv the launcher runs — one source, so the thing compared
+        against cannot drift from the thing started.
 
-        - the value of a selection FLAG (`--resume <id>`, `--resume=<id>`), or
-        - a positional argument of the `resume` SUBCOMMAND, which is the form
-          the bundled Codex driver launches:
-          `codex resume --no-daemon -C <dir> <id>`. Rejecting that left Codex
-          sessions permanently stuck, since the guard recognised the holder
-          while this did not (cross-model review, 2026-11-17).
+        That inversion is the lesson of three cross-model review rounds. The old
+        answer reverse-engineered two CLIs whose flag semantics move with their
+        releases, and review found SIX separate P1s in it, each a fresh way to
+        misread an argv on the path that sends SIGTERM: a boolean flag promoting
+        a prompt into the session slot; a named session defeating the shape test
+        that replaced it; `--continue` read as value-bearing when it takes no id;
+        `--fork-session` treated as holding its source; `--last` leaving the
+        positional a prompt; a repeated `--resume` believed on the FIRST match
+        where the CLI takes the last. Six in one function is the shape of a wrong
+        abstraction rather than six mistakes: the function was deducing a fact
+        this package already knows, having built the command line itself.
+
+        So identity with our own launch is the proof, and a driver CLI's flag
+        semantics are not consulted at all. Every one of those six shapes now
+        fails for the same reason instead of six delicate ones — it is not what
+        we launched — and a seventh shape nobody has thought of fails with them.
+
+        What the question costs is reach. A driver started by hand, a session
+        renamed since its driver started, or a hive-ide old enough to generate a
+        different command line no longer qualifies, and the holder is left alone
+        with the stalemate visible rather than silently signalled. That is the
+        safe direction, and it keeps the shape found in the field:
+        `claude --resume <id> --name <NAME>` is what this package generates today
+        and what the stranded driver of 2026-11-17 was generated from.
+
+        `launched_as` must name the conversation for the comparison to mean
+        anything, and `selects_exactly` is the one place that decides it. A
+        driver that resumes by workspace instead of by id — the
+        `workspace_continue` strategy, `agy -c` — carries no reference in its
+        argv at all, so no argv can prove WHICH conversation it holds, and this
+        answers False rather than guessing.
         """
-        if not argv:
+        if not argv or not reference or reference not in (launched_as or []):
             return False
-        # A fork resumes one conversation to start another. Judged on the KILL
-        # path only: the loose `holders()` guard may go on treating a fork as a
-        # holder, where the cost is a refused launch and not a signal.
-        forking = any(token.partition("=")[0] in cls.FORK_FLAGS for token in argv)
-        # EVERY selection is collected before any is believed. Returning on the
-        # first match read `--resume TARGET --resume OTHER` as selecting TARGET,
-        # while the CLI itself takes the LAST — the same trap already fixed for
-        # tmux's repeated `-L` above, which this missed (cross-model review,
-        # 2026-11-18). Two selections that disagree are not resolved here: the
-        # argv no longer names one conversation, so it names none.
-        selections: set[str] = set()
-        for index, token in enumerate(argv):
-            flag = token.partition("=")[0]
-            if forking and flag in cls.FORK_SOURCE_FLAGS:
-                continue                       # the source, not what is held
-            if token in cls.SELECTION_FLAGS:
-                if index + 1 < len(argv):
-                    selections.add(argv[index + 1])
-            elif "=" in token and flag in cls.SELECTION_FLAGS:
-                selections.add(token.partition("=")[2])
-        if selections:
-            return selections == {reference}
-        # The subcommand form, `… resume [options] <session> [prompt]`.
-        #
-        # The session is the FIRST positional after `resume` — never merely one
-        # of them. `codex resume OTHER TARGET` resumes OTHER and passes TARGET
-        # as the prompt, so accepting any positional would have signalled a live
-        # agent on another conversation. Global options may precede `resume`
-        # (`codex --no-daemon resume -C /w <id>` is what this package generates),
-        # so the subcommand is located rather than assumed at argv[1].
-        #
-        # An option's VALUE is skipped with it, so WHICH options take one decides
-        # where the session sits. Guessing that was the defect: a BOOLEAN flag
-        # takes no value, so swallowing one shifts the window left and promotes
-        # the next token into the session slot. `codex resume --no-daemon OTHER
-        # TARGET` resumes OTHER and passes TARGET as the prompt, yet the guess
-        # read TARGET as the session and authorized a SIGTERM against a live
-        # agent on another conversation. Shape cannot rescue it either — a codex
-        # session id may be a NAME as much as a UUID, so a swallowed session is
-        # indistinguishable from a swallowed directory (cross-model review,
-        # 2026-11-18, two rounds).
-        #
-        # So the options are DECLARED, from the drivers' own `--help`, and an
-        # option in neither set is unknown. An unknown option puts the session's
-        # position beyond proof, and this path acts only on proof, so it answers
-        # False and the holder is left alone — inert, and the release of every
-        # argv shape this package actually generates is unaffected.
-        # Only for a driver that HAS a `resume` subcommand. `claude` does not —
-        # it selects with `--resume` — so for it the word is ordinary prompt
-        # text, and `claude -p resume <id>` must not select anything. Without
-        # this gate the two cannot be told apart: `-p resume` and
-        # `--no-daemon resume` are the same shape with opposite meanings.
-        if os.path.basename(argv[0]).lower().split(".")[0] not in cls.SUBCOMMAND_DRIVERS:
+        # argv[0] by executable name: the record holds the command as configured
+        # (`claude`), while the running process carries whatever path the exec
+        # resolved to.
+        if cls._executable_name(argv[0]) != cls._executable_name(launched_as[0]):
             return False
-        if any(
-            token.partition("=")[0] in cls.IMPLICIT_SELECTION_OPTIONS
-            for token in argv
-        ):
-            return False
-        positionals: list[str] = []
-        index = 1
-        while index < len(argv):
-            token = argv[index]
-            if token.startswith("-"):
-                flag = token.partition("=")[0]
-                known = flag in cls.VALUE_OPTIONS or flag in cls.BOOLEAN_OPTIONS
-                if not known:
-                    return False
-                # `--flag=value` carries its value inside the token.
-                takes_one = flag in cls.VALUE_OPTIONS and "=" not in token
-                index += 2 if takes_one else 1
-                continue
-            positionals.append(token)
-            index += 1
+        if argv[1:] == launched_as[1:]:
+            return True
+        # ONE trailing token is allowed, and only one: a launch prompt. The
+        # launcher appends exactly one positional for it
+        # (`Frame._argv_with_handoff_prompt`) and the record drops the prompt as
+        # soon as that launch has delivered it (`_clear_consumed_handoff`), so a
+        # session started with `--prompt`, or resumed through a handoff, runs an
+        # argv one token longer than its record can render. Refusing that would
+        # make this path inert for exactly those sessions. A positional cannot
+        # change which conversation either driver selects; a token starting with
+        # `-` could, so it is refused — and a real launch prompt can never start
+        # with one (`launch_prompt_problem`).
+        tail = argv[len(launched_as):]
         return (
-            len(positionals) >= 2
-            and positionals[0] == "resume"
-            and positionals[1] == reference
+            argv[1:len(launched_as)] == launched_as[1:]
+            and len(tail) == 1
+            and not tail[0].startswith("-")
         )
 
     @classmethod
@@ -452,6 +365,7 @@ class ConversationHolders:
         cls,
         reference: str,
         *,
+        launched_as: list[str],
         live_socket: str | None,
         has_clients,
         live_server_pid: int | None = None,
@@ -475,6 +389,11 @@ class ConversationHolders:
         2. that server has no client attached, so no human can see or type at it,
         3. the socket is one this package hands out, so the server is ours.
 
+        A fourth condition is the holder's own: it must be the driver this
+        package launched for `reference`, judged by identity with `launched_as`
+        rather than by reading its flags — see `selects_exactly`. With no such
+        record there is nothing to compare against and nothing is stranded.
+
         `has_clients(socket) -> bool | None` answers (2). None means the question
         could not be answered, and an unanswered question PROTECTS: only a
         positive "no clients" makes a candidate. A backgrounded host is excluded
@@ -496,9 +415,12 @@ class ConversationHolders:
             if holder.get("background") or int(holder["pid"]) in backgrounded:
                 continue
             argv = (argv_of or cls.argv_of)(int(holder["pid"]))
-            if argv is None or not cls.selects_exactly(argv, reference):
-                # No readable argv is not evidence, and a mention is not a
-                # selection. Either way: not something to signal.
+            if argv is None or not cls.selects_exactly(
+                argv, reference, launched_as=launched_as
+            ):
+                # No readable argv is not evidence, and a process that is not the
+                # one we launched is not ours to judge. Either way: not something
+                # to signal.
                 continue
             socket_name, server_pid = cls.server_of(int(holder["pid"]), rows)
             if not socket_name or server_pid is None:
@@ -533,7 +455,7 @@ class ConversationHolders:
         tokens = command.split()
         if not tokens:
             return False
-        name = os.path.basename(tokens[0]).lower().split(".")[0]
+        name = cls._executable_name(tokens[0])
         if name in cls.DRIVER_EXECUTABLES:
             return True
         if name in cls.INTERPRETERS:

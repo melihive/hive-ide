@@ -1435,20 +1435,36 @@ class Frame:
         return argv
 
     @classmethod
+    def agent_launch_argv(cls, record: dict[str, Any]) -> list[str]:
+        """The exact argv this package starts a driver with for `record`.
+
+        Public because the release path in `repair` has to decide whether a live
+        process IS this session's driver, and the only honest way to decide it is
+        against what we really launch — comparing against anything assembled
+        separately would be comparing against a second guess. `_agent_command`
+        builds its command from this same method, so the two cannot drift.
+
+        Empty where the record carries no launch argv; a shell fallback belongs
+        to starting a pane, never to identifying a driver.
+        """
+        argv = cls._agent_argv(record)
+        return cls._argv_with_handoff_prompt(argv, record) if argv else []
+
+    @classmethod
     def _agent_command(cls, record: dict[str, Any]) -> str:
         driver = record.get("driver") or {}
-        # `_agent_argv`, not the raw `launch_argv`: Codex isolation is enforced at
-        # the execution boundary so a stored pre-fix argv is isolated too. An attach
-        # is exempt by construction — it reconnects to a process that already runs,
-        # so there is no shared daemon for it to inherit.
-        argv = cls._agent_argv(record) or [os.environ.get("SHELL", "/bin/sh")]
+        # `agent_launch_argv`, not the raw `launch_argv`: Codex isolation is
+        # enforced at the execution boundary so a stored pre-fix argv is isolated
+        # too, and the handoff prompt rides along. An attach is exempt by
+        # construction — it reconnects to a process that already runs, so there is
+        # no shared daemon for it to inherit, and a handoff prompt is not a thing
+        # you say to a turn already in flight.
+        argv = cls.agent_launch_argv(record) or cls._argv_with_handoff_prompt(
+            [os.environ.get("SHELL", "/bin/sh")], record
+        )
         attach = cls._attach_argv(driver)
         if attach:
-            # An attach reconnects to a turn already in flight, so a handoff prompt
-            # does not belong on it — that is a thing you say to a fresh driver.
             argv = attach
-        else:
-            argv = cls._argv_with_handoff_prompt(argv, record)
         command = shlex.join(argv)
         handoff = record.get("handoff")
         if isinstance(handoff, dict) and handoff:
