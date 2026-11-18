@@ -255,14 +255,27 @@ class ConversationHolders:
             return None
         return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
 
-    #: Options that make an invocation a FORK: it starts a NEW conversation from
-    #: the one it resumes, so the resumed id is the fork's SOURCE and not what the
-    #: process holds. The bundled drivers never generate one, but `resume_argv` is
-    #: configuration — a declarative driver can be given `--fork-session`, and the
-    #: argv it then generates matches a process holding a conversation nobody asked
-    #: to release (cross-model review, 2026-11-18, round 9). This is the only
-    #: driver-CLI knowledge left on this path, and it can only ever REFUSE.
-    FORK_FLAGS = frozenset({"--fork-session"})
+    #: Options that name a conversation BY THEMSELVES, so an argv carrying one is
+    #: never held to the id it also carries. `--continue`/`-c` resume the most
+    #: recent conversation and `--last` the most recent session, leaving that id a
+    #: PROMPT; `--fork-session` starts a new conversation from the one it resumes,
+    #: leaving that id a SOURCE. Either way the process holds something this argv
+    #: does not name.
+    #:
+    #: The bundled drivers generate none of them, but `resume_argv` is
+    #: configuration: a declarative driver given `["claude", "--continue"]` with
+    #: the `conversation_id` strategy generates `claude --continue <id>`, and then
+    #: our own record would vouch for a process resuming something else entirely
+    #: (cross-model review, 2026-11-18, rounds 9 and 10).
+    #:
+    #: This is the ONLY driver-CLI knowledge left on this path, and it can only
+    #: ever REFUSE — never authorize. No option's ARITY is consulted anywhere,
+    #: which is where all six of the earlier P1s came from. `-c` is in at the cost
+    #: of a declarative driver that uses the short flag for something of its own:
+    #: that driver loses this repair, which is the safe direction to be wrong in.
+    OVERRIDING_SELECTION_OPTIONS = frozenset({
+        "--fork-session", "--continue", "-c", "--last",
+    })
 
     @staticmethod
     def _executable_name(token: str) -> str:
@@ -284,20 +297,26 @@ class ConversationHolders:
         Both are supported installs — `_is_driver` already recognises each —
         and judging argv[0] alone left every npm install's stranded holder
         unreleasable, the feature silently inert for a whole install base
-        (cross-model review, 2026-11-18, round 9). The interpreter form is
-        accepted only with a known entrypoint among its arguments: `node
-        <anything> --resume <id>` is not evidence of anything.
+        (cross-model review, 2026-11-18, round 9).
+
+        The entrypoint must be argv[1], the one place a shebang can put it: the
+        kernel starts the interpreter with the script as its first argument. A
+        marker accepted anywhere in argv let an unrelated program carry one in a
+        later argument and have everything before it discarded — `node
+        /tmp/task.js --resume OTHER …/claude-code/cli.js --resume <id>` then
+        matched our launch while node was running `task.js` (cross-model review,
+        2026-11-18, round 10). An interpreter invoked with options of its own is
+        not this shape and is declined.
         """
         name = cls._executable_name(argv[0])
         if name == cls._executable_name(executable):
             return argv[1:]
-        if name not in cls.INTERPRETERS:
+        if name not in cls.INTERPRETERS or len(argv) < 2:
             return None
-        for index, token in enumerate(argv[1:], start=1):
-            lowered = token.lower()
-            if any(marker in lowered for marker in cls.ENTRYPOINT_MARKERS):
-                return argv[index + 1:]
-        return None
+        entrypoint = argv[1].lower()
+        if not any(marker in entrypoint for marker in cls.ENTRYPOINT_MARKERS):
+            return None
+        return argv[2:]
 
     @classmethod
     def selects_exactly(
@@ -323,11 +342,11 @@ class ConversationHolders:
         abstraction rather than six mistakes: the function was deducing a fact
         this package already knows, having built the command line itself.
 
-        So identity with our own launch is the proof. One flag is still named,
-        `--fork-session`, and only to REFUSE: a fork holds the conversation it
-        created, so agreement with our launch would prove the wrong thing. No
-        flag's ARITY is consulted anywhere, which is where every one of the six
-        went wrong. Every one of those six shapes now
+        So identity with our own launch is the proof. Four options are still
+        named, in `OVERRIDING_SELECTION_OPTIONS`, and only ever to REFUSE: each
+        names a conversation by itself, so agreement with our launch would prove
+        the wrong thing. No option's ARITY is consulted anywhere, which is where
+        every one of the six went wrong. Every one of those six shapes now
         fails for the same reason instead of six delicate ones — it is not what
         we launched — and a seventh shape nobody has thought of fails with them.
 
@@ -348,10 +367,16 @@ class ConversationHolders:
         """
         if not argv or not reference or reference not in (launched_as or []):
             return False
-        if any(token.partition("=")[0] in cls.FORK_FLAGS for token in argv):
-            # A fork holds the conversation it CREATED, so matching our launch
-            # proves the wrong thing: the id in it is the source. Refused here
-            # rather than trusted, because `resume_argv` is configuration.
+        if any(
+            token.partition("=")[0] in cls.OVERRIDING_SELECTION_OPTIONS
+            for token in argv
+        ):
+            # This argv names a conversation some other way, so agreement with
+            # our launch would prove the wrong thing. Refused rather than
+            # trusted, because `resume_argv` is configuration and can generate
+            # exactly this. Checked on the observed argv, which is the one that
+            # has to match: a launch carrying such an option can only be matched
+            # by a process carrying it too.
             return False
         rest = cls._argv_after_executable(argv, launched_as[0])
         if rest is None:

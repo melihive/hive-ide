@@ -183,8 +183,20 @@ def _fake_driver(tmp_path):
     return driver
 
 
-#: Keeps the fake driver alive; it lands in its argv exactly as a real flag does.
-FAKE_LOOP = "while :; do sleep 0.2; done"
+def _fake_loop_script(tmp_path):
+    """A script that keeps the fake driver alive, passed as a FILE not with `-c`.
+
+    `sh <script> <args...>` runs the script with those arguments, so the driver's
+    argv carries them exactly as a real driver's does — and without `-c`, which
+    this path now refuses outright because for a real driver it names a
+    conversation by itself.
+    """
+    script = tmp_path / "bin" / "loop.sh"
+    script.parent.mkdir(exist_ok=True)
+    if not script.exists():
+        script.write_text("while :; do sleep 0.2; done\n")
+        script.chmod(0o755)
+    return script
 
 
 def _fake_registry(tmp_path):
@@ -203,9 +215,9 @@ def _fake_registry(tmp_path):
         {
             "command": [str(driver)],
             "resume_strategy": "conversation_id",
-            # `-c <loop>` keeps a copy of `sh` running; everything after it lands
-            # in argv as a real driver's flags do.
-            "resume_argv": [str(driver), "-c", FAKE_LOOP, "--resume"],
+            "resume_argv": [
+                str(driver), str(_fake_loop_script(tmp_path)), "--resume"
+            ],
             "capabilities": ("launch", "resume"),
         },
     )
@@ -691,10 +703,11 @@ def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
         # start with `-` (`launch_prompt_problem` refuses one), so an option
         # there is a token we did not launch — and keeping the allowance to
         # prompts is what stops it becoming a general "one extra token" rule.
-        ([*CLAUDE_LAUNCH, "-c"], False),
-        # The same shape with a fork flag is refused one rule earlier, by
-        # `FORK_FLAGS`, whatever its position.
+        ([*CLAUDE_LAUNCH, "--debug"], False),
+        # These two are refused one rule earlier, by
+        # `OVERRIDING_SELECTION_OPTIONS`, whatever their position.
         ([*CLAUDE_LAUNCH, "--fork-session"], False),
+        ([*CLAUDE_LAUNCH, "-c"], False),
         # Short of the launch, and one token apart from it — a session renamed
         # since its driver started. Refusing is the safe direction: the holder is
         # left alone and the stalemate stays visible.
@@ -899,14 +912,28 @@ def test_the_real_argv_is_read_with_its_boundaries_intact(tmp_path, retired_serv
     )
 
 
-def test_a_configured_FORK_is_not_held_to_the_conversation_it_forked_from():
-    """A fork holds the conversation it CREATED, so our launch proves the wrong thing.
+@pytest.mark.parametrize(
+    "resume_flags",
+    [
+        # A fork holds the conversation it CREATED, so the id in its argv is the
+        # source.
+        ["--fork-session", "--resume"],
+        # `--continue` and `--last` pick a conversation themselves, so the id is
+        # a PROMPT and the process is on something this argv does not name.
+        ["--continue"],
+        ["-c"],
+        ["--last"],
+    ],
+)
+def test_a_configured_launch_that_names_a_conversation_another_way_is_refused(resume_flags):
+    """Our record vouches for what we launched, not for how a CLI reads it.
 
-    `resume_argv` is configuration, so a declarative driver can be given
-    `--fork-session` — and then the argv this package generates matches a process
-    whose live conversation is the fork's, not the record's. Agreement with our
-    own launch is normally the proof; here it would authorize a signal against a
-    conversation nobody asked to release (cross-model review, 2026-11-18).
+    `resume_argv` is configuration, so a declarative driver can be given any of
+    these with the `conversation_id` strategy — and the argv this package then
+    generates is an exact match for a process whose live conversation is NOT the
+    record's. Agreement with our own launch is normally the whole proof; here it
+    would authorize a signal against a conversation nobody asked to release
+    (cross-model review, 2026-11-18, rounds 9 and 10).
     """
     def launch_for(resume_argv):
         registry = DriverRegistry()
@@ -920,13 +947,13 @@ def test_a_configured_FORK_is_not_held_to_the_conversation_it_forked_from():
         )
         return [str(part) for part in resolved["launch_argv"]]
 
-    forking = launch_for(["claude", "--fork-session", "--resume"])
-    assert REFERENCE in forking, forking
+    generated = launch_for(["claude", *resume_flags])
+    assert REFERENCE in generated, generated
     assert not ConversationHolders.selects_exactly(
-        forking, REFERENCE, launched_as=forking
-    ), "a fork was treated as holding the conversation it forked from"
+        generated, REFERENCE, launched_as=generated
+    ), "our own launch vouched for a process on another conversation"
 
-    # Positive control: the same driver without the fork flag still releases, so
+    # Positive control: the same driver without those flags still releases, so
     # this cannot be passing because the generated argv stopped matching at all.
     plain = launch_for(["claude", "--resume"])
     assert ConversationHolders.selects_exactly(plain, REFERENCE, launched_as=plain)
@@ -946,6 +973,14 @@ def test_a_configured_FORK_is_not_held_to_the_conversation_it_forked_from():
         # The entrypoint is required: `node <anything> --resume <id>` is not
         # evidence that this is our driver.
         (["node", "/tmp/something-else.js", *CLAUDE_LAUNCH[1:]], False),
+        # ... and it must be argv[1], the one place a shebang can put it.
+        # Accepting a marker anywhere let an unrelated program carry one in a
+        # later argument and have everything before it discarded, while node was
+        # really running the first script.
+        (["node", "/tmp/task.js", "--resume", OTHER,
+          "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], False),
+        (["node", *CLAUDE_LAUNCH[1:]], False),
         # And past the entrypoint the arguments must still be ours, exactly.
         (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
           "--resume", REFERENCE, "--name", "OTHER"], False),
