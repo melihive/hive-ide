@@ -255,10 +255,49 @@ class ConversationHolders:
             return None
         return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
 
+    #: Options that make an invocation a FORK: it starts a NEW conversation from
+    #: the one it resumes, so the resumed id is the fork's SOURCE and not what the
+    #: process holds. The bundled drivers never generate one, but `resume_argv` is
+    #: configuration — a declarative driver can be given `--fork-session`, and the
+    #: argv it then generates matches a process holding a conversation nobody asked
+    #: to release (cross-model review, 2026-11-18, round 9). This is the only
+    #: driver-CLI knowledge left on this path, and it can only ever REFUSE.
+    FORK_FLAGS = frozenset({"--fork-session"})
+
     @staticmethod
     def _executable_name(token: str) -> str:
         """The comparable name of an argv[0]: `/opt/x/Claude.cmd` -> `claude`."""
         return os.path.basename(token).lower().split(".")[0]
+
+    @classmethod
+    def _argv_after_executable(cls, argv: list[str], executable: str) -> list[str] | None:
+        """`argv` with its executable removed, or None when it is not ours.
+
+        Two process shapes are the same program. A native install runs the
+        command itself, so argv[0] IS the configured executable — compared by
+        name, because the process carries whatever path the exec resolved to. An
+        npm install is a shebang script, so the kernel starts the INTERPRETER
+        with the entrypoint as its first argument (`node
+        …/@anthropic-ai/claude-code/cli.js --resume <id>`) and the driver's own
+        arguments begin after it.
+
+        Both are supported installs — `_is_driver` already recognises each —
+        and judging argv[0] alone left every npm install's stranded holder
+        unreleasable, the feature silently inert for a whole install base
+        (cross-model review, 2026-11-18, round 9). The interpreter form is
+        accepted only with a known entrypoint among its arguments: `node
+        <anything> --resume <id>` is not evidence of anything.
+        """
+        name = cls._executable_name(argv[0])
+        if name == cls._executable_name(executable):
+            return argv[1:]
+        if name not in cls.INTERPRETERS:
+            return None
+        for index, token in enumerate(argv[1:], start=1):
+            lowered = token.lower()
+            if any(marker in lowered for marker in cls.ENTRYPOINT_MARKERS):
+                return argv[index + 1:]
+        return None
 
     @classmethod
     def selects_exactly(
@@ -284,8 +323,11 @@ class ConversationHolders:
         abstraction rather than six mistakes: the function was deducing a fact
         this package already knows, having built the command line itself.
 
-        So identity with our own launch is the proof, and a driver CLI's flag
-        semantics are not consulted at all. Every one of those six shapes now
+        So identity with our own launch is the proof. One flag is still named,
+        `--fork-session`, and only to REFUSE: a fork holds the conversation it
+        created, so agreement with our launch would prove the wrong thing. No
+        flag's ARITY is consulted anywhere, which is where every one of the six
+        went wrong. Every one of those six shapes now
         fails for the same reason instead of six delicate ones — it is not what
         we launched — and a seventh shape nobody has thought of fails with them.
 
@@ -306,12 +348,16 @@ class ConversationHolders:
         """
         if not argv or not reference or reference not in (launched_as or []):
             return False
-        # argv[0] by executable name: the record holds the command as configured
-        # (`claude`), while the running process carries whatever path the exec
-        # resolved to.
-        if cls._executable_name(argv[0]) != cls._executable_name(launched_as[0]):
+        if any(token.partition("=")[0] in cls.FORK_FLAGS for token in argv):
+            # A fork holds the conversation it CREATED, so matching our launch
+            # proves the wrong thing: the id in it is the source. Refused here
+            # rather than trusted, because `resume_argv` is configuration.
             return False
-        if argv[1:] == launched_as[1:]:
+        rest = cls._argv_after_executable(argv, launched_as[0])
+        if rest is None:
+            return False
+        expected = launched_as[1:]
+        if rest == expected:
             return True
         # ONE trailing token is allowed, and only one: a launch prompt. The
         # launcher appends exactly one positional for it
@@ -323,9 +369,9 @@ class ConversationHolders:
         # change which conversation either driver selects; a token starting with
         # `-` could, so it is refused — and a real launch prompt can never start
         # with one (`launch_prompt_problem`).
-        tail = argv[len(launched_as):]
+        tail = rest[len(expected):]
         return (
-            argv[1:len(launched_as)] == launched_as[1:]
+            rest[:len(expected)] == expected
             and len(tail) == 1
             and not tail[0].startswith("-")
         )

@@ -687,8 +687,13 @@ def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
         # token of our launch still present and in order.
         ([*CLAUDE_LAUNCH, "--resume", "other"], False),
         ([*CLAUDE_LAUNCH, "a prompt", "and another"], False),
-        # A single trailing OPTION is not a prompt — a prompt can never start
-        # with `-` — and this one makes the resumed id a fork's SOURCE.
+        # A single trailing OPTION is not a prompt: a launch prompt can never
+        # start with `-` (`launch_prompt_problem` refuses one), so an option
+        # there is a token we did not launch — and keeping the allowance to
+        # prompts is what stops it becoming a general "one extra token" rule.
+        ([*CLAUDE_LAUNCH, "-c"], False),
+        # The same shape with a fork flag is refused one rule earlier, by
+        # `FORK_FLAGS`, whatever its position.
         ([*CLAUDE_LAUNCH, "--fork-session"], False),
         # Short of the launch, and one token apart from it — a session renamed
         # since its driver started. Refusing is the safe direction: the holder is
@@ -892,6 +897,75 @@ def test_the_real_argv_is_read_with_its_boundaries_intact(tmp_path, retired_serv
     assert ConversationHolders.selects_exactly(
         argv, REFERENCE, launched_as=_fake_launch_argv(tmp_path)
     )
+
+
+def test_a_configured_FORK_is_not_held_to_the_conversation_it_forked_from():
+    """A fork holds the conversation it CREATED, so our launch proves the wrong thing.
+
+    `resume_argv` is configuration, so a declarative driver can be given
+    `--fork-session` — and then the argv this package generates matches a process
+    whose live conversation is the fork's, not the record's. Agreement with our
+    own launch is normally the proof; here it would authorize a signal against a
+    conversation nobody asked to release (cross-model review, 2026-11-18).
+    """
+    def launch_for(resume_argv):
+        registry = DriverRegistry()
+        registry.add_declarative("claude", {
+            "command": ["claude"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": resume_argv,
+        })
+        resolved = registry.get("claude").resolve(
+            name="SESSION", working_dir="/w", conversation_reference=REFERENCE
+        )
+        return [str(part) for part in resolved["launch_argv"]]
+
+    forking = launch_for(["claude", "--fork-session", "--resume"])
+    assert REFERENCE in forking, forking
+    assert not ConversationHolders.selects_exactly(
+        forking, REFERENCE, launched_as=forking
+    ), "a fork was treated as holding the conversation it forked from"
+
+    # Positive control: the same driver without the fork flag still releases, so
+    # this cannot be passing because the generated argv stopped matching at all.
+    plain = launch_for(["claude", "--resume"])
+    assert ConversationHolders.selects_exactly(plain, REFERENCE, launched_as=plain)
+
+
+@pytest.mark.parametrize(
+    "argv, selected",
+    [
+        # An npm install is a shebang script, so the kernel runs the INTERPRETER
+        # with the entrypoint as its first argument. `_is_driver` has always
+        # recognised this shape; judging argv[0] alone made the release path
+        # inert for every such install (cross-model review, 2026-11-18).
+        (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], True),
+        (["/usr/bin/node", "/opt/n/lib/node_modules/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], True),
+        # The entrypoint is required: `node <anything> --resume <id>` is not
+        # evidence that this is our driver.
+        (["node", "/tmp/something-else.js", *CLAUDE_LAUNCH[1:]], False),
+        # And past the entrypoint the arguments must still be ours, exactly.
+        (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          "--resume", REFERENCE, "--name", "OTHER"], False),
+        (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:], "--fork-session"], False),
+        # An interpreter this package does not run drivers through.
+        (["ruby", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], False),
+    ],
+)
+def test_an_interpreter_installed_driver_is_the_same_program(argv, selected):
+    # The launch guard sees these as drivers, which is what makes the two paths
+    # disagreeing a defect rather than a difference of opinion.
+    if selected:
+        assert ConversationHolders._is_driver(" ".join(argv)), (
+            "precondition: the guard recognises this install shape"
+        )
+    assert ConversationHolders.selects_exactly(
+        argv, REFERENCE, launched_as=CLAUDE_LAUNCH
+    ) is selected
 
 
 def test_the_argv_this_package_actually_launches_codex_with_is_recognised():
