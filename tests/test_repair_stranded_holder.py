@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shlex
 import shutil
+import sys
 import subprocess
 import tempfile
 import time
@@ -31,6 +33,7 @@ import uuid
 
 import pytest
 
+from hive_ide.drivers import DriverRegistry, bundled_drivers
 from hive_ide.frame import Frame
 from hive_ide.holders import ConversationHolders
 from hive_ide.repair import SessionRepair
@@ -40,16 +43,36 @@ from conftest import tmux_wait_budget
 
 
 REFERENCE = "01352fc0-f747-4934-8771-3e3b357fb92b"
+OTHER = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 LIVE_SOCKET = "hive-ide-next-abc12345"
 RETIRED_SOCKET = "hive-ide-abc12345"
 
 
+def _generated_launch(driver_id, *, reference=REFERENCE, name="SESSION"):
+    """The argv this package really generates, asked of the driver itself.
+
+    Never a copy of it. Ownership on the kill path is identity with our own
+    launch, so a test that hand-wrote the expected shape would be pinning the
+    test's guess instead of the package's behaviour — which is the whole class
+    of mistake this predicate was rewritten to remove.
+    """
+    resolved = bundled_drivers()[driver_id].resolve(
+        name=name, working_dir="/w", conversation_reference=reference
+    )
+    return [str(part) for part in resolved["launch_argv"]]
+
+
+CLAUDE_LAUNCH = _generated_launch("claude")
+CODEX_LAUNCH = _generated_launch("codex")
+
+
 def _rows(*, server_argv: str = f"tmux -L {RETIRED_SOCKET} -f /x/ide.conf new-session -d"):
     """The reported process shape: server -> `sh -c` wrapper -> driver."""
+    driver = " ".join(CLAUDE_LAUNCH)
     return [
         (100, 1, server_argv),
-        (200, 100, f"sh -c unset NO_COLOR; claude --resume {REFERENCE} --name SESSION"),
-        (201, 200, f"claude --resume {REFERENCE} --name SESSION"),
+        (200, 100, f"sh -c unset NO_COLOR; {driver}"),
+        (201, 200, driver),
     ]
 
 
@@ -61,7 +84,7 @@ def _argv_from(rows, pid):
     return None
 
 
-def _stranded(rows, *, live_socket=LIVE_SOCKET,
+def _stranded(rows, *, live_socket=LIVE_SOCKET, launched_as=None,
               has_clients=lambda _socket, _server: False, argv_of=None):
     """`stranded` over fabricated rows, reading argv from those same rows.
 
@@ -72,7 +95,9 @@ def _stranded(rows, *, live_socket=LIVE_SOCKET,
     commands = {pid: command for pid, _ppid, command in rows}
     default = lambda pid: (commands.get(pid) or "").split() or None
     return ConversationHolders.stranded(
-        REFERENCE, live_socket=live_socket, has_clients=has_clients,
+        REFERENCE,
+        launched_as=CLAUDE_LAUNCH if launched_as is None else launched_as,
+        live_socket=live_socket, has_clients=has_clients,
         argv_of=argv_of or default, rows=rows,
     )
 
@@ -139,20 +164,91 @@ pytestmark_tmux = pytest.mark.skipif(
 )
 
 
-def _fake_driver(tmp_path):
-    """An executable whose argv[0] really IS `claude`.
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
-    A `#!/bin/sh` script will not do: the kernel runs it as `/bin/sh <path>`, so
-    argv[0] is the shell and `_is_driver` rightly refuses it — which is how this
-    fixture first failed. Copying a shell to the name `claude` gives a process
-    that looks to `ps` exactly as a real driver does.
+
+def _fake_driver(tmp_path):
+    """A real long-running process whose argv is an npm claude install's.
+
+    The kill path vouches only for launches this package DEFINES, so the fixture
+    cannot configure a driver of its own — the record has to be the bundled
+    `claude`. That rules out a renamed copy of `sh`, which cannot be given
+    `--resume <id>` without dying on the unknown option.
+
+    An npm install is the way out, and it is a shape the package genuinely
+    supports: a shebang script, so the kernel starts the INTERPRETER with the
+    entrypoint as its first argument. `python3 …/claude-code/cli.js --resume
+    <id> --name <name>` is that shape exactly — the file is named as npm names
+    it and holds a sleeper, because what `ps` and the matcher read is the argv,
+    never the language inside.
     """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    driver = bin_dir / "claude"
-    shutil.copy("/bin/sh", driver)
-    driver.chmod(0o755)
-    return driver
+    entrypoint = tmp_path / "npm" / "claude-code" / "cli.js"
+    if not entrypoint.exists():
+        entrypoint.parent.mkdir(parents=True, exist_ok=True)
+        entrypoint.write_text("import time\ntime.sleep(600)\n")
+    return entrypoint
+
+
+def _fake_launch_argv(tmp_path, *, reference=REFERENCE):
+    """The fake driver's argv — the bundled launch, run through an interpreter."""
+    return [
+        sys.executable, str(_fake_driver(tmp_path)),
+        "--resume", reference, "--name", "SESSION",
+    ]
+
+
+def _wait_for_driver(entrypoint, *, reference=REFERENCE):
+    """The pid of the fake driver, once the process table can actually see it.
+
+    `tmux new-session -d` returns when the SERVER is up, not when the pane's
+    command has been forked and exec'd, so a probe fired straight afterwards
+    misses the driver about half the time — measured, not guessed. A test that
+    probes without waiting therefore passes or fails on machine load rather than
+    on the behaviour it names.
+    """
+    deadline = time.monotonic() + tmux_wait_budget(5.0)
+    while time.monotonic() < deadline:
+        for candidate, _ppid, command in ConversationHolders.snapshot():
+            # argv[0] must be the INTERPRETER and argv[1] the entrypoint. The
+            # tmux server's own argv carries the whole pane command — entrypoint
+            # and reference included — so a substring match picks up the server
+            # instead, which this helper did until the kill it asserted turned
+            # out to be the server exiting as its last pane went away.
+            tokens = command.split()
+            if tokens[:2] == [sys.executable, str(entrypoint)] and reference in command:
+                return candidate
+        time.sleep(0.05)
+    raise AssertionError("the fake driver never appeared in the process table")
+
+
+@pytest.fixture
+def retired_server(tmp_path):
+    """A real second tmux server, clientless, running a real fake driver."""
+    socket = f"hive-ide-retired-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    entrypoint = _fake_driver(tmp_path)
+    # The pane runs the argv the PACKAGE generates for the bundled driver,
+    # because that identity is what authorizes the release.
+    subprocess.run(
+        ["tmux", "-L", socket, "new-session", "-d", "-s", "stale",
+         shlex.join(_fake_launch_argv(tmp_path))],
+        check=True, capture_output=True, text=True,
+    )
+    pid = _wait_for_driver(entrypoint)
+    try:
+        yield socket, pid
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+        for _ in range(40):
+            if not _alive(pid):
+                break
+            time.sleep(0.05)
 
 
 def _repair_for(tmp_path, *, reference=REFERENCE):
@@ -169,57 +265,16 @@ def _repair_for(tmp_path, *, reference=REFERENCE):
         name="SESSION",
         working_dir=workspace,
         source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
-        driver={"id": "claude", "resume": {"reference": reference}},
+        # Resolved through the BUNDLED driver, as `create` and `refresh_driver`
+        # both do: the record has to carry the launch argv, because that is what
+        # the release path compares a live process against — and it has to be a
+        # launch this package defines, or the release declines it.
+        driver=bundled_drivers()["claude"].resolve(
+            name="SESSION", working_dir=str(workspace), conversation_reference=reference
+        ),
     )
     frame = Frame(store, socket=f"hive-ide-live-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     return SessionRepair(store, frame), record
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
-
-
-@pytest.fixture
-def retired_server(tmp_path):
-    """A real second tmux server, clientless, running a real fake driver."""
-    socket = f"hive-ide-retired-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    driver = _fake_driver(tmp_path)
-    # `-c <loop>` keeps it alive; the arguments after it land in argv exactly as
-    # a real driver's do, which is all `ps` and the matcher ever look at.
-    subprocess.run(
-        ["tmux", "-L", socket, "new-session", "-d", "-s", "stale",
-         f"{driver} -c 'while :; do sleep 0.2; done' --resume {REFERENCE} --name SESSION"],
-        check=True, capture_output=True, text=True,
-    )
-    deadline = time.monotonic() + tmux_wait_budget(5.0)
-    pid = None
-    while time.monotonic() < deadline and pid is None:
-        for candidate, _ppid, command in ConversationHolders.snapshot():
-            # argv[0] must BE the driver. The tmux server's own argv carries the
-            # whole pane command — driver path and reference included — so a
-            # substring match picks up the server instead, which this fixture
-            # did until the kill it asserted turned out to be the server exiting
-            # as its last pane went away.
-            if command.split()[:1] == [str(driver)] and REFERENCE in command:
-                pid = candidate
-                break
-        if pid is None:
-            time.sleep(0.05)
-    assert pid, "the fake driver never appeared in the process table"
-    try:
-        yield socket, pid
-    finally:
-        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
-        for _ in range(40):
-            if not _alive(pid):
-                break
-            time.sleep(0.05)
 
 
 @pytestmark_tmux
@@ -307,6 +362,7 @@ def test_a_session_whose_conversation_is_elsewhere_signals_nothing(
     # same process IS stranded when asked about the conversation it holds.
     assert ConversationHolders.stranded(
         REFERENCE,
+        launched_as=_fake_launch_argv(tmp_path),
         live_socket=repair.frame.socket,
         has_clients=repair._socket_has_clients,
     ), "the fixture's driver was not stranded even for its own conversation"
@@ -413,15 +469,16 @@ def test_a_server_in_another_socket_directory_is_still_reached(tmp_path, monkeyp
     # A unix socket path is capped near 108 bytes, so this root and this name
     # both stay short — a pytest tmp_path plus a descriptive name overruns it.
     elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="hv"))
-    driver = _fake_driver(tmp_path)
+    entrypoint = _fake_driver(tmp_path)
     socket = f"hive-ide-e{uuid.uuid4().hex[:6]}"
     env = {**os.environ, "TMUX_TMPDIR": str(elsewhere)}
     started = subprocess.run(
         ["tmux", "-L", socket, "new-session", "-d", "-s", "stale",
-         f"{driver} -c 'while :; do sleep 0.2; done' --resume {REFERENCE}"],
+         shlex.join(_fake_launch_argv(tmp_path))],
         capture_output=True, text=True, env=env,
     )
     assert started.returncode == 0, f"tmux refused: {started.stderr!r}"
+    _wait_for_driver(entrypoint)
     repair, record = _repair_for(tmp_path)
     assert repair.frame.socket_tmpdir != str(elsewhere)
     actions: list[str] = []
@@ -509,6 +566,7 @@ def test_the_live_server_is_excluded_by_identity_not_by_name():
 
     found = ConversationHolders.stranded(
         REFERENCE,
+        launched_as=CLAUDE_LAUNCH,
         live_socket=RETIRED_SOCKET,      # the live frame happens to share the name
         live_server_pid=999_999,         # but it is a different server
         has_clients=lambda _s, _p: False,
@@ -521,6 +579,7 @@ def test_the_live_server_is_excluded_by_identity_not_by_name():
 
     mine = ConversationHolders.stranded(
         REFERENCE,
+        launched_as=CLAUDE_LAUNCH,
         live_socket="unrelated-name",
         live_server_pid=100,             # this IS the live frame's own server
         has_clients=lambda _s, _p: False,
@@ -538,10 +597,9 @@ def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
     false positive terminates somebody's live, unrelated agent, so this path
     demands the reference be the VALUE of the selection flag.
     """
-    other = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
     rows = [
         (100, 1, f"tmux -L {RETIRED_SOCKET} new-session -d"),
-        (201, 100, f"claude --resume {other} -p Explain transcript {REFERENCE}"),
+        (201, 100, f"claude --resume {OTHER} -p Explain transcript {REFERENCE}"),
     ]
     # The loose matcher — the one the guard uses — does consider it a holder.
     assert ConversationHolders.holders(REFERENCE, rows=rows), (
@@ -553,17 +611,21 @@ def test_a_driver_that_merely_MENTIONS_the_conversation_is_not_stranded():
 def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
     """`codex resume --no-daemon OTHER TARGET` resumes OTHER, not TARGET.
 
-    A boolean flag takes no value, so skipping one shifted the window left and
-    read the PROMPT as the session — which authorized a SIGTERM against a live
-    agent on another conversation. Which flags take a value is the driver's
-    business, so an argv where a swallowed token could itself be a session is
-    declined outright (cross-model review, 2026-11-18).
+    The first of six P1s, and the one that shows why the question changed. A
+    boolean flag takes no value, so a parse that swallowed one shifted the
+    window left and read the PROMPT as the session — authorizing a SIGTERM
+    against a live agent on another conversation. Nothing here knows which flags
+    take a value any more: this argv is simply not the one we launched.
     """
-    other = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
-    argv = ["codex", "resume", "--no-daemon", other, REFERENCE]
+    argv = ["codex", "resume", "--no-daemon", OTHER, REFERENCE]
 
-    assert not ConversationHolders.selects_exactly(argv, REFERENCE), (
-        "the prompt was read as the session this argv selects"
+    assert not ConversationHolders.selects_exactly(
+        argv, REFERENCE, launched_as=CODEX_LAUNCH
+    ), "the prompt was read as the session this argv selects"
+    # Nor does it select the conversation it really resumes. The old answer said
+    # True here; the record cannot say so, because we launched no such argv.
+    assert not ConversationHolders.selects_exactly(
+        argv, OTHER, launched_as=_generated_launch("codex", reference=OTHER)
     )
 
     rows = [
@@ -573,90 +635,189 @@ def test_a_boolean_flag_before_the_session_does_not_promote_the_prompt():
     assert _stranded(rows, argv_of=lambda pid: argv if pid == 201 else None) == [], (
         "a driver resuming ANOTHER conversation was authorized for a signal"
     )
-    # It selects the session it REALLY resumes, rather than merely declining.
-    assert ConversationHolders.selects_exactly(argv, other)
     # Positive control: the argv this package generates still releases, so the
-    # declaration fixed the reading without disabling the repair.
-    works = ["codex", "resume", "--no-daemon", "-C", "/w", REFERENCE]
-    assert ConversationHolders.selects_exactly(works, REFERENCE)
+    # proof moved without disabling the repair.
+    assert ConversationHolders.selects_exactly(
+        CODEX_LAUNCH, REFERENCE, launched_as=CODEX_LAUNCH
+    )
 
 
 @pytest.mark.parametrize(
     "argv, selected",
     [
-        (["claude", "--resume", REFERENCE], True),
-        (["claude", f"--resume={REFERENCE}"], True),
-        (["claude", "--session-id", REFERENCE], True),
-        # The bundled Codex driver puts the reference positionally, and this
-        # package generates global options BEFORE the subcommand.
-        (["codex", "resume", "-C", "/w", REFERENCE], True),
-        (["codex", "--no-daemon", "resume", "-C", "/w", REFERENCE], True),
-        # `codex resume OTHER TARGET` resumes OTHER and passes TARGET as the
-        # PROMPT. Only the first positional is the session.
-        (["codex", "resume", "other-session-id", REFERENCE], False),
-        # A BOOLEAN flag takes no value, so the token after it is the session and
-        # the reference is only the prompt. Shape cannot decide this: a codex
-        # session id may be a NAME as readily as a UUID, and both forms were read
-        # as selecting the prompt.
-        (["codex", "resume", "--no-daemon",
-          "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", REFERENCE], False),
-        (["codex", "resume", "--no-daemon", "my-other-session", REFERENCE], False),
-        (["codex", "resume", "--last", "my-other-session", REFERENCE], False),
-        # `--last` picks the session ITSELF, so the first positional after
-        # `resume` is a prompt and the argv names no conversation at all.
-        (["codex", "resume", "--last", REFERENCE], False),
-        # A repeated selector: the CLI takes the LAST, so believing the FIRST
-        # match pointed this at a conversation the process had moved off.
-        (["claude", "--resume", REFERENCE, "--resume", "other"], False),
-        # The mirror image is INERT, not selected: the CLI really would resume
-        # the reference here, but two selectors no longer name one conversation
-        # and this path does not adjudicate between them.
-        (["claude", "--resume", "other", "--resume", REFERENCE], False),
-        # A VALUE option really does consume the next token, so here the
-        # reference IS the session — the declaration has to cut both ways.
-        (["codex", "resume", "--sandbox", "read-only", REFERENCE], True),
-        (["codex", "resume", "--sandbox=read-only", REFERENCE], True),
-        # An UNKNOWN option could consume the session or nothing, so the position
-        # is beyond proof and this path acts only on proof. Read as boolean, the
-        # reference below would BE the first positional and so select — which is
-        # exactly the coin-flip this declines.
-        # Both forms are needed to pin the refusal from both sides: read as
-        # boolean the first selects, and read as value-taking the second does.
-        (["codex", "resume", "--flag-from-a-later-codex", REFERENCE], False),
-        (["codex", "resume", "--flag-from-a-later-codex", "/w", REFERENCE], False),
-        # `-i/--image <FILE>...` is variadic — an unknowable number of tokens —
-        # so it is in neither set and lands in the same undecidable case.
-        (["codex", "resume", "-i", REFERENCE], False),
-        (["codex", "resume", "-i", "a.png", REFERENCE], False),
-        # `--continue` is BOOLEAN: it resumes the most recent conversation and
-        # the token after it is a PROMPT. Reading it as a selection authorized a
-        # signal against whatever conversation that prompt happened to name.
-        (["claude", "--continue", REFERENCE], False),
-        (["claude", "-c", REFERENCE], False),
-        # A FORK starts a NEW conversation from the one it resumes, so the
-        # resumed id is its SOURCE and the process does not hold it.
-        (["claude", "--resume", REFERENCE, "--fork-session"], False),
-        (["claude", "--fork-session", f"--resume={REFERENCE}"], False),
-        # ... but the fork's own conversation rides on `--session-id`, which the
-        # real background-host shape carries alongside the source. Blinding this
-        # path to that would miss a genuine holder.
-        (["claude", "--session-id", REFERENCE, "--fork-session",
-          "--resume", "/var/lib/projects/forked-from.jsonl"], True),
-        (["claude", "--resume", "other", "-p", f"see {REFERENCE}"], False),
-        (["claude", "-p", REFERENCE], False),
-        # `resume` is a SUBCOMMAND, never a flag whose next argument is a
-        # conversation. Treating it as one let an argument that merely reads
-        # `resume <id>` do the selecting.
-        (["claude", "-p", "resume", REFERENCE], False),
-        (["claude", "--resume", f"{REFERENCE}x"], False),
-        # A PROMPT is one argument. Flattened by `ps` it reads as a flag and a
-        # value; with real boundaries it can never select anything.
-        (["claude", "--resume", "other", "-p",
-          f"Explain how to resume {REFERENCE} safely"], False),
+        # What this package launches — and the shape found in the field on
+        # 2026-11-17, which is why exactness had to stay reachable.
+        (CLAUDE_LAUNCH, True),
+        # argv[0] by executable name: the record holds the command as configured,
+        # while the running process carries the path the exec resolved to.
+        ([f"/opt/claude-code/bin/{CLAUDE_LAUNCH[0]}", *CLAUDE_LAUNCH[1:]], True),
+        ([f"{CLAUDE_LAUNCH[0]}.cmd", *CLAUDE_LAUNCH[1:]], True),
+        ([f"/Applications/Claude/{CLAUDE_LAUNCH[0].upper()}", *CLAUDE_LAUNCH[1:]], True),
+        # ONE trailing positional is the launch prompt, which the record drops
+        # once the launch has delivered it — refusing it would make this path
+        # inert for every session started with `--prompt`.
+        ([*CLAUDE_LAUNCH, "pick up where we left off"], True),
+        # Beyond that one, agreement is the WHOLE argv and never a prefix of it.
+        # `claude` takes the LAST of a repeated option, so an appended
+        # `--resume other` moves the process to another conversation with every
+        # token of our launch still present and in order.
+        ([*CLAUDE_LAUNCH, "--resume", "other"], False),
+        ([*CLAUDE_LAUNCH, "a prompt", "and another"], False),
+        # A single trailing OPTION is not a prompt: a launch prompt can never
+        # start with `-` (`launch_prompt_problem` refuses one), so an option
+        # there is a token we did not launch — and keeping the allowance to
+        # prompts is what stops it becoming a general "one extra token" rule.
+        ([*CLAUDE_LAUNCH, "--debug"], False),
+        # These two are refused one rule earlier, by
+        # `OVERRIDING_SELECTION_OPTIONS`, whatever their position.
+        ([*CLAUDE_LAUNCH, "--fork-session"], False),
+        ([*CLAUDE_LAUNCH, "-c"], False),
+        # Short of the launch, and one token apart from it — a session renamed
+        # since its driver started. Refusing is the safe direction: the holder is
+        # left alone and the stalemate stays visible.
+        (CLAUDE_LAUNCH[:-1], False),
+        ([*CLAUDE_LAUNCH[:-1], "RENAMED"], False),
+        ([], False),
     ],
 )
-def test_the_reference_must_be_the_one_the_argv_actually_selects(argv, selected):
-    assert ConversationHolders.selects_exactly(argv, REFERENCE) is selected
+def test_only_the_argv_this_package_launched_selects_the_conversation(argv, selected):
+    assert ConversationHolders.selects_exactly(
+        argv, REFERENCE, launched_as=CLAUDE_LAUNCH
+    ) is selected
+
+
+@pytest.mark.parametrize(
+    "argv, launched_as",
+    [
+        # A BOOLEAN flag takes no value, so a parse that swallowed one read the
+        # PROMPT as the session. Shape could not rescue it either: a codex
+        # session id may be a NAME as readily as a UUID.
+        (["codex", "resume", "--no-daemon", OTHER, REFERENCE], CODEX_LAUNCH),
+        (["codex", "resume", "--no-daemon", "my-other-session", REFERENCE], CODEX_LAUNCH),
+        # `--last` picks the session ITSELF, leaving the positional a prompt.
+        (["codex", "resume", "--last", REFERENCE], CODEX_LAUNCH),
+        (["codex", "resume", "--last", "my-other-session", REFERENCE], CODEX_LAUNCH),
+        # `--continue` is BOOLEAN: it resumes the most recent conversation and
+        # the token after it is a prompt.
+        (["claude", "--continue", REFERENCE], CLAUDE_LAUNCH),
+        (["claude", "-c", REFERENCE], CLAUDE_LAUNCH),
+        # A FORK starts a NEW conversation from the one it resumes, so the
+        # resumed id is its SOURCE and the process does not hold it.
+        (["claude", "--resume", REFERENCE, "--fork-session"], CLAUDE_LAUNCH),
+        (["claude", "--fork-session", f"--resume={REFERENCE}"], CLAUDE_LAUNCH),
+        # A repeated selector: the CLI takes the LAST, so believing the FIRST
+        # match pointed this at a conversation the process had moved off.
+        (["claude", "--resume", REFERENCE, "--resume", "other"], CLAUDE_LAUNCH),
+        (["claude", "--resume", "other", "--resume", REFERENCE], CLAUDE_LAUNCH),
+        # An option a later release adds, whose arity nothing here can know —
+        # including a VARIADIC one such as `-i/--image <FILE>...`.
+        (["codex", "resume", "--flag-from-a-later-codex", REFERENCE], CODEX_LAUNCH),
+        (["codex", "resume", "-i", "a.png", REFERENCE], CODEX_LAUNCH),
+        # A mention is not a selection, however it is spelled.
+        (["claude", "--resume", "other", "-p", f"see {REFERENCE}"], CLAUDE_LAUNCH),
+        (["claude", "-p", REFERENCE], CLAUDE_LAUNCH),
+        (["claude", "-p", "resume", REFERENCE], CLAUDE_LAUNCH),
+        (["claude", "--resume", f"{REFERENCE}x"], CLAUDE_LAUNCH),
+    ],
+)
+def test_every_shape_that_once_authorized_a_signal_is_refused(argv, launched_as):
+    """The six P1s of review rounds 6-8, and the near misses around them.
+
+    Each was a different way to misread an argv, and each is refused here for one
+    reason instead of six delicate ones: it is not what this package launched. So
+    is the seventh shape nobody has thought of — which is the point of the
+    change, and also why this table alone proves nothing. The arm that
+    discriminates lives in
+    `test_only_the_argv_this_package_launched_selects_the_conversation`, and both
+    arms are mutation-checked.
+    """
+    assert not ConversationHolders.selects_exactly(
+        argv, REFERENCE, launched_as=launched_as
+    )
+
+
+def test_a_launch_that_names_no_conversation_proves_nothing_about_one():
+    """`agy -c` resumes by WORKSPACE: its argv names no conversation at all.
+
+    The record is what names the conversation now, so a launch carrying no
+    reference can never prove WHICH conversation a process holds — even when the
+    process is exactly the one we launched. The old answer reached the same
+    verdict by knowing that `-c` is boolean; this one needs no such knowledge.
+    """
+    launched_as = _generated_launch("antigravity")
+
+    assert REFERENCE not in launched_as, launched_as
+    assert not ConversationHolders.selects_exactly(
+        launched_as, REFERENCE, launched_as=launched_as
+    )
+
+
+def test_with_no_record_of_launching_it_nothing_is_stranded():
+    """No record, no proof — and the holder is left alone rather than signalled."""
+    rows = _rows()
+
+    assert _stranded(rows), "precondition: this holder IS released with the record"
+    assert _stranded(rows, launched_as=[]) == []
+    assert _stranded(rows, launched_as=_generated_launch("claude", reference=OTHER)) == []
+
+
+def test_the_launch_compared_against_is_the_launch_that_runs():
+    """One source for what we start and what we recognise.
+
+    The proof is identity with our own launch, so an expectation assembled
+    anywhere but the launcher would be a second guess about our own behaviour —
+    the exact mistake, one layer in, that this predicate was rewritten to remove.
+    """
+    record = {
+        "name": "SESSION",
+        "driver": {
+            "id": "codex",
+            "launch_argv": CODEX_LAUNCH,
+            "resume": {"strategy": "conversation_id", "reference": REFERENCE},
+        },
+    }
+
+    launched_as = Frame.agent_launch_argv(record)
+
+    assert launched_as == CODEX_LAUNCH, launched_as
+    assert shlex.join(launched_as) in Frame._agent_command(record)
+    assert ConversationHolders.selects_exactly(
+        launched_as, REFERENCE, launched_as=launched_as
+    )
+    assert not ConversationHolders.selects_exactly(
+        launched_as, "other-reference-id", launched_as=launched_as
+    )
+
+
+def test_a_launch_prompt_the_record_has_already_dropped_still_matches():
+    """The one place a running argv outlives what the record can render.
+
+    A launch prompt is passed as the driver's positional argument, and the record
+    drops it the moment that launch delivers it, so from then on the process
+    carries a token the record cannot reproduce. A stranded driver is weeks old
+    by definition, so refusing it would leave every `--prompt` session stuck.
+    """
+    record = {
+        "name": "SESSION",
+        "driver": {
+            "id": "codex",
+            "launch_argv": CODEX_LAUNCH,
+            "resume": {"strategy": "conversation_id", "reference": REFERENCE},
+        },
+        "launch_prompt": "pick up where we left off",
+    }
+
+    with_prompt = Frame.agent_launch_argv(record)
+    assert with_prompt == [*CODEX_LAUNCH, "pick up where we left off"], with_prompt
+
+    # ... and once the launch has delivered it and the record has dropped it, the
+    # process still running that argv is recognised all the same.
+    record.pop("launch_prompt")
+    launched_as = Frame.agent_launch_argv(record)
+    assert launched_as == CODEX_LAUNCH, launched_as
+    assert ConversationHolders.selects_exactly(
+        with_prompt, REFERENCE, launched_as=launched_as
+    )
 
 
 @pytestmark_tmux
@@ -701,16 +862,166 @@ def test_a_pane_already_running_a_driver_stops_the_walk(tmp_path, retired_server
 
 
 @pytestmark_tmux
-def test_the_real_argv_is_read_with_its_boundaries_intact(retired_server):
+def test_the_real_argv_is_read_with_its_boundaries_intact(tmp_path, retired_server):
     """`/proc` keeps arguments separate; `ps` flattens them into one line."""
     _socket, pid = retired_server
 
     argv = ConversationHolders.argv_of(pid)
 
     assert argv is not None, "the driver's argv could not be read"
-    assert argv[0].endswith("/claude"), argv
+    assert argv[:2] == [sys.executable, str(_fake_driver(tmp_path))], argv
     assert REFERENCE in argv, argv
-    assert ConversationHolders.selects_exactly(argv, REFERENCE)
+    assert ConversationHolders.selects_exactly(
+        argv, REFERENCE, launched_as=_fake_launch_argv(tmp_path)
+    )
+
+
+@pytest.mark.parametrize(
+    "resume_flags",
+    [
+        # A fork holds the conversation it CREATED, so the id in its argv is the
+        # source.
+        ["--fork-session", "--resume"],
+        # `--continue` and `--last` pick a conversation themselves, so the id is
+        # a PROMPT and the process is on something this argv does not name.
+        ["--continue"],
+        ["-c"],
+        ["--last"],
+    ],
+)
+def test_a_configured_launch_that_names_a_conversation_another_way_is_refused(resume_flags):
+    """Our record vouches for what we launched, not for how a CLI reads it.
+
+    `resume_argv` is configuration, so a declarative driver can be given any of
+    these with the `conversation_id` strategy — and the argv this package then
+    generates is an exact match for a process whose live conversation is NOT the
+    record's. Agreement with our own launch is normally the whole proof; here it
+    would authorize a signal against a conversation nobody asked to release
+    (cross-model review, 2026-11-18, rounds 9 and 10).
+    """
+    def launch_for(resume_argv):
+        registry = DriverRegistry()
+        registry.add_declarative("claude", {
+            "command": ["claude"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": resume_argv,
+        })
+        resolved = registry.get("claude").resolve(
+            name="SESSION", working_dir="/w", conversation_reference=REFERENCE
+        )
+        return [str(part) for part in resolved["launch_argv"]]
+
+    generated = launch_for(["claude", *resume_flags])
+    assert REFERENCE in generated, generated
+    assert not ConversationHolders.selects_exactly(
+        generated, REFERENCE, launched_as=generated
+    ), "our own launch vouched for a process on another conversation"
+
+    # Positive control: the same driver without those flags still releases, so
+    # this cannot be passing because the generated argv stopped matching at all.
+    plain = launch_for(["claude", "--resume"])
+    assert ConversationHolders.selects_exactly(plain, REFERENCE, launched_as=plain)
+
+
+@pytest.mark.parametrize(
+    "argv, selected",
+    [
+        # An npm install is a shebang script, so the kernel runs the INTERPRETER
+        # with the entrypoint as its first argument. `_is_driver` has always
+        # recognised this shape; judging argv[0] alone made the release path
+        # inert for every such install (cross-model review, 2026-11-18).
+        (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], True),
+        (["/usr/bin/node", "/opt/n/lib/node_modules/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], True),
+        # The entrypoint is required: `node <anything> --resume <id>` is not
+        # evidence that this is our driver.
+        (["node", "/tmp/something-else.js", *CLAUDE_LAUNCH[1:]], False),
+        # ... and it must be argv[1], the one place a shebang can put it.
+        # Accepting a marker anywhere let an unrelated program carry one in a
+        # later argument and have everything before it discarded, while node was
+        # really running the first script.
+        (["node", "/tmp/task.js", "--resume", OTHER,
+          "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], False),
+        (["node", *CLAUDE_LAUNCH[1:]], False),
+        # And past the entrypoint the arguments must still be ours, exactly.
+        (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          "--resume", REFERENCE, "--name", "OTHER"], False),
+        (["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:], "--fork-session"], False),
+        # An interpreter this package does not run drivers through.
+        (["ruby", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+          *CLAUDE_LAUNCH[1:]], False),
+    ],
+)
+def test_an_interpreter_installed_driver_is_the_same_program(argv, selected):
+    # The launch guard sees these as drivers, which is what makes the two paths
+    # disagreeing a defect rather than a difference of opinion.
+    if selected:
+        assert ConversationHolders._is_driver(" ".join(argv)), (
+            "precondition: the guard recognises this install shape"
+        )
+    assert ConversationHolders.selects_exactly(
+        argv, REFERENCE, launched_as=CLAUDE_LAUNCH
+    ) is selected
+
+
+def test_a_configured_resume_argv_is_not_a_launch_this_package_can_vouch_for(tmp_path):
+    """Our record proves what we LAUNCHED. It cannot prove how a CLI reads it.
+
+    `resume_argv` is configuration, and `["codex", "resume", OTHER]` generates
+    `codex resume OTHER --no-daemon <id>`, where OTHER is the session and the id
+    is merely its prompt. Nothing in that argv distinguishes it from a launch
+    that really does select the id — compared against the record it matches
+    perfectly — so no amount of comparing can save it, and three review rounds
+    produced three variations on it (a fork flag, an implicit selector, and this
+    positional). The kill path therefore vouches only for the launch THIS
+    PACKAGE defines (cross-model review, 2026-11-18, rounds 9-11).
+    """
+    repair, record = _repair_for(tmp_path)
+    assert repair._launch_this_package_defines(record, REFERENCE), (
+        "precondition: a bundled driver's own launch IS vouched for"
+    )
+
+    registry = DriverRegistry()
+    registry.add_declarative("codex", {
+        "command": ["codex"],
+        "resume_strategy": "conversation_id",
+        "resume_argv": ["codex", "resume", OTHER],
+    })
+    configured = registry.get("codex").resolve(
+        name="SESSION", working_dir="/w", conversation_reference=REFERENCE
+    )
+    argv = [str(part) for part in configured["launch_argv"]]
+    assert argv == ["codex", "resume", OTHER, "--no-daemon", REFERENCE], argv
+    # Compared with itself it matches, which is exactly why comparison is not
+    # enough on its own ...
+    assert ConversationHolders.selects_exactly(argv, REFERENCE, launched_as=argv)
+
+    # ... and the gate is what withholds it: this is not a launch we define.
+    record["driver"] = configured
+    assert repair._launch_this_package_defines(record, REFERENCE) == []
+
+
+def test_the_gate_vouches_for_every_bundled_driver_not_just_claude(tmp_path):
+    """The record's OWN driver decides what we would have launched.
+
+    A codex session's stranded holder is released on the same terms as a
+    claude one — the field case was a claude driver, which is exactly why this
+    needs its own assertion rather than a shared one.
+    """
+    repair, record = _repair_for(tmp_path)
+    record["driver"] = bundled_drivers()["codex"].resolve(
+        name=str(record.get("name") or ""),
+        working_dir=str(record.get("working_dir") or ""),
+        conversation_reference=REFERENCE,
+    )
+
+    launched_as = repair._launch_this_package_defines(record, REFERENCE)
+
+    assert launched_as, "a bundled codex launch was not vouched for"
+    assert "resume" in launched_as and REFERENCE in launched_as, launched_as
 
 
 def test_the_argv_this_package_actually_launches_codex_with_is_recognised():
@@ -722,17 +1033,13 @@ def test_the_argv_this_package_actually_launches_codex_with_is_recognised():
     argv here means a change to the driver breaks this test instead of silently
     disabling the repair (cross-model review, 2026-11-17).
     """
-    from hive_ide.drivers import bundled_drivers
-
-    codex = bundled_drivers().get("codex")
-    assert codex is not None, "the bundled codex driver is gone"
-    resolved = codex.resolve(
-        name="SESSION", working_dir="/w", conversation_reference=REFERENCE
-    )
-    argv = [str(part) for part in resolved["launch_argv"]]
+    argv = _generated_launch("codex")
 
     assert "resume" in argv, f"the codex launch no longer uses the subcommand: {argv}"
-    assert ConversationHolders.selects_exactly(argv, REFERENCE), (
+    assert REFERENCE in argv, f"the codex launch no longer names the conversation: {argv}"
+    assert ConversationHolders.selects_exactly(argv, REFERENCE, launched_as=argv), (
         f"the argv this package launches is not recognised as selecting: {argv}"
     )
-    assert not ConversationHolders.selects_exactly(argv, "other-reference-id")
+    assert not ConversationHolders.selects_exactly(
+        argv, "other-reference-id", launched_as=argv
+    )

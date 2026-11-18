@@ -14,7 +14,7 @@ from typing import Any
 from . import SCHEMA_VERSION
 from .agents import AgentResumeState
 from .conversation import ConversationGuard
-from .drivers import DriverRegistry
+from .drivers import DriverRegistry, bundled_drivers
 from .errors import HiveIdeError
 from .frame import Frame
 from .health import SessionHealth
@@ -968,13 +968,19 @@ class SessionRepair:
         repair rebuilt a frame whose agent could never start. Repairing harder
         does not help; the holder has to go.
 
-        Three gates, and the work happens only if ALL of them pass:
+        Four gates, and the work happens only if ALL of them pass:
 
         1. the live pane has NO driver of its own, so nothing here is replacing a
            working agent;
-        2. `ConversationHolders.stranded` proves the holder unreachable — another
+        2. this session's own record says we launched a driver on this
+           conversation, that launch is one this package itself defines, and the
+           holder's argv IS that launch — ownership comes from our own records
+           and our own driver definitions, never from reading a driver CLI's
+           flags (`_launch_this_package_defines`,
+           `ConversationHolders.selects_exactly`);
+        3. `ConversationHolders.stranded` proves the holder unreachable — another
            server, no client attached, a socket this package hands out;
-        3. the process is still the one that was chosen when the signal is sent.
+        4. the process is still the one that was chosen when the signal is sent.
 
         SIGTERM only, then confirm it exited. Everything stopped is named with
         its age, because a month-old agent disappearing silently is worse than
@@ -988,9 +994,11 @@ class SessionRepair:
         rows = ConversationHolders.snapshot()
         if not rows:
             return      # an unreadable process table proves nothing
+        launched_as = self._launch_this_package_defines(record, reference)
         pane_pid = self.frame.agent_pane_pid(record)
         stranded = ConversationHolders.stranded(
             reference,
+            launched_as=launched_as,
             live_socket=self.frame.socket,
             live_server_pid=self._live_server_pid(),
             has_clients=self._socket_has_clients,
@@ -1024,6 +1032,54 @@ class SessionRepair:
                 f"agent: stopped stranded driver — {where}{age}; "
                 "conversation released"
             )
+
+    def _launch_this_package_defines(
+        self, record: dict[str, Any], reference: str
+    ) -> list[str]:
+        """The launch argv for this record, as THIS PACKAGE's own driver defines it.
+
+        `refresh_driver` has just re-resolved the record's launch argv from the
+        active driver config, so it is a live rendering rather than a stale copy
+        — but config is exactly the problem. `resume_argv` is user-settable, and
+        three cross-model review rounds produced three configurations whose
+        generated argv matched a live process while the CLI was reading some
+        other token as the session: `--fork-session` (the id is the fork's
+        source), `--continue`/`--last` (the id is a prompt), and a resume_argv
+        carrying its own positional (`["codex", "resume", "OTHER"]` generates
+        `codex resume OTHER --no-daemon <id>`, where the id is again the prompt).
+
+        They are one hole, not three. Our record proves what we LAUNCHED; it can
+        never prove how a CLI reads it. The package can only vouch for the
+        command lines it defines itself — so that is what the kill path compares
+        against, with this record's own name, directory and conversation as the
+        inputs. A declarative driver that configures its own resume flags is not
+        a shape we can speak for: it gets no release, the stalemate stays
+        visible, and the documented script remains the way out.
+
+        argv[0] is deliberately left to the record, because replacing the
+        command with an absolute path or a wrapper IS supported, and
+        `selects_exactly` compares that token by executable name in any case.
+        Empty whenever the record and our own definition disagree, or the driver
+        is not one of ours at all.
+        """
+        recorded = self.frame.agent_launch_argv(record)
+        if not recorded:
+            return []
+        driver = record.get("driver") or {}
+        bundled = bundled_drivers().get(str(driver.get("id") or ""))
+        if bundled is None:
+            return []
+        resolved = bundled.resolve(
+            name=str(record.get("name") or ""),
+            working_dir=str(record.get("working_dir") or self.store.workspace_key),
+            conversation_reference=reference,
+        )
+        ours = [str(part) for part in resolved.get("launch_argv") or []]
+        # The same question, asked one level up, so there is one comparison in
+        # this package and not two: is what we recorded the launch we define?
+        if not ConversationHolders.selects_exactly(recorded, reference, launched_as=ours):
+            return []
+        return recorded
 
     def _pane_runs_a_driver(self, record: dict[str, Any]) -> bool:
         """Is the agent pane's own command a driver, with no shell in between?
