@@ -25,6 +25,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import sys
 import subprocess
 import tempfile
 import time
@@ -163,73 +164,91 @@ pytestmark_tmux = pytest.mark.skipif(
 )
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _fake_driver(tmp_path):
-    """An executable whose argv[0] really IS `claude`.
+    """A real long-running process whose argv is an npm claude install's.
 
-    A `#!/bin/sh` script will not do: the kernel runs it as `/bin/sh <path>`, so
-    argv[0] is the shell and `_is_driver` rightly refuses it — which is how this
-    fixture first failed. Copying a shell to the name `claude` gives a process
-    that looks to `ps` exactly as a real driver does.
+    The kill path vouches only for launches this package DEFINES, so the fixture
+    cannot configure a driver of its own — the record has to be the bundled
+    `claude`. That rules out a renamed copy of `sh`, which cannot be given
+    `--resume <id>` without dying on the unknown option.
+
+    An npm install is the way out, and it is a shape the package genuinely
+    supports: a shebang script, so the kernel starts the INTERPRETER with the
+    entrypoint as its first argument. `python3 …/claude-code/cli.js --resume
+    <id> --name <name>` is that shape exactly — the file is named as npm names
+    it and holds a sleeper, because what `ps` and the matcher read is the argv,
+    never the language inside.
     """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    driver = bin_dir / "claude"
-    if not driver.exists():
-        # Reused rather than recopied: the fixture's own process is running this
-        # file by the time the record asks for its launch argv, and a copy over a
-        # running executable fails with ETXTBSY.
-        shutil.copy("/bin/sh", driver)
-        driver.chmod(0o755)
-    return driver
-
-
-def _fake_loop_script(tmp_path):
-    """A script that keeps the fake driver alive, passed as a FILE not with `-c`.
-
-    `sh <script> <args...>` runs the script with those arguments, so the driver's
-    argv carries them exactly as a real driver's does — and without `-c`, which
-    this path now refuses outright because for a real driver it names a
-    conversation by itself.
-    """
-    script = tmp_path / "bin" / "loop.sh"
-    script.parent.mkdir(exist_ok=True)
-    if not script.exists():
-        script.write_text("while :; do sleep 0.2; done\n")
-        script.chmod(0o755)
-    return script
-
-
-def _fake_registry(tmp_path):
-    """A registry whose `claude` IS the fake driver, declared as config does it.
-
-    The release path proves ownership by identity with the argv THIS PACKAGE
-    launches, so the fixture cannot hand-write the process's command line: it has
-    to be a command line the package itself generates. Declaring the fake driver
-    makes the package the author of both, and `refresh_driver` re-resolves to the
-    same argv mid-repair instead of overwriting it with the bundled `claude`.
-    """
-    driver = _fake_driver(tmp_path)
-    registry = DriverRegistry()
-    registry.add_declarative(
-        "claude",
-        {
-            "command": [str(driver)],
-            "resume_strategy": "conversation_id",
-            "resume_argv": [
-                str(driver), str(_fake_loop_script(tmp_path)), "--resume"
-            ],
-            "capabilities": ("launch", "resume"),
-        },
-    )
-    return registry
+    entrypoint = tmp_path / "npm" / "claude-code" / "cli.js"
+    if not entrypoint.exists():
+        entrypoint.parent.mkdir(parents=True, exist_ok=True)
+        entrypoint.write_text("import time\ntime.sleep(600)\n")
+    return entrypoint
 
 
 def _fake_launch_argv(tmp_path, *, reference=REFERENCE):
-    """What the package generates for the fake driver — the fixture runs this."""
-    resolved = _fake_registry(tmp_path).get("claude").resolve(
-        name="SESSION", working_dir="/w", conversation_reference=reference
+    """The fake driver's argv — the bundled launch, run through an interpreter."""
+    return [
+        sys.executable, str(_fake_driver(tmp_path)),
+        "--resume", reference, "--name", "SESSION",
+    ]
+
+
+def _wait_for_driver(entrypoint, *, reference=REFERENCE):
+    """The pid of the fake driver, once the process table can actually see it.
+
+    `tmux new-session -d` returns when the SERVER is up, not when the pane's
+    command has been forked and exec'd, so a probe fired straight afterwards
+    misses the driver about half the time — measured, not guessed. A test that
+    probes without waiting therefore passes or fails on machine load rather than
+    on the behaviour it names.
+    """
+    deadline = time.monotonic() + tmux_wait_budget(5.0)
+    while time.monotonic() < deadline:
+        for candidate, _ppid, command in ConversationHolders.snapshot():
+            # argv[0] must be the INTERPRETER and argv[1] the entrypoint. The
+            # tmux server's own argv carries the whole pane command — entrypoint
+            # and reference included — so a substring match picks up the server
+            # instead, which this helper did until the kill it asserted turned
+            # out to be the server exiting as its last pane went away.
+            tokens = command.split()
+            if tokens[:2] == [sys.executable, str(entrypoint)] and reference in command:
+                return candidate
+        time.sleep(0.05)
+    raise AssertionError("the fake driver never appeared in the process table")
+
+
+@pytest.fixture
+def retired_server(tmp_path):
+    """A real second tmux server, clientless, running a real fake driver."""
+    socket = f"hive-ide-retired-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    entrypoint = _fake_driver(tmp_path)
+    # The pane runs the argv the PACKAGE generates for the bundled driver,
+    # because that identity is what authorizes the release.
+    subprocess.run(
+        ["tmux", "-L", socket, "new-session", "-d", "-s", "stale",
+         shlex.join(_fake_launch_argv(tmp_path))],
+        check=True, capture_output=True, text=True,
     )
-    return [str(part) for part in resolved["launch_argv"]]
+    pid = _wait_for_driver(entrypoint)
+    try:
+        yield socket, pid
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+        for _ in range(40):
+            if not _alive(pid):
+                break
+            time.sleep(0.05)
 
 
 def _repair_for(tmp_path, *, reference=REFERENCE):
@@ -246,71 +265,16 @@ def _repair_for(tmp_path, *, reference=REFERENCE):
         name="SESSION",
         working_dir=workspace,
         source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
-        # Resolved through the registry, as `create` and `refresh_driver` both
-        # do: the record has to carry the launch argv, because that is what the
-        # release path now compares a live process against.
-        driver=_fake_registry(tmp_path).get("claude").resolve(
+        # Resolved through the BUNDLED driver, as `create` and `refresh_driver`
+        # both do: the record has to carry the launch argv, because that is what
+        # the release path compares a live process against — and it has to be a
+        # launch this package defines, or the release declines it.
+        driver=bundled_drivers()["claude"].resolve(
             name="SESSION", working_dir=str(workspace), conversation_reference=reference
         ),
     )
     frame = Frame(store, socket=f"hive-ide-live-{os.getpid()}-{uuid.uuid4().hex[:8]}")
-    return SessionRepair(store, frame, registry=_fake_registry(tmp_path)), record
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
-
-
-def _wait_for_driver(driver, *, reference=REFERENCE):
-    """The pid of the fake driver, once the process table can actually see it.
-
-    `tmux new-session -d` returns when the SERVER is up, not when the pane's
-    command has been forked and exec'd, so a probe fired straight afterwards
-    misses the driver about half the time — measured, not guessed. A test that
-    probes without waiting therefore passes or fails on machine load rather than
-    on the behaviour it names.
-    """
-    deadline = time.monotonic() + tmux_wait_budget(5.0)
-    while time.monotonic() < deadline:
-        for candidate, _ppid, command in ConversationHolders.snapshot():
-            # argv[0] must BE the driver. The tmux server's own argv carries the
-            # whole pane command — driver path and reference included — so a
-            # substring match picks up the server instead, which this helper did
-            # until the kill it asserted turned out to be the server exiting as
-            # its last pane went away.
-            if command.split()[:1] == [str(driver)] and reference in command:
-                return candidate
-        time.sleep(0.05)
-    raise AssertionError("the fake driver never appeared in the process table")
-
-
-@pytest.fixture
-def retired_server(tmp_path):
-    """A real second tmux server, clientless, running a real fake driver."""
-    socket = f"hive-ide-retired-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    driver = _fake_driver(tmp_path)
-    # The pane runs the argv the PACKAGE generates for this driver, because that
-    # identity is now what authorizes the release.
-    subprocess.run(
-        ["tmux", "-L", socket, "new-session", "-d", "-s", "stale",
-         shlex.join(_fake_launch_argv(tmp_path))],
-        check=True, capture_output=True, text=True,
-    )
-    pid = _wait_for_driver(driver)
-    try:
-        yield socket, pid
-    finally:
-        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
-        for _ in range(40):
-            if not _alive(pid):
-                break
-            time.sleep(0.05)
+    return SessionRepair(store, frame), record
 
 
 @pytestmark_tmux
@@ -505,7 +469,7 @@ def test_a_server_in_another_socket_directory_is_still_reached(tmp_path, monkeyp
     # A unix socket path is capped near 108 bytes, so this root and this name
     # both stay short — a pytest tmp_path plus a descriptive name overruns it.
     elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="hv"))
-    driver = _fake_driver(tmp_path)
+    entrypoint = _fake_driver(tmp_path)
     socket = f"hive-ide-e{uuid.uuid4().hex[:6]}"
     env = {**os.environ, "TMUX_TMPDIR": str(elsewhere)}
     started = subprocess.run(
@@ -514,7 +478,7 @@ def test_a_server_in_another_socket_directory_is_still_reached(tmp_path, monkeyp
         capture_output=True, text=True, env=env,
     )
     assert started.returncode == 0, f"tmux refused: {started.stderr!r}"
-    _wait_for_driver(driver)
+    _wait_for_driver(entrypoint)
     repair, record = _repair_for(tmp_path)
     assert repair.frame.socket_tmpdir != str(elsewhere)
     actions: list[str] = []
@@ -905,7 +869,7 @@ def test_the_real_argv_is_read_with_its_boundaries_intact(tmp_path, retired_serv
     argv = ConversationHolders.argv_of(pid)
 
     assert argv is not None, "the driver's argv could not be read"
-    assert argv[0].endswith("/claude"), argv
+    assert argv[:2] == [sys.executable, str(_fake_driver(tmp_path))], argv
     assert REFERENCE in argv, argv
     assert ConversationHolders.selects_exactly(
         argv, REFERENCE, launched_as=_fake_launch_argv(tmp_path)
@@ -1001,6 +965,63 @@ def test_an_interpreter_installed_driver_is_the_same_program(argv, selected):
     assert ConversationHolders.selects_exactly(
         argv, REFERENCE, launched_as=CLAUDE_LAUNCH
     ) is selected
+
+
+def test_a_configured_resume_argv_is_not_a_launch_this_package_can_vouch_for(tmp_path):
+    """Our record proves what we LAUNCHED. It cannot prove how a CLI reads it.
+
+    `resume_argv` is configuration, and `["codex", "resume", OTHER]` generates
+    `codex resume OTHER --no-daemon <id>`, where OTHER is the session and the id
+    is merely its prompt. Nothing in that argv distinguishes it from a launch
+    that really does select the id — compared against the record it matches
+    perfectly — so no amount of comparing can save it, and three review rounds
+    produced three variations on it (a fork flag, an implicit selector, and this
+    positional). The kill path therefore vouches only for the launch THIS
+    PACKAGE defines (cross-model review, 2026-11-18, rounds 9-11).
+    """
+    repair, record = _repair_for(tmp_path)
+    assert repair._launch_this_package_defines(record, REFERENCE), (
+        "precondition: a bundled driver's own launch IS vouched for"
+    )
+
+    registry = DriverRegistry()
+    registry.add_declarative("codex", {
+        "command": ["codex"],
+        "resume_strategy": "conversation_id",
+        "resume_argv": ["codex", "resume", OTHER],
+    })
+    configured = registry.get("codex").resolve(
+        name="SESSION", working_dir="/w", conversation_reference=REFERENCE
+    )
+    argv = [str(part) for part in configured["launch_argv"]]
+    assert argv == ["codex", "resume", OTHER, "--no-daemon", REFERENCE], argv
+    # Compared with itself it matches, which is exactly why comparison is not
+    # enough on its own ...
+    assert ConversationHolders.selects_exactly(argv, REFERENCE, launched_as=argv)
+
+    # ... and the gate is what withholds it: this is not a launch we define.
+    record["driver"] = configured
+    assert repair._launch_this_package_defines(record, REFERENCE) == []
+
+
+def test_the_gate_vouches_for_every_bundled_driver_not_just_claude(tmp_path):
+    """The record's OWN driver decides what we would have launched.
+
+    A codex session's stranded holder is released on the same terms as a
+    claude one — the field case was a claude driver, which is exactly why this
+    needs its own assertion rather than a shared one.
+    """
+    repair, record = _repair_for(tmp_path)
+    record["driver"] = bundled_drivers()["codex"].resolve(
+        name=str(record.get("name") or ""),
+        working_dir=str(record.get("working_dir") or ""),
+        conversation_reference=REFERENCE,
+    )
+
+    launched_as = repair._launch_this_package_defines(record, REFERENCE)
+
+    assert launched_as, "a bundled codex launch was not vouched for"
+    assert "resume" in launched_as and REFERENCE in launched_as, launched_as
 
 
 def test_the_argv_this_package_actually_launches_codex_with_is_recognised():
