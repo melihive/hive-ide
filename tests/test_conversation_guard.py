@@ -986,3 +986,156 @@ def test_the_hook_receiver_applies_the_same_launch_rule_as_its_cli_twin(
     held = store.find_session(record["id"])
     assert held["driver"]["resume"]["reference"] == REF
     assert REF in held["driver"]["launch_argv"]
+
+
+# -- cross-model review of Phase 84 (round 5): one rule, three faces ---------------
+#
+# Rounds 1-4 patched the launch re-render case by case and rounds 4 and 5 kept
+# finding another face of it. They are all one mistake: `resolve()` is the only
+# renderer, so re-rendering a launch this package did not produce replaces it
+# with the shape this package knows. Phase 83 settled the same question for the
+# kill path — only the launch this package DEFINES may authorize acting on it.
+
+
+def _wrapper_registry() -> DriverRegistry:
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+            "conversation_probe": "claude",
+        },
+    )
+    return registry
+
+
+def test_an_event_without_the_sessions_config_leaves_its_launch_alone(
+    tmp_path, stores, capsys
+):
+    """Face one: a session opened with `--config`, an event arriving without it.
+
+    The reference still moves — the next launch this package renders will pick
+    it up — but the wrapper's own command is not rebuilt into the bundled one.
+    """
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    _transcript(stores["claude"], OTHER)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]
+
+
+def test_a_launch_that_resumes_by_name_survives_a_dead_reference_beside_it(
+    tmp_path, stores
+):
+    """Face two: a `codex` session launched by NAME, with a stale dead UUID in
+    `resume_ids`. Codex resumes by name perfectly well, so the dead UUID
+    establishes nothing about the launch the user is actually using — and
+    resetting it to a bare `codex` discards a working session."""
+    store, record, workspace = _session(tmp_path, driver_id="codex", reference=None)
+    named = dict(record["driver"])
+    named["launch_argv"] = ["codex", "resume", "--name", "ALPHA"]
+    named["resume"] = {"reference": None, "strategy": "name"}
+    record["driver"] = named
+    record["agents"]["resume_ids"]["codex"] = REF  # a UUID with no rollout: gone
+    store.write("sessions", record["id"], record)
+
+    reloaded = store.find_session(record["id"])
+    guard = ConversationGuard(store)
+    assert guard.launch_is_ours(reloaded, "codex") is False
+    guard.check(reloaded, working_dir=str(workspace), apply=True)
+
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"] == ["codex", "resume", "--name", "ALPHA"]
+
+
+def test_a_driver_that_cannot_resume_is_not_a_fallback(tmp_path, stores):
+    """Face three: `conversation_probe` is independent of `resume_strategy`, so a
+    wrapper can prove a conversation EXISTS and still have no way to resume it.
+    Adopting one would be a fresh chat wearing a resumed conversation's name."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude"],
+            "conversation_probe": "claude",
+        },  # no resume_strategy: cannot resume anything
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # REF exists, OTHER does not
+
+    guard = ConversationGuard(store, registry=registry)
+    assert guard.launch_would_resume(record, "claude", REF) is False
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert not any("fell back to" in action for action in result["actions"])
+    assert REF in agents.history_for("claude")
+
+
+def test_the_hook_receiver_also_refuses_to_rebuild_a_launch_it_cannot_vouch_for(
+    tmp_path, stores, monkeypatch
+):
+    """The hook and `status-event` are two doors to one rule, and mutation has
+    now twice found a rule tested on only one of them."""
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    _transcript(stores["claude"], OTHER)
+    # The hook process resolves a config that knows nothing of the wrapper.
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="working", payload={"session_id": OTHER, "hook_event_name": "UserPromptSubmit"})
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"

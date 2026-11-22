@@ -304,6 +304,12 @@ class IdeHook:
                     and current_driver_matches
                     and reference != launched
                     and (proven or not launched)
+                    and (
+                        not launched
+                        or ConversationGuard(store, registry=registry).launch_is_ours(
+                            record, parsed.driver
+                        )
+                    )
                 ):
                     agents.mark_active(parsed.driver)
                     record["driver"] = driver.resolve(

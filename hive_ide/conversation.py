@@ -37,18 +37,17 @@ class ConversationGuard:
             status = self.status(driver_id, reference, working_dir)
             short = reference[:8]
             if status.state == ConversationState.GONE:
-                # Whether the LAUNCH has to be re-rendered is a question about
-                # the driver, not about this one reference. An older record can
-                # launch A while `resume_ids` says B, and when B is what we are
-                # dropping, matching on the reference left the launch resuming a
-                # dead A and reported a successful fallback anyway (review round
-                # 4). A's own reference is in history by then, so it is a
-                # candidate like any other.
-                was_active = (record.get("driver") or {}).get("id") == driver_id
+                # Whether the LAUNCH may be re-rendered is a question about the
+                # driver and about whether we can reproduce what it is running —
+                # never about which reference happened to match. An older record
+                # can launch A while `resume_ids` says B, and when B is what we
+                # are dropping, matching on the reference left the launch
+                # resuming a dead A while reporting a successful fallback.
+                was_active = self.launch_is_ours(record, driver_id)
                 agents.forget(driver_id)
                 changed = True
                 replacement = self._previous_that_survives(
-                    agents, driver_id, working_dir, record_id=str(record.get("id") or "")
+                    agents, driver_id, working_dir, record=record
                 )
                 if replacement:
                     if was_active:
@@ -76,6 +75,59 @@ class ConversationGuard:
     #: closes one; `SessionStart` and `Notification` say nothing about whether a
     #: word was ever exchanged, and a launch nobody types into sends only those.
     TURN_PROVING_EVENTS = frozenset({TurnSequence.PROMPT, TurnSequence.STOP})
+
+    def launch_is_ours(self, record: dict[str, Any], driver_id: str) -> bool:
+        """Is the record's CURRENT launch one this registry would generate?
+
+        Only then may it be re-rendered with a different conversation, because
+        `resolve()` is the only renderer there is: re-rendering a launch this
+        package did not produce replaces it with the shape this package knows.
+        Three reviews found three faces of that one mistake — a declarative
+        wrapper's executable and flags replaced by the bundled driver, a `codex`
+        launch that resumes by session NAME reset to a bare `codex` because a
+        stale UUID beside it was gone, and an event arriving without the
+        `--config` the session was opened with rebuilding the command from a
+        different configuration.
+
+        So the kill path's rule from Phase 83 applies here too: only the launch
+        this package DEFINES can authorize acting on it. Everything else keeps
+        the launch it has, and the reference still moves in `resume_ids` — the
+        next launch this package renders will pick it up.
+        """
+        driver = record.get("driver") or {}
+        if driver.get("id") != driver_id:
+            return False
+        try:
+            definition = self.registry.get(driver_id)
+        except HiveIdeError:
+            return False
+        ours = definition.resolve(
+            name=str(record.get("name") or ""),
+            working_dir=str(record.get("working_dir") or self.store.workspace_key),
+            conversation_reference=AgentResumeState.reference_from_driver(driver),
+        )
+        return list(ours.get("launch_argv") or []) == list(driver.get("launch_argv") or [])
+
+    def launch_would_resume(
+        self, record: dict[str, Any], driver_id: str, reference: str
+    ) -> bool:
+        """Would this driver's generated launch actually resume `reference`?
+
+        A declarative driver can declare a conversation probe and still have no
+        way to resume (`resume_strategy` defaults to `none`), so the guard could
+        adopt a surviving conversation whose launch was just the executable and
+        the prompt — a fresh chat wearing a resumed conversation's name.
+        """
+        try:
+            definition = self.registry.get(driver_id)
+        except HiveIdeError:
+            return False
+        ours = definition.resolve(
+            name=str(record.get("name") or ""),
+            working_dir=str(record.get("working_dir") or self.store.workspace_key),
+            conversation_reference=reference,
+        )
+        return reference in [str(part) for part in ours.get("launch_argv") or []]
 
     def had_a_turn(
         self,
@@ -140,7 +192,7 @@ class ConversationGuard:
         driver_id: str,
         working_dir: str,
         *,
-        record_id: str,
+        record: dict[str, Any],
     ) -> str | None:
         """The newest displaced reference the driver can still prove exists.
 
@@ -162,10 +214,12 @@ class ConversationGuard:
                 continue
             if state != ConversationState.EXISTS:
                 continue
+            if not self.launch_would_resume(record, driver_id, candidate):
+                continue
             if self.store.find_conversation_owner(
                 driver_id=driver_id,
                 reference=candidate,
-                exclude_session_id=str(record_id),
+                exclude_session_id=str(record.get("id") or ""),
             ) is not None:
                 # Another session took it while we were not using it. Two
                 # drivers on one conversation leave a pane permanently blank,

@@ -953,12 +953,15 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
             proven = False
             taken = False
         launched = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        registry = configured_registry(config)
+        guard = ConversationGuard(store, registry=registry)
         if (record.get("driver") or {}).get("id") == args.driver:
             agents.mark_active(args.driver)
             if (
                 taken
                 and args.conversation_reference != launched
                 and (proven or not launched)
+                and (not launched or guard.launch_is_ours(record, args.driver))
             ):
                 # The in-process receiver re-renders the launch when it accepts
                 # a reference, or `resume_ids` moves while `launch_argv` still
@@ -973,7 +976,7 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
                 # that already names this conversation only re-derives it from
                 # THIS command's config, which replaced a wrapper selected with
                 # `--config` on an event that changed nothing (review round 4).
-                record["driver"] = configured_registry(config).get(args.driver).resolve(
+                record["driver"] = registry.get(args.driver).resolve(
                     name=record["name"],
                     working_dir=record["working_dir"],
                     conversation_reference=args.conversation_reference,
