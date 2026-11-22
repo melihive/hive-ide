@@ -13,7 +13,12 @@ from hive_ide.agents import AgentResumeState
 from hive_ide.cli import main
 from hive_ide.config import configured_registry, load_config
 from hive_ide.conversation import ConversationGuard
-from hive_ide.drivers import ConversationState, DriverRegistry, bundled_drivers
+from hive_ide.drivers import (
+    ConversationProbe,
+    ConversationState,
+    DriverRegistry,
+    bundled_drivers,
+)
 from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
 from hive_ide.repair import SessionRepair
@@ -388,11 +393,12 @@ def test_a_conversation_with_no_transcript_cannot_displace_one_that_has_it(
 
 
 def test_the_same_id_is_taken_once_it_has_a_transcript(tmp_path, stores, monkeypatch):
-    """The other half of the rule: proof is all that was being asked for.
+    """The other half of the proof rule: proof is all that was being asked for.
 
     Nothing about the id changes here — only that the conversation now exists on
     disk. A gate that refused this too would stop the record ever following a
-    `/clear`.
+    `/clear`. The launch is left to launch time (see the test above); what an
+    event owns is `resume_ids` and the displaced reference behind it.
     """
     store, record, _ = _session(tmp_path)
     _transcript(stores["claude"], REF)
@@ -403,8 +409,7 @@ def test_the_same_id_is_taken_once_it_has_a_transcript(tmp_path, stores, monkeyp
 
     updated = store.find_session(record["id"])
     assert updated["agents"]["resume_ids"]["claude"] == OTHER
-    assert updated["driver"]["resume"]["reference"] == OTHER
-    # The displaced reference is kept, which is what the fallback below needs.
+    # The displaced reference is kept, which is what the fallback needs.
     assert updated["agents"]["resume_history"]["claude"] == [REF]
 
 
@@ -461,7 +466,7 @@ def test_the_guard_falls_back_to_the_newest_reference_that_still_exists(
     )
 
     assert result["changed"] is True
-    assert any("fell back to" in action for action in result["actions"])
+    assert any("now resumes" in action for action in result["actions"])
     updated = store.find_session(record["id"])
     assert updated["agents"]["resume_ids"]["claude"] == REF
     assert updated["driver"]["resume"]["reference"] == REF
@@ -487,7 +492,7 @@ def test_the_guard_starts_fresh_only_when_no_remembered_reference_survives(
     )
 
     assert result["changed"] is True
-    assert any("starts a fresh conversation" in action for action in result["actions"])
+    assert any("starts fresh" in action for action in result["actions"])
     updated = store.find_session(record["id"])
     assert "claude" not in updated["agents"]["resume_ids"]
     assert updated["driver"]["resume"]["reference"] is None
@@ -544,7 +549,7 @@ def test_the_fallback_refuses_a_remembered_reference_it_cannot_prove(tmp_path, s
     )
     result = guard.check(record, working_dir=str(workspace), apply=True)
 
-    assert any("starts a fresh conversation" in action for action in result["actions"])
+    assert any("starts fresh" in action for action in result["actions"])
     updated = store.find_session(record["id"])
     assert "claude" not in updated["agents"]["resume_ids"]
     assert updated["driver"]["resume"]["reference"] is None
@@ -586,7 +591,7 @@ def test_the_fallback_never_reclaims_a_conversation_another_session_took(
         record, working_dir=str(workspace), apply=True
     )
 
-    assert any("starts a fresh conversation" in action for action in result["actions"])
+    assert any("starts fresh" in action for action in result["actions"])
     updated = store.find_session(record["id"])
     assert "claude" not in updated["agents"]["resume_ids"]
     assert updated["driver"]["resume"]["reference"] is None
@@ -761,10 +766,21 @@ def test_a_frame_reconciles_with_the_configured_drivers_not_the_bundled_ones(
     ).driver_registry().get("claude").command == ["claude"]
 
 
-def test_an_accepted_status_event_moves_the_launch_too(tmp_path, stores, capsys):
-    """Found in review: `resume_ids` followed the new conversation while
-    `launch_argv` still resumed the old one, so the next wake would deliver its
-    prompt to the conversation the record had just left."""
+def test_an_event_records_the_conversation_and_the_launch_follows_at_launch_time(
+    tmp_path, stores, capsys
+):
+    """The contract after six review rounds: an event records, a launch renders.
+
+    An event observes which conversation a session is on, and `resume_ids` is
+    where an observation belongs. It no longer rewrites the command, because
+    rendering from an event rebuilds it out of whatever config THAT process
+    resolved — which cost a `--config`-selected wrapper, a name-based `codex`
+    launch and, through `wake`, a prompt delivered to the previous conversation.
+
+    The launch catches up at launch time, where the session's own drivers are
+    known. That is what makes the split safe rather than merely safer, so both
+    halves are asserted here together.
+    """
     store, record, workspace = _session(tmp_path)
     _transcript(stores["claude"], REF)
     _transcript(stores["claude"], OTHER)
@@ -780,44 +796,47 @@ def test_an_accepted_status_event_moves_the_launch_too(tmp_path, stores, capsys)
     ]) == 0
     capsys.readouterr()
 
-    updated = store.find_session(record["id"])
-    assert updated["agents"]["resume_ids"]["claude"] == OTHER
-    assert updated["driver"]["resume"]["reference"] == OTHER
-    assert OTHER in updated["driver"]["launch_argv"]
-    assert REF not in updated["driver"]["launch_argv"]
+    recorded = store.find_session(record["id"])
+    assert recorded["agents"]["resume_ids"]["claude"] == OTHER
+    assert recorded["driver"]["resume"]["reference"] == REF  # untouched by the event
+
+    result = ConversationGuard(store).check(
+        recorded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("now resumes" in action for action in result["actions"])
+    launched = store.find_session(record["id"])["driver"]
+    assert launched["resume"]["reference"] == OTHER
+    assert OTHER in launched["launch_argv"] and REF not in launched["launch_argv"]
 
 
-# -- cross-model review of Phase 84 (round 3) ---------------------------------------
-
-
-def test_a_record_whose_launch_disagrees_keeps_both_conversations(tmp_path, stores):
+def test_a_record_whose_launch_disagrees_keeps_the_live_conversation(
+    tmp_path, stores
+):
     """An upgrade case: `resume_ids` says B, the launch still resumes A.
 
-    Older versions of this package could write exactly that — they moved
-    `resume_ids` without re-rendering the launch. An event confirming B then
-    walked straight through the equality check, the launch was re-rendered to B,
-    and A was gone from the record entirely: the next repair found B dead and
-    started fresh, with nothing to fall back to. Found in review.
+    Older versions of this package could write exactly that. B is gone and A is
+    alive, so the only correct outcome is the one the launch already has: B is
+    forgotten, A keeps running, and nothing is reset to a fresh conversation.
     """
     store, record, workspace = _session(tmp_path, reference=REF)
     record["agents"]["resume_ids"]["claude"] = OTHER  # the inconsistent state
     store.write("sessions", record["id"], record)
-    _transcript(stores["claude"], REF)
+    _transcript(stores["claude"], REF)  # A is alive; B was never written
 
     reloaded = store.find_session(record["id"])
     agents = AgentResumeState(reloaded)
     assert agents.reference_for("claude") == OTHER
     assert agents.history_for("claude") == [REF]
 
-    # B is confirmed, and A is still the fallback rather than a casualty.
-    assert agents.remember("claude", OTHER) is True
-    store.write("sessions", reloaded["id"], reloaded)
     result = ConversationGuard(store).check(
         reloaded, working_dir=str(workspace), apply=True
     )
 
-    assert any("fell back to" in action for action in result["actions"])
-    assert store.find_session(record["id"])["agents"]["resume_ids"]["claude"] == REF
+    assert any("forgot" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["resume"]["reference"] == REF
+    assert REF in updated["driver"]["launch_argv"]
 
 
 def test_a_configured_wrapper_does_not_inherit_a_conversation_probe(tmp_path):
@@ -885,7 +904,7 @@ def test_the_fallback_re_renders_the_launch_of_a_record_that_disagreed(
         reloaded, working_dir=str(workspace), apply=True
     )
 
-    assert any("fell back to" in action for action in result["actions"])
+    assert any("now resumes" in action for action in result["actions"])
     updated = store.find_session(record["id"])
     assert updated["agents"]["resume_ids"]["claude"] == REF
     assert updated["driver"]["resume"]["reference"] == REF
@@ -1109,7 +1128,7 @@ def test_a_driver_that_cannot_resume_is_not_a_fallback(tmp_path, stores):
     assert guard.launch_would_resume(record, "claude", REF) is False
     result = guard.check(record, working_dir=str(workspace), apply=True)
 
-    assert not any("fell back to" in action for action in result["actions"])
+    assert not any("now resumes" in action for action in result["actions"])
     assert REF in agents.history_for("claude")
 
 
@@ -1139,3 +1158,210 @@ def test_the_hook_receiver_also_refuses_to_rebuild_a_launch_it_cannot_vouch_for(
     updated = store.find_session(record["id"])
     assert updated["agents"]["resume_ids"]["claude"] == OTHER
     assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+
+
+# -- cross-model review of Phase 84 (round 6): what the split closes --------------
+
+
+def test_a_first_event_on_a_configured_session_leaves_its_wrapper_alone(
+    tmp_path, stores, capsys
+):
+    """Round 6: `not launched` bypassed every vouch check, so the FIRST event on
+    a freshly created configured session rewrote its wrapper into the bundled
+    driver. With events out of the rendering business there is no bypass left to
+    find — the command is rendered once, at launch, from the session's own
+    drivers."""
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    assert record["driver"]["launch_argv"][0] == "/custom/claude"
+    _transcript(stores["claude"], OTHER)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]
+
+
+def test_a_bundled_codex_launch_by_name_survives_a_stale_dead_uuid(tmp_path, stores):
+    """Round 6: the name-based `codex` case was NOT fixed, and the test that
+    claimed it was hand-built its argv and took a different branch.
+
+    This one renders the launch with the BUNDLED driver, exactly as `create`
+    does, and puts a gone UUID beside it in `resume_ids`. Codex resumes by name
+    perfectly well, so the dead UUID says nothing about this launch.
+    """
+    # A name-based launch: codex takes the session NAME in the same slot a
+    # rollout id would go, and `ALPHA` probes UNKNOWN rather than GONE.
+    store, record, workspace = _session(tmp_path, driver_id="codex", reference="ALPHA")
+    assert "ALPHA" in record["driver"]["launch_argv"]
+    before = list(record["driver"]["launch_argv"])
+    record["agents"]["resume_ids"]["codex"] = REF  # a UUID with no rollout: gone
+    store.write("sessions", record["id"], record)
+
+    reloaded = store.find_session(record["id"])
+    result = ConversationGuard(store).check(
+        reloaded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("forgot" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"] == before
+    assert "ALPHA" in updated["driver"]["launch_argv"]
+    # The name is seeded back as the driver's own reference; the dead UUID is
+    # gone for good.
+    assert updated["agents"]["resume_ids"].get("codex") in (None, "ALPHA")
+
+
+def test_a_reference_inside_an_argv_element_counts_as_resumable(tmp_path, stores):
+    """Round 6: `launch_would_resume` demanded a whole argv element, so a plugin
+    rendering `--resume=<id>` had every fallback rejected."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/p"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/p", "--resume="],
+            "conversation_probe": "claude",
+        },
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S", working_dir=workspace, source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    guard = ConversationGuard(store, registry=registry)
+    rendered = registry.get("claude").resolve(
+        name="S", working_dir=str(workspace), conversation_reference=REF
+    )
+
+    assert any(REF in part for part in rendered["launch_argv"])
+    assert guard.launch_would_resume(record, "claude", REF) is True
+
+
+class _FusedDriver:
+    """A plugin-shaped driver that fuses the reference into one argv element.
+
+    `add_declarative` always appends the reference as its own element, so a
+    `--resume=<id>` renderer can only come from a plugin. This stands in for
+    one — the registry below is what `load_entry_points` would have produced.
+    """
+
+    id = "claude"
+    label = "Fused"
+    launch_flags: list[str] = []
+
+    def resolve(self, *, name, working_dir, conversation_reference):
+        argv = ["/p"]
+        if conversation_reference:
+            argv.append(f"--resume={conversation_reference}")
+        return {
+            "id": self.id,
+            "label": self.label,
+            "launch_argv": argv,
+            "resume": {
+                "reference": conversation_reference,
+                "strategy": "conversation_id",
+            },
+            "capabilities": ["launch", "resume", "conversation_check"],
+        }
+
+    def conversation_status(self, reference, working_dir):
+        return ConversationProbe.claude(reference)
+
+
+class _FusedRegistry(DriverRegistry):
+    def __init__(self):
+        super().__init__()
+        self._drivers["claude"] = _FusedDriver()
+
+
+def test_a_reference_fused_into_an_argv_element_counts_as_resumable(tmp_path, stores):
+    """Round 6: `launch_would_resume` demanded a whole argv element, so a plugin
+    rendering `--resume=<id>` had every surviving fallback rejected and started
+    fresh instead."""
+    registry = _FusedRegistry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S", working_dir=workspace, source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # REF survives, OTHER does not
+
+    guard = ConversationGuard(store, registry=registry)
+    assert guard.launch_would_resume(record, "claude", REF) is True
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert any("now resumes" in action for action in result["actions"])
+    assert f"--resume={REF}" in store.find_session(record["id"])["driver"]["launch_argv"]
+
+
+def test_a_launch_this_installation_cannot_render_is_left_alone_with_a_warning(
+    tmp_path, stores
+):
+    """The vouch gate, asserted where it now lives: at launch time.
+
+    A wrapper's session whose conversation is gone, reconciled by a process that
+    knows nothing of the wrapper. Rewriting the command would replace
+    `/custom/claude --house-flag` with the bundled `claude`; saying so instead
+    leaves a visible stalemate, which beats a silent substitution.
+    """
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S", working_dir=workspace, source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # a survivor is available...
+
+    # ...but this guard has the BUNDLED drivers, so it cannot render /custom/claude.
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert any("not a command this installation" in w for w in result["warnings"])
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]

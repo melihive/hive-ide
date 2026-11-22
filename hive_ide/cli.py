@@ -952,35 +952,15 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
         else:
             proven = False
             taken = False
-        launched = AgentResumeState.reference_from_driver(record.get("driver") or {})
-        registry = configured_registry(config)
-        guard = ConversationGuard(store, registry=registry)
         if (record.get("driver") or {}).get("id") == args.driver:
             agents.mark_active(args.driver)
-            if (
-                taken
-                and args.conversation_reference != launched
-                and (proven or not launched)
-                and (not launched or guard.launch_is_ours(record, args.driver))
-            ):
-                # The in-process receiver re-renders the launch when it accepts
-                # a reference, or `resume_ids` moves while `launch_argv` still
-                # resumes the old conversation and the next wake delivers its
-                # prompt to the wrong chat.
-                #
-                # Only for a PROVEN reference that actually changes the launch.
-                # `remember` short-circuits on equality with `resume_ids`, which
-                # on an inconsistent record says nothing about what the launch
-                # names — so without `proven` a bare `waiting` event could move
-                # the launch to an unprobeable id. And re-rendering a launch
-                # that already names this conversation only re-derives it from
-                # THIS command's config, which replaced a wrapper selected with
-                # `--config` on an event that changed nothing (review round 4).
-                record["driver"] = registry.get(args.driver).resolve(
-                    name=record["name"],
-                    working_dir=record["working_dir"],
-                    conversation_reference=args.conversation_reference,
-                )
+        # The launch is NOT re-rendered here; see the note in `hive_ide/hook.py`.
+        # An event observes a conversation, and `resume_ids` is where an
+        # observation belongs. Rendering the command from an event rebuilds it
+        # out of whatever config THIS process resolved, which cost a
+        # `--config`-selected wrapper, a name-based `codex` launch and, through
+        # `wake`, a prompt delivered to the previous conversation. The launch is
+        # rendered at launch time, where the session's own drivers are known.
         record["last_active"] = document["observed_at"]
         store.write("sessions", args.session_id, record)
     return document

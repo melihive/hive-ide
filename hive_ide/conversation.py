@@ -27,6 +27,21 @@ class ConversationGuard:
     def check(
         self, record: dict[str, Any], *, working_dir: str, apply: bool
     ) -> dict[str, Any]:
+        """Reconcile a session's remembered references, then its launch.
+
+        Two jobs, kept apart, because conflating them is what six review rounds
+        kept finding. Bookkeeping first: a remembered reference the driver
+        confirms is gone is dropped, an archived one is reported. Then ONE
+        decision about the launch, and only when the conversation the launch
+        ITSELF names is confirmed gone — never because some other remembered
+        reference beside it was.
+
+        That distinction is the whole lesson. Deciding from `resume_ids` reset a
+        `codex` session that resumes by NAME to a bare `codex`, because a stale
+        UUID sitting next to it had expired; deciding from "which reference
+        matched" left a launch resuming a conversation that was already dead.
+        The launch names what it names, and that is what has to be true.
+        """
         actions: list[str] = []
         warnings: list[str] = []
         agents = AgentResumeState(record)
@@ -37,39 +52,117 @@ class ConversationGuard:
             status = self.status(driver_id, reference, working_dir)
             short = reference[:8]
             if status.state == ConversationState.GONE:
-                # Whether the LAUNCH may be re-rendered is a question about the
-                # driver and about whether we can reproduce what it is running —
-                # never about which reference happened to match. An older record
-                # can launch A while `resume_ids` says B, and when B is what we
-                # are dropping, matching on the reference left the launch
-                # resuming a dead A while reporting a successful fallback.
-                was_active = self.launch_is_ours(record, driver_id)
                 agents.forget(driver_id)
                 changed = True
-                replacement = self._previous_that_survives(
-                    agents, driver_id, working_dir, record=record
+                actions.append(
+                    f"driver: forgot {driver_id} conversation {short}, which no "
+                    "longer exists"
                 )
-                if replacement:
-                    if was_active:
-                        self._resolve_reference(record, driver_id, replacement)
-                    actions.append(
-                        f"driver: {driver_id} conversation {short} no longer exists; "
-                        f"fell back to {replacement[:8]}, which still does"
-                    )
-                else:
-                    if was_active:
-                        self._resolve_fresh(record, driver_id)
-                    actions.append(
-                        f"driver: dropped {driver_id} conversation {short}, which no longer "
-                        "exists; the next launch starts a fresh conversation"
-                    )
             elif status.state == ConversationState.ARCHIVED:
                 warnings.append(
                     f"{driver_id} conversation {short} is archived; {status.detail}"
                 )
+        if self._reconcile_launch(record, agents, working_dir, actions, warnings):
+            changed = True
         if changed and apply:
             self.store.write("sessions", record["id"], record)
         return {"changed": changed, "actions": actions, "warnings": warnings}
+
+    def _reconcile_launch(
+        self,
+        record: dict[str, Any],
+        agents: AgentResumeState,
+        working_dir: str,
+        actions: list[str],
+        warnings: list[str],
+    ) -> bool:
+        """Bring the launch into line with the session's own references.
+
+        Two reasons to rewrite a launch, and this is the only place either one
+        is acted on, because here the session's own drivers are known:
+
+        - the session is on a DIFFERENT conversation than the launch resumes.
+          An event records that in `resume_ids` (proven, per `had_a_turn`) and
+          deliberately does not touch the command — a `/clear` mints a new
+          conversation, and this is where the launch catches up with it.
+        - the conversation the launch names is confirmed GONE, and then the
+          newest remembered survivor takes its place, or it starts fresh.
+
+        What is NOT a reason: some other remembered reference being gone.
+        Deciding from `resume_ids` alone reset a `codex` session that resumes by
+        NAME to a bare `codex`, because a stale UUID beside it had expired.
+        """
+        driver = record.get("driver") or {}
+        driver_id = driver.get("id")
+        if not isinstance(driver_id, str) or not driver_id:
+            return False
+        launched = AgentResumeState.reference_from_driver(driver)
+        current = agents.reference_for(driver_id)
+        if current and current != launched:
+            if not self._may_re_render(record, driver_id, launched, warnings):
+                return False
+            self._resolve_reference(record, driver_id, current)
+            actions.append(
+                f"driver: {driver_id} is on conversation {current[:8]}; the launch "
+                + (
+                    f"resumed {launched[:8]} and now resumes that one"
+                    if launched
+                    else "now resumes it"
+                )
+            )
+            return True
+        if not launched:
+            # Nothing to resume, or a driver that resumes some other way (a
+            # `codex` session addressed by name). This launch makes no claim
+            # about a conversation, so there is nothing to correct.
+            return False
+        if self.status(driver_id, launched, working_dir).state != ConversationState.GONE:
+            return False
+        if not self._may_re_render(record, driver_id, launched, warnings):
+            return False
+        short = launched[:8]
+        replacement = self._previous_that_survives(
+            agents, driver_id, working_dir, record=record
+        )
+        if replacement:
+            self._resolve_reference(record, driver_id, replacement)
+            agents.remember(driver_id, replacement)
+            actions.append(
+                f"driver: {driver_id} conversation {short} no longer exists; the "
+                f"launch now resumes {replacement[:8]}, which still does"
+            )
+        else:
+            self._resolve_fresh(record, driver_id)
+            actions.append(
+                f"driver: {driver_id} conversation {short} no longer exists and "
+                "nothing remembered survives it; the next launch starts fresh"
+            )
+        return True
+
+    def _may_re_render(
+        self,
+        record: dict[str, Any],
+        driver_id: str,
+        launched: str | None,
+        warnings: list[str],
+    ) -> bool:
+        """May this launch be rewritten at all? Warn rather than substitute.
+
+        `resolve()` is the only renderer, so rewriting a command this
+        installation did not generate would replace a wrapper's own executable
+        and flags with the bundled shape. A visible stalemate beats a silent
+        substitution.
+        """
+        if self.launch_is_ours(record, driver_id):
+            return True
+        warnings.append(
+            f"{driver_id} launch"
+            + (f" resumes conversation {launched[:8]}, which" if launched else " which")
+            + " needs rewriting, but it is not a command this installation "
+            "generates (a configured wrapper, or a record from another version); "
+            "it is left untouched"
+        )
+        return False
 
     #: Events only a real turn produces. `UserPromptSubmit` opens one and `Stop`
     #: closes one; `SessionStart` and `Notification` say nothing about whether a
@@ -127,7 +220,9 @@ class ConversationGuard:
             working_dir=str(record.get("working_dir") or self.store.workspace_key),
             conversation_reference=reference,
         )
-        return reference in [str(part) for part in ours.get("launch_argv") or []]
+        return any(
+            reference in str(part) for part in ours.get("launch_argv") or []
+        )
 
     def had_a_turn(
         self,

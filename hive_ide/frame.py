@@ -860,8 +860,16 @@ class Frame:
         descriptor is a cheap `OSError`, and it needs no `/proc`, so the scan
         stays portable to macOS.
         """
+        try:
+            descriptors = [int(name) for name in os.listdir("/proc/self/fd")]
+        except (OSError, ValueError):
+            # No `/proc` (macOS): fall back to a bounded scan. The bound is a
+            # stated limit — a pane terminal held above it reads as outside —
+            # and raising it costs an `lsof` dependency for a shape nothing in
+            # this package produces.
+            descriptors = list(range(self.OWN_DESCRIPTOR_SCAN))
         names: set[str] = set()
-        for fd in range(self.OWN_DESCRIPTOR_SCAN):
+        for fd in descriptors:
             try:
                 names |= self._tty_names(os.ttyname(fd))
             except (OSError, ValueError):
@@ -1582,7 +1590,13 @@ class Frame:
             [os.environ.get("SHELL", "/bin/sh")], record
         )
         attach = cls._attach_argv(driver)
-        if attach:
+        if attach and not record.get("launch_prompt"):
+            # An attach carries no argv, so it cannot deliver a one-shot prompt.
+            # `prepare_agent_launch` refuses such a launch with a clear message,
+            # but it reads the background host SEPARATELY from this line, and a
+            # host appearing in between made the two disagree: validation
+            # passed, the command became an attach, and the prompt was dropped
+            # while `wake` reported success. One decision, made here.
             argv = attach
         command = shlex.join(argv)
         handoff = record.get("handoff")

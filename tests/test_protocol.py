@@ -20,6 +20,7 @@ from hive_ide.adapters import (
 )
 from hive_ide.cli import main
 from hive_ide.config import _editor_argv, configured_registry
+from hive_ide.conversation import ConversationGuard
 from hive_ide.drivers import bundled_drivers
 from hive_ide.errors import HiveIdeError, SchemaVersionError, UsageError
 from hive_ide.environments import EnvironmentManager, managed_interpreter
@@ -1725,9 +1726,19 @@ def test_hook_writes_status_and_conversation_reference(tmp_path, monkeypatch):
     assert status["state"] == "waiting"
     assert status["conversation_reference"] == "conversation-1"
     updated = store.find_session(record["id"])
-    assert updated["driver"]["resume"]["reference"] == "conversation-1"
     assert updated["agents"]["resume_ids"]["codex"] == "conversation-1"
-    assert updated["driver"]["launch_argv"] == [
+    # The LAUNCH is not rendered from an event — an event observes a
+    # conversation, and `resume_ids` is where an observation belongs. The
+    # command catches up in `ConversationGuard`, at launch time, where the
+    # session's own drivers are known.
+    assert updated["driver"]["resume"]["reference"] is None
+    assert "conversation-1" not in updated["driver"]["launch_argv"]
+
+    ConversationGuard(store).check(updated, working_dir=str(workspace), apply=True)
+
+    launched = store.find_session(record["id"])["driver"]
+    assert launched["resume"]["reference"] == "conversation-1"
+    assert launched["launch_argv"] == [
         "codex",
         "resume",
         "--no-daemon",
@@ -1796,9 +1807,18 @@ def test_hook_updates_current_driver_when_clear_changes_claude_session(tmp_path,
     status = store.read("status", record["id"])
     assert status["conversation_reference"] == "background-1"
     updated = store.find_session(record["id"])
-    assert updated["driver"]["resume"]["reference"] == "background-1"
     assert updated["agents"]["resume_ids"]["claude"] == "background-1"
     assert updated["agents"]["resume_history"]["claude"] == ["manual-1"]
+    # Recorded, not yet launched: the command still resumes the conversation it
+    # was started on until the next launch renders it.
+    assert updated["driver"]["resume"]["reference"] == "manual-1"
+
+    ConversationGuard(store).check(
+        updated, working_dir=str(workspace), apply=True
+    )
+
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["resume"]["reference"] == "background-1"
     assert updated["driver"]["launch_argv"] == [
         "claude",
         "--resume",
@@ -1858,8 +1878,8 @@ def test_hook_adopts_visible_tmux_pane_when_ide_env_is_missing(tmp_path, monkeyp
     assert status["conversation_reference"] == "visible-pane-1"
     updated = store.find_session(record["id"])
     assert updated["last_active"] == status["observed_at"]
-    assert updated["driver"]["resume"]["reference"] == "visible-pane-1"
     assert updated["agents"]["resume_ids"]["claude"] == "visible-pane-1"
+    assert updated["driver"]["resume"]["reference"] == "manual-1"  # rendered at launch
 
 
 def test_hook_prefers_visible_tmux_pane_over_stale_session_environment(tmp_path, monkeypatch):
@@ -1917,7 +1937,7 @@ def test_hook_prefers_visible_tmux_pane_over_stale_session_environment(tmp_path,
     assert visible_status["conversation_reference"] == "visible-pane-2"
     assert store.find_session(stale["id"])["driver"]["resume"]["reference"] == "stale-1"
     assert (
-        store.find_session(visible["id"])["driver"]["resume"]["reference"]
+        store.find_session(visible["id"])["agents"]["resume_ids"]["claude"]
         == "visible-pane-2"
     )
 

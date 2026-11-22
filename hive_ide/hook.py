@@ -289,34 +289,20 @@ class IdeHook:
                 taken = reference_available and agents.remember(
                     parsed.driver, reference, proven=proven
                 )
-                launched = AgentResumeState.reference_from_driver(current_driver)
-                # Re-render the launch only when this reference actually
-                # changes it, and then only if it is PROVEN or the launch names
-                # nothing yet — the same asymmetry `remember` applies to
-                # `resume_ids`, for the same reason: an empty slot has nothing
-                # to lose, a named one does. `remember` short-circuits on
-                # equality with `resume_ids`, which on a record whose launch
-                # disagrees says nothing about what is running, and re-deriving
-                # a launch that already names this conversation would rebuild it
-                # from whatever config this process resolved (review round 4).
-                if (
-                    taken
-                    and current_driver_matches
-                    and reference != launched
-                    and (proven or not launched)
-                    and (
-                        not launched
-                        or ConversationGuard(store, registry=registry).launch_is_ours(
-                            record, parsed.driver
-                        )
-                    )
-                ):
+                if taken and current_driver_matches:
                     agents.mark_active(parsed.driver)
-                    record["driver"] = driver.resolve(
-                        name=record["name"],
-                        working_dir=record["working_dir"],
-                        conversation_reference=reference,
-                    )
+                # The launch is NOT re-rendered here. `resolve()` is the only
+                # renderer, so rendering from an event rebuilds the command out
+                # of whatever config THIS process resolved — which is how a
+                # wrapper selected with `--config` got replaced by the bundled
+                # driver, how a `codex` launch that resumes by name got reset,
+                # and how a prompt ended up delivered to the previous
+                # conversation. Six review rounds found six faces of it.
+                #
+                # The reference is what an event observes, and `resume_ids` is
+                # where an observation belongs. The launch is rendered at launch
+                # time, by `prepare_agent_launch`, which is the only moment the
+                # session's own drivers are known.
                 store.write("sessions", session_id, record)
         except BaseException:
             pass

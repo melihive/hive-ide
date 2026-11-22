@@ -482,3 +482,48 @@ def test_wake_refuses_when_the_conversation_went_to_the_background(
     asleep = store.find_session(record["id"])
     assert Frame._is_sleeping(asleep)
     assert "launch_prompt" not in asleep
+
+
+def test_a_background_host_appearing_late_cannot_eat_the_prompt(
+    tmp_path, capsys, live_guard, monkeypatch
+):
+    """Round 6: `prepare_agent_launch` read the background host and
+    `_agent_command` read it again, so a host appearing in between made the two
+    disagree — validation passed, the command became an attach, and the prompt
+    went nowhere while `wake` reported success.
+
+    One decision now: a launch carrying a one-shot prompt never attaches. Here
+    the host appears only for the SECOND read, which used to be the losing case.
+    """
+    store, record = _session(tmp_path, "claude")
+    _transcript(live_guard.projects, REFERENCE)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+    reads: list[int] = []
+    original = Frame._attach_argv
+
+    def late(driver):
+        # Three reads on this path: `wake`'s own backgrounded check, the
+        # validation inside `prepare_agent_launch`, and finally the one that
+        # BUILDS the command. The host appears only for the last, which is the
+        # read the earlier fixes could not see.
+        reads.append(1)
+        if len(reads) <= 2:
+            return original(driver)
+        return ["claude", "attach", REFERENCE]
+
+    monkeypatch.setattr(Frame, "_attach_argv", staticmethod(late))
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    launched = " ".join(
+        call if isinstance(call, str) else " ".join(call)
+        for call in live_guard.launches()
+    )
+    # Strictly: the launch that ran carries the prompt, and is not an attach.
+    # Accepting "either a resume or a refusal" let the guard be removed with the
+    # test still green (found by mutation).
+    assert (code, out.get("reason")) == (0, None), out
+    assert "attach" not in launched
+    assert PROMPT in launched
+    assert len(reads) >= 3, reads  # the build-time read is the one that used to win
