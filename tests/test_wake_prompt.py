@@ -447,3 +447,38 @@ def test_wake_does_not_report_success_after_the_conversation_vanishes(
     asleep = store.find_session(record["id"])
     assert Frame._is_sleeping(asleep)
     assert "launch_prompt" not in asleep
+
+
+def test_wake_refuses_when_the_conversation_went_to_the_background(
+    tmp_path, capsys, live_guard, monkeypatch
+):
+    """Found in review round 4: checking the reference was not enough.
+
+    If a background host for the SAME conversation appears after `wake`
+    validated it, the launch resolves to `attach` — and an attach carries no
+    argv, so the one-shot prompt is dropped while the command reports success.
+    """
+    store, record = _session(tmp_path, "claude")
+    _transcript(live_guard.projects, REFERENCE)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+    attach: list[str] = []
+
+    original = Frame._attach_argv  # bound classmethod, captured before the patch
+
+    def appears(driver):
+        # Empty until wake has had its say, then the host exists.
+        if not attach:
+            attach.append("now")
+            return original(driver)
+        return ["claude", "attach", REFERENCE]
+
+    monkeypatch.setattr(Frame, "_attach_argv", staticmethod(appears))
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    assert code == 1 and out["reason"] == "launch_failed"
+    assert "carries no prompt" in out["detail"]
+    asleep = store.find_session(record["id"])
+    assert Frame._is_sleeping(asleep)
+    assert "launch_prompt" not in asleep

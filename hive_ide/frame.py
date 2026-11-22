@@ -840,6 +840,11 @@ class Frame:
             return None, True
         return not (self._tty_names(tty) & pane_ttys), True
 
+    #: How many of the caller's own descriptors to ask about. Far past the
+    #: standard three, because a helper can hold a pane's pty on any of them,
+    #: and small enough that the scan is a handful of failed syscalls.
+    OWN_DESCRIPTOR_SCAN = 64
+
     def _own_tty_names(self) -> set[str]:
         """The terminals this process's own stdin/stdout/stderr are open on.
 
@@ -848,9 +853,15 @@ class Frame:
         not in — and unlike `lsof` it is stdlib and works on macOS too. An
         agent harness runs its commands on pipes, which is why this stays empty
         for the shape the no-tmux-variables rule exists for.
+
+        Scanned as a RANGE, not just the standard three: review reproduced a
+        helper with pipes on 0-2 and the pane's pty on fd 4, which the
+        three-descriptor version read as outside. `os.ttyname` on a closed
+        descriptor is a cheap `OSError`, and it needs no `/proc`, so the scan
+        stays portable to macOS.
         """
         names: set[str] = set()
-        for fd in (0, 1, 2):
+        for fd in range(self.OWN_DESCRIPTOR_SCAN):
             try:
                 names |= self._tty_names(os.ttyname(fd))
             except (OSError, ValueError):
@@ -2248,6 +2259,19 @@ class Frame:
             raise HiveIdeError(
                 "The conversation this launch promised is no longer available; "
                 "nothing was started."
+            )
+        if (
+            expect_reference is not None
+            and record.get("launch_prompt")
+            and self._attach_argv(record.get("driver") or {})
+        ):
+            # A background host for this conversation appeared after the caller
+            # validated it. The launch would `attach`, and an attach carries no
+            # argv — so the prompt would be dropped while the command reported
+            # success. Checking the reference alone missed this (review round 4).
+            raise HiveIdeError(
+                "The conversation is now running in the background, and an "
+                "attach carries no prompt; nothing was started."
             )
         self.refuse_held_conversation(record)
 

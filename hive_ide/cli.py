@@ -702,7 +702,9 @@ def cmd_label(args: argparse.Namespace) -> dict[str, Any]:
         # `label` has no --tmux-socket of its own, so resolve the default rather
         # than reading an attribute this subcommand never defines.
         socket = _socket(store, getattr(args, "tmux_socket", None))
-        retitled = Frame(store, socket=socket).retitle_panes(record)
+        retitled = Frame(
+            store, socket=socket, config_file=_config_file(args)
+        ).retitle_panes(record)
     except (HiveIdeError, UsageError, OSError):
         retitled = False
     return {
@@ -936,27 +938,41 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
             # may fill an empty slot but never displace a different reference.
             # This entry point is the one an external hook config calls, so a
             # gate on only the other one would be no gate at all.
-            taken = agents.remember(
+            proven = ConversationGuard(
+                store, registry=configured_registry(config)
+            ).had_a_turn(
                 args.driver,
                 args.conversation_reference,
-                proven=ConversationGuard(
-                    store, registry=configured_registry(config)
-                ).had_a_turn(
-                    args.driver,
-                    args.conversation_reference,
-                    working_dir=str(record.get("working_dir") or ""),
-                    state=args.state,
-                ),
+                working_dir=str(record.get("working_dir") or ""),
+                state=args.state,
+            )
+            taken = agents.remember(
+                args.driver, args.conversation_reference, proven=proven
             )
         else:
+            proven = False
             taken = False
+        launched = AgentResumeState.reference_from_driver(record.get("driver") or {})
         if (record.get("driver") or {}).get("id") == args.driver:
             agents.mark_active(args.driver)
-            if taken:
+            if (
+                taken
+                and args.conversation_reference != launched
+                and (proven or not launched)
+            ):
                 # The in-process receiver re-renders the launch when it accepts
-                # a reference. Without this, `resume_ids` moved to the new
-                # conversation while `launch_argv` still resumed the old one,
-                # and the next wake delivered its prompt to the wrong chat.
+                # a reference, or `resume_ids` moves while `launch_argv` still
+                # resumes the old conversation and the next wake delivers its
+                # prompt to the wrong chat.
+                #
+                # Only for a PROVEN reference that actually changes the launch.
+                # `remember` short-circuits on equality with `resume_ids`, which
+                # on an inconsistent record says nothing about what the launch
+                # names — so without `proven` a bare `waiting` event could move
+                # the launch to an unprobeable id. And re-rendering a launch
+                # that already names this conversation only re-derives it from
+                # THIS command's config, which replaced a wrapper selected with
+                # `--config` on an event that changed nothing (review round 4).
                 record["driver"] = configured_registry(config).get(args.driver).resolve(
                     name=record["name"],
                     working_dir=record["working_dir"],
@@ -1247,7 +1263,7 @@ def cmd_open(args: argparse.Namespace) -> dict[str, Any]:
         socket_tmpdir=_socket_tmpdir(store, socket),
     )
     store.write_path(store.config_snapshot_path(), snapshot)
-    frame = Frame(store, socket=socket)
+    frame = Frame(store, socket=socket, config_file=_config_file(args))
     # Before repair, which builds any window that is missing: a launch order
     # decided after that is decided over a frame that is already fully built, so
     # it stages nothing and the whole frame starts at once. One frame, so the

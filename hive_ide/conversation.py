@@ -37,7 +37,14 @@ class ConversationGuard:
             status = self.status(driver_id, reference, working_dir)
             short = reference[:8]
             if status.state == ConversationState.GONE:
-                was_active = self._is_active_reference(record, driver_id, reference)
+                # Whether the LAUNCH has to be re-rendered is a question about
+                # the driver, not about this one reference. An older record can
+                # launch A while `resume_ids` says B, and when B is what we are
+                # dropping, matching on the reference left the launch resuming a
+                # dead A and reported a successful fallback anyway (review round
+                # 4). A's own reference is in history by then, so it is a
+                # candidate like any other.
+                was_active = (record.get("driver") or {}).get("id") == driver_id
                 agents.forget(driver_id)
                 changed = True
                 replacement = self._previous_that_survives(

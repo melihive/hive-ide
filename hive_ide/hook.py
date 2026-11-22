@@ -277,18 +277,34 @@ class IdeHook:
                     else None
                 )
                 reference_available = owner is None
-                taken = reference_available and agents.remember(
+                proven = reference_available and ConversationGuard(
+                    store, registry=registry
+                ).had_a_turn(
                     parsed.driver,
                     reference,
-                    proven=ConversationGuard(store, registry=registry).had_a_turn(
-                        parsed.driver,
-                        reference,
-                        working_dir=str(record.get("working_dir") or ""),
-                        payload=payload,
-                        state=parsed.state,
-                    ),
+                    working_dir=str(record.get("working_dir") or ""),
+                    payload=payload,
+                    state=parsed.state,
                 )
-                if taken and current_driver_matches:
+                taken = reference_available and agents.remember(
+                    parsed.driver, reference, proven=proven
+                )
+                launched = AgentResumeState.reference_from_driver(current_driver)
+                # Re-render the launch only when this reference actually
+                # changes it, and then only if it is PROVEN or the launch names
+                # nothing yet — the same asymmetry `remember` applies to
+                # `resume_ids`, for the same reason: an empty slot has nothing
+                # to lose, a named one does. `remember` short-circuits on
+                # equality with `resume_ids`, which on a record whose launch
+                # disagrees says nothing about what is running, and re-deriving
+                # a launch that already names this conversation would rebuild it
+                # from whatever config this process resolved (review round 4).
+                if (
+                    taken
+                    and current_driver_matches
+                    and reference != launched
+                    and (proven or not launched)
+                ):
                     agents.mark_active(parsed.driver)
                     record["driver"] = driver.resolve(
                         name=record["name"],

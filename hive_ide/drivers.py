@@ -393,15 +393,18 @@ class DriverRegistry:
             resume_argv=list(config.get("resume_argv") or []),
             capabilities=tuple(config.get("capabilities") or ("launch",)),
             launch_flags=list(getattr(replaced, "launch_flags", None) or []),
-            # And its conversation probe. A wrapper around `claude` still keeps
-            # its conversations where `claude` does, so dropping the probe made
-            # every reference UNKNOWN: nothing could be reconciled, and `open`
-            # relaunched a dead conversation forever while a live one sat in
-            # the session's own history.
+            # A probe is opt-IN for a configured driver, never inherited.
+            # Inheriting it (tried on 2026-11-23) reads the IDE's own
+            # environment to find the store, so a wrapper that sets its own
+            # `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would have its live
+            # conversations reported GONE and their references deleted — the
+            # exact loss this phase exists to prevent, and worse than the
+            # UNKNOWN it replaced, which only ever declines to act. A wrapper
+            # that shares the store it wraps can say so with this key.
             conversation_probe=(
                 str(config.get("conversation_probe"))
                 if config.get("conversation_probe")
-                else getattr(replaced, "conversation_probe", None)
+                else None
             ),
         )
 

@@ -1698,3 +1698,24 @@ def test_a_pane_held_on_stderr_counts_even_with_another_terminal(live, monkeypat
     assert live.frame._pane_membership() == (False, True)
     assert live.frame.caller_in_no_pane() is False
     assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
+
+
+def test_a_pane_terminal_on_a_high_descriptor_still_counts(live, monkeypatch):
+    """Found in review round 4, reproduced there with a real pty on fd 4.
+
+    A helper can have pipes on its standard streams and the pane's terminal on
+    any descriptor above them. Checking only 0-2 read that as outside and
+    authorized a rebuild of the window it was writing into.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pane_tty = live.frame.pane_tty(roles["agent"])
+    assert pane_tty.startswith("/dev/")
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: ([os.getpid()], None))
+    monkeypatch.setattr(
+        os, "ttyname", lambda fd: pane_tty if fd == 4 else (_ for _ in ()).throw(OSError)
+    )
+
+    assert live.frame._pane_membership() == (False, True)
+    assert live.frame.caller_in_no_pane() is False
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"

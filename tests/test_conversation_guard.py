@@ -820,11 +820,22 @@ def test_a_record_whose_launch_disagrees_keeps_both_conversations(tmp_path, stor
     assert store.find_session(record["id"])["agents"]["resume_ids"]["claude"] == REF
 
 
-def test_a_configured_wrapper_keeps_the_probe_of_the_driver_it_replaces(tmp_path):
-    """Found in review: `add_declarative` dropped the conversation probe, so a
-    wrapper around `claude` answered UNKNOWN for every reference. Nothing could
-    be reconciled, and `open` relaunched a dead conversation forever while a
-    live one sat in the session's own history."""
+def test_a_configured_wrapper_does_not_inherit_a_conversation_probe(tmp_path):
+    """A probe is opt-IN for a configured driver, and this test asserted the
+    opposite for one round.
+
+    Inheriting it looked like a clear win: a wrapper around `claude` keeps its
+    conversations where `claude` does, so without a probe every reference reads
+    UNKNOWN, nothing can be reconciled, and `open` relaunches a dead
+    conversation forever (review round 3). But the probe reads the IDE's OWN
+    environment to find the store, so a wrapper that sets its own
+    `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would have its LIVE conversations
+    reported GONE and their references deleted — the exact loss this phase
+    exists to prevent, and the opposite of inert (review round 4).
+
+    So the limit stands, and a wrapper that shares the store it wraps says so
+    with the explicit key.
+    """
     registry = DriverRegistry()
     registry.add_declarative(
         "claude",
@@ -835,11 +846,143 @@ def test_a_configured_wrapper_keeps_the_probe_of_the_driver_it_replaces(tmp_path
             "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
         },
     )
+    assert registry.get("claude").conversation_probe is None
 
-    assert registry.get("claude").conversation_probe == "claude"
-    # And an explicit one still wins, for a wrapper that keeps its own store.
     registry.add_declarative(
         "codex",
         {"label": "C", "command": ["/c"], "conversation_probe": "claude"},
     )
     assert registry.get("codex").conversation_probe == "claude"
+
+
+
+# -- cross-model review of Phase 84 (round 4) ---------------------------------------
+
+
+def test_the_fallback_re_renders_the_launch_of_a_record_that_disagreed(
+    tmp_path, stores
+):
+    """Found in review: whether the LAUNCH must be rebuilt is a question about
+    the driver, not about one reference.
+
+    An older record can launch A while `resume_ids` says B. Dropping B used to
+    match on the reference, decide the launch was not involved, adopt the
+    survivor and report a successful fallback — while `launch_argv` still
+    resumed a dead A. A second repair then found nothing to do.
+    """
+    third = "7f6e5d4c-3b2a-4190-8876-554433221100"
+    store, record, workspace = _session(tmp_path, reference=third)  # launches a dead A
+    record["agents"]["resume_ids"]["claude"] = OTHER  # and remembers a dead B
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # the survivor, one step back
+
+    reloaded = store.find_session(record["id"])
+    agents = AgentResumeState(reloaded)
+    agents._set_history("claude", [REF, *agents.history_for("claude")])
+    store.write("sessions", reloaded["id"], reloaded)
+
+    result = ConversationGuard(store).check(
+        reloaded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("fell back to" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == REF
+    assert updated["driver"]["resume"]["reference"] == REF
+    assert third not in updated["driver"]["launch_argv"]
+
+
+def test_an_unproven_event_cannot_move_a_launch_that_names_something_else(
+    tmp_path, stores, capsys
+):
+    """Found in review: `remember` short-circuits when `resume_ids` already
+    names the incoming reference, which on an inconsistent record says nothing
+    about what the launch is running. A bare `waiting` event for an unprobeable
+    id could therefore re-render the launch away from a real conversation."""
+    store, record, workspace = _session(tmp_path, reference=REF)
+    record["agents"]["resume_ids"]["claude"] = OTHER
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=waiting",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    held = store.find_session(record["id"])
+    assert held["driver"]["resume"]["reference"] == REF
+    assert REF in held["driver"]["launch_argv"]
+
+
+def test_an_event_that_changes_nothing_keeps_the_configured_launch(
+    tmp_path, stores, capsys
+):
+    """Found in review: the handler re-resolved the launch for every accepted
+    reference, so an ordinary event for the conversation ALREADY running
+    rebuilt the command from this process's config — replacing a wrapper that
+    had been selected with `--config` when the session was created."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+        },
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    _transcript(stores["claude"], REF)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={REF}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]
+
+
+def test_the_hook_receiver_applies_the_same_launch_rule_as_its_cli_twin(
+    tmp_path, stores, monkeypatch
+):
+    """The in-process receiver and `status-event` are two doors to one rule.
+
+    Found by mutation: the CLI side had a test for "an unproven event may not
+    move a launch that names something else" and the hook side did not, so the
+    hook's narrowing could be reverted with the suite still green.
+    """
+    store, record, _ = _session(tmp_path, reference=REF)
+    record["agents"]["resume_ids"]["claude"] = OTHER
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    held = store.find_session(record["id"])
+    assert held["driver"]["resume"]["reference"] == REF
+    assert REF in held["driver"]["launch_argv"]
