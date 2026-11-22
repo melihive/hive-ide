@@ -15,11 +15,14 @@ from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
+from .config import configured_registry, load_config
 from .agents import AgentResumeState
 from .conversation import ConversationGuard
+from .drivers import DriverRegistry
 from .errors import HeldConversationError, HiveIdeError, UsageError
 from .holders import ConversationHolders
 from .layout import IdeLayout
+from .paths import config_path
 from .pane_lease import LeaseStore, PaneLeases, serialized
 from .python_cmd import PythonCommand
 from .socket_gc import SocketReaper
@@ -813,8 +816,30 @@ class Frame:
         if any(pid in pane_pids for pid in pids):
             return False, True
         if tty is None:
-            return None, True
+            # No controlling terminal in the ancestry — but a process can still
+            # be WRITING into a pane: a detached child keeps the pane's pty on
+            # its own descriptors while losing both the terminal and the pane
+            # ancestry (reproduced in review with a real pty and a double fork).
+            # Our own descriptors are not inheritable evidence, so they settle it.
+            return (False, True) if self._own_tty_names() & pane_ttys else (None, True)
         return not (self._tty_names(tty) & pane_ttys), True
+
+    def _own_tty_names(self) -> set[str]:
+        """The terminals this process's own stdin/stdout/stderr are open on.
+
+        `os.ttyname` asks the kernel about a descriptor we hold, so unlike an
+        environment variable it cannot have been inherited from a pane we are
+        not in — and unlike `lsof` it is stdlib and works on macOS too. An
+        agent harness runs its commands on pipes, which is why this stays empty
+        for the shape the no-tmux-variables rule exists for.
+        """
+        names: set[str] = set()
+        for fd in (0, 1, 2):
+            try:
+                names |= self._tty_names(os.ttyname(fd))
+            except (OSError, ValueError):
+                continue
+        return names
 
     def caller_in_no_pane(self) -> bool | None:
         """Is the caller in NO pane of this server? Kernel first, environment last.
@@ -2159,6 +2184,22 @@ class Frame:
         raw = result.stdout.strip()
         return int(raw) if raw.isdigit() else None
 
+    def driver_registry(self) -> DriverRegistry:
+        """The drivers THIS installation defines, declarative ones included.
+
+        The guard re-renders a session's launch whenever it changes its
+        conversation reference, and `resolve()` is the only renderer. Rendering
+        from the bundled registry would quietly rewrite a declarative driver's
+        own executable and flags into the bundled shape — reported in review
+        with a configured `/custom/claude` becoming a bare `claude`. Read the
+        config the way the hook receiver does; a config that will not load
+        leaves the bundled set, which is what every caller had before.
+        """
+        try:
+            return configured_registry(load_config(config_path()), plugins=True)
+        except (HiveIdeError, OSError, ValueError):
+            return DriverRegistry()
+
     def prepare_agent_launch(self, record: dict[str, Any]) -> None:
         """Drop confirmed-gone conversation refs, and refuse a held conversation.
 
@@ -2168,7 +2209,7 @@ class Frame:
         exposed, and `open` is the path that produced the original fault.
         """
         try:
-            ConversationGuard(self.store).check(
+            ConversationGuard(self.store, registry=self.driver_registry()).check(
                 record, working_dir=self.safe_working_dir(record), apply=True
             )
         except (HiveIdeError, OSError):

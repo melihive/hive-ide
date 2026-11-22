@@ -409,3 +409,35 @@ def test_wake_resumes_the_fallback_the_guard_chose(tmp_path, capsys, live_guard)
     )
     assert SURVIVOR in launched and REFERENCE not in launched
     assert store.find_session(record["id"])["driver"]["resume"]["reference"] == SURVIVOR
+
+
+def test_wake_does_not_report_success_after_the_conversation_vanishes(
+    tmp_path, capsys, live_guard, monkeypatch
+):
+    """The launch path reconciles again after `wake` has had its say.
+
+    Found in review: a transcript can disappear between the two, and then the
+    prompt opens a FRESH conversation while the command reports `woke: true`.
+    `_attach_argv` runs inside that window, so dropping the reference from it
+    stands in for the transcript going away at exactly the wrong moment.
+    """
+    store, record = _session(tmp_path, "claude")
+    _transcript(live_guard.projects, REFERENCE)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+
+    def vanish(driver):
+        current = store.find_session(record["id"])
+        if current is not None and current.get("driver", {}).get("resume"):
+            current["driver"]["resume"]["reference"] = None
+            current["agents"]["resume_ids"].pop("claude", None)
+            store.write("sessions", current["id"], current)
+        return None
+
+    monkeypatch.setattr(Frame, "_attach_argv", staticmethod(vanish))
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    assert (code, out["reason"]) == (1, "no_conversation")
+    assert live_guard.launches() == []
+    assert Frame._is_sleeping(store.find_session(record["id"]))

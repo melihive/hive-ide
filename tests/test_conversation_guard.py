@@ -11,8 +11,9 @@ import pytest
 
 from hive_ide.agents import AgentResumeState
 from hive_ide.cli import main
+from hive_ide.config import configured_registry, load_config
 from hive_ide.conversation import ConversationGuard
-from hive_ide.drivers import ConversationState, bundled_drivers
+from hive_ide.drivers import ConversationState, DriverRegistry, bundled_drivers
 from hive_ide.frame import Frame
 from hive_ide.hook import IdeHook
 from hive_ide.repair import SessionRepair
@@ -654,3 +655,123 @@ def test_reactivating_a_remembered_reference_keeps_the_oldest_fallback(tmp_path)
 
     assert oldest in agents.history_for("claude")
     assert agents.history_for("claude").count(history[0]) == 0
+
+
+# -- cross-model review of Phase 84 (round 2) ---------------------------------------
+
+
+def test_the_fallback_re_renders_with_the_registry_it_was_given(tmp_path, stores):
+    """Re-rendering a launch must use the drivers THIS installation defines.
+
+    Found in review: the guard was built with the bundled registry, so adopting
+    a fallback rewrote a configured `/custom/claude --resume B` into a bare
+    `claude --resume A --name S`, and every later launch bypassed the configured
+    wrapper and its flags.
+
+    The driver here stands in for a PLUGIN driver, which is the only kind this
+    is reachable with: `add_declarative` does not carry a conversation probe, so
+    a config-declared driver answers UNKNOWN for every reference and the guard
+    never reconciles it at all. That is its own gap, noted on the plan.
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+        },
+    )
+    registry.get("claude").conversation_probe = "claude"
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+
+    ConversationGuard(store, registry=registry).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == REF
+    argv = updated["driver"]["launch_argv"]
+    assert argv[0] == "/custom/claude" and "--house-flag" in argv
+    assert REF in argv and "claude" != argv[0]
+
+
+def test_a_frame_reconciles_with_the_configured_drivers_not_the_bundled_ones(
+    tmp_path, monkeypatch
+):
+    """The other half of that finding: which registry a launch's reconcile uses.
+
+    `prepare_agent_launch` used to build the guard with no registry at all,
+    which means the bundled one whatever this installation configures.
+    """
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "drivers": {
+                    "claude": {
+                        "label": "Claude",
+                        "command": ["/custom/claude", "--house-flag"],
+                        "resume_strategy": "conversation_id",
+                        "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(config))
+    store, _record, _workspace = _session(tmp_path)
+
+    assert Frame(store).driver_registry().get("claude").command == [
+        "/custom/claude",
+        "--house-flag",
+    ]
+
+    # A config that will not load leaves the bundled set rather than raising
+    # into a launch.
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "nothing-here.json"))
+    assert Frame(store).driver_registry().get("claude").command == ["claude"]
+
+
+def test_an_accepted_status_event_moves_the_launch_too(tmp_path, stores, capsys):
+    """Found in review: `resume_ids` followed the new conversation while
+    `launch_argv` still resumed the old one, so the next wake would deliver its
+    prompt to the conversation the record had just left."""
+    store, record, workspace = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+    _transcript(stores["claude"], OTHER)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["resume"]["reference"] == OTHER
+    assert OTHER in updated["driver"]["launch_argv"]
+    assert REF not in updated["driver"]["launch_argv"]

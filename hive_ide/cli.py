@@ -494,6 +494,14 @@ def _wake(args: argparse.Namespace) -> dict[str, Any]:
         raise _wake_outcome("conversation_backgrounded", 1)
 
     frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    # The launch path reconciles again, and a transcript can vanish in between.
+    # Re-read the reference we validated immediately before committing to the
+    # launch: if it is no longer the one we checked, the prompt would open a
+    # FRESH conversation while this command reported a successful wake.
+    validated = AgentResumeState.reference_from_driver(driver)
+    current = store.find_session(record["id"]) or record
+    if AgentResumeState.reference_from_driver(current.get("driver") or {}) != validated:
+        raise _wake_outcome("no_conversation", 1)
     slept = record.get("sleep")
     record["launch_prompt"] = args.prompt
     store.write("sessions", record["id"], record)
@@ -916,7 +924,7 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
             # may fill an empty slot but never displace a different reference.
             # This entry point is the one an external hook config calls, so a
             # gate on only the other one would be no gate at all.
-            agents.remember(
+            taken = agents.remember(
                 args.driver,
                 args.conversation_reference,
                 proven=ConversationGuard(
@@ -928,8 +936,20 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
                     state=args.state,
                 ),
             )
+        else:
+            taken = False
         if (record.get("driver") or {}).get("id") == args.driver:
             agents.mark_active(args.driver)
+            if taken:
+                # The in-process receiver re-renders the launch when it accepts
+                # a reference. Without this, `resume_ids` moved to the new
+                # conversation while `launch_argv` still resumed the old one,
+                # and the next wake delivered its prompt to the wrong chat.
+                record["driver"] = configured_registry(config).get(args.driver).resolve(
+                    name=record["name"],
+                    working_dir=record["working_dir"],
+                    conversation_reference=args.conversation_reference,
+                )
         record["last_active"] = document["observed_at"]
         store.write("sessions", args.session_id, record)
     return document

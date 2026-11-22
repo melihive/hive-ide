@@ -1652,3 +1652,30 @@ def test_a_readable_table_with_no_terminal_still_settles_it(live, monkeypatch):
     assert live.frame._pane_membership() == (None, True)
     assert live.frame.caller_in_no_pane() is True
     assert live.frame.caller_location(live.window) is False
+
+
+def test_a_caller_still_writing_into_a_pane_is_not_outside_it(live, monkeypatch):
+    """A detached child keeps the pane's terminal on its own descriptors.
+
+    Found in review, reproduced there with a real pty and a double fork: such a
+    process has no controlling terminal and no pane in its ancestry (it was
+    reparented), so the two readings the guard had both came back silent — and
+    with its tmux variables cleared the environment rule would call it outside
+    and let the rebuild kill the window it is still printing into.
+
+    `os.ttyname` on our own descriptors cannot be inherited the way an
+    environment variable can, so it settles this. An agent harness runs its
+    commands on pipes, which is why the shape the rule exists for is unaffected
+    (the test above it).
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pane_tty = live.frame.pane_tty(roles["agent"])
+    assert pane_tty.startswith("/dev/")
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: ([os.getpid()], None))
+    monkeypatch.setattr(os, "ttyname", lambda fd: pane_tty if fd == 1 else "/dev/null")
+
+    assert live.frame._pane_membership() == (False, True)
+    assert live.frame.caller_in_no_pane() is False
+    assert live.frame.caller_location(live.window) is None
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
