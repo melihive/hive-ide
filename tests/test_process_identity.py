@@ -220,7 +220,7 @@ def test_the_guard_uses_kernel_evidence_when_the_environment_cannot_tell(
     ).stdout.split()[0]
 
     # Provably outside every pane -> a verdict, so the guard allows the target.
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: True)
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (True, True))
     assert scratch_frame.pane_is_caller(pane) is False
 
     # Cannot tell, and no tmux variable either -> the environment settles it:
@@ -228,7 +228,7 @@ def test_the_guard_uses_kernel_evidence_when_the_environment_cannot_tell(
     # caller with neither is in no pane. Until 2026-11-22 this was deferred, and
     # the deferral proved unclearable (see
     # `test_a_caller_with_no_tmux_variables_at_all_is_outside`).
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (None, True))
     assert scratch_frame.pane_is_caller(pane) is False
 
     # The shape that must STILL be unsettled: `$TMUX` present and the kernel

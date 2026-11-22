@@ -6844,22 +6844,24 @@ def test_a_popup_on_this_server_is_not_the_agent_pane(tmp_path, monkeypatch):
     assert frame.pane_is_caller("%16") is False
 
 
-def test_marker_only_without_a_pane_id_is_outside_every_pane(tmp_path, monkeypatch):
-    """The marker alone cannot make us a pane — and with neither tmux variable
-    present we are in no pane at all.
+def test_marker_only_without_a_pane_id_stays_unknown(tmp_path, monkeypatch):
+    """The marker alone is not enough. It is an ordinary environment variable, so
+    a process can carry it from somewhere else; only `$TMUX` is tmux's own witness
+    that this process is on this server.
 
-    It is an ordinary environment variable that any descendant inherits, and it
-    names a socket rather than a pane; only `$TMUX` is tmux's own witness that
-    this process is on this server. This asserted `None` until 2026-11-22, when
-    that deferral turned out to be unclearable: see
+    The environment CAN settle this shape when the kernel evidence was read and
+    merely silent about the terminal (2026-11-22; see
     `test_a_caller_with_no_tmux_variables_at_all_is_outside` in
-    `tests/test_repair_self_guard.py` for the incident and the narrowness.
+    `tests/test_repair_self_guard.py`). Not here: this frame names a server that
+    does not exist, so `tmux list-panes` fails, nothing was observed at all, and
+    unknown is the only honest answer.
     """
     frame = _verdict_frame(tmp_path)
     _caller_env(monkeypatch, HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111")
 
     assert frame.caller_server() is True
-    assert frame.pane_is_caller("%16") is False
+    assert frame._pane_membership() == (None, False)
+    assert frame.pane_is_caller("%16") is None
 
 
 def test_the_agent_pane_itself_is_still_recognised(tmp_path, monkeypatch):

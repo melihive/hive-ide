@@ -226,13 +226,14 @@ def _tmux_var(socket: str, *, tmpdir: str = "/tmp") -> str:
         (None, None, None, False, False, False),
         # (a) A pane id with no server evidence: unknown.
         ("%3", None, None, None, None, None),
-        # (b) The marker names this server but there is no pane id — and no
-        # `$TMUX` either. tmux exports both into every pane it creates, so this
-        # caller is in no pane of any server; the marker is an inheritable
-        # variable that names a socket, never a pane. Provably outside. (Here
-        # the kernel reading cannot help: there is no such server to list, so
-        # `caller_outside_panes` answers None and the environment decides.)
-        (None, THIS, None, True, False, False),
+        # (b) The marker names this server but there is no pane id, and no
+        # `$TMUX` either. The environment alone would settle this — tmux exports
+        # both into every pane it creates — but this frame has no server, so
+        # `tmux list-panes` fails and the kernel evidence is UNREADABLE rather
+        # than merely silent. Nothing observed, nothing concluded: unknown. The
+        # shape that DOES settle it, against a live server, is
+        # `test_a_caller_with_no_tmux_variables_at_all_is_outside`.
+        (None, THIS, None, True, None, None),
         # (c) The marker names another server while $TMUX names this one: unknown.
         ("%3", OTHER, _tmux_var(THIS), None, None, None),
         # The mirror conflict: marker says this server, $TMUX says another.
@@ -443,7 +444,9 @@ def test_a_caller_with_no_tmux_variables_at_all_is_outside(live, monkeypatch):
     """
     roles = live.frame.role_panes(live.record["id"])
     live.identity(pane=None, marker=live.socket, tmux=None)
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
+    # Read in full, silent only about the terminal — the one None the
+    # environment may speak for. The unreadable case has its own test below.
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (None, True))
 
     assert live.frame.caller_in_no_pane() is True
     assert live.frame.caller_location(live.window) is False
@@ -464,7 +467,7 @@ def test_a_caller_that_still_has_tmux_defers_when_the_kernel_cannot_tell(
     roles = live.frame.role_panes(live.record["id"])
     pids_before = _pane_pids(live.frame, roles)
     live.identity(pane=None, marker=live.socket, tmux=f"{live.frame.socket_path()},1,0")
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (None, True))
 
     assert live.frame.caller_in_no_pane() is None
     assert live.frame.caller_location(live.window) is None
@@ -483,7 +486,7 @@ def test_a_caller_provably_outside_every_pane_may_act_on_one(live, monkeypatch):
     """
     roles = live.frame.role_panes(live.record["id"])
     live.identity(pane=None, marker=live.socket, tmux=None)
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: True)
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (True, True))
 
     assert live.frame.pane_is_caller(roles["agent"]) is False
 
@@ -1606,3 +1609,46 @@ def test_mutation_lock_non_blocking_refuses_another_threads_hold(tmp_path):
     with store.mutation_lock(blocking=False):
         outcome.append("entered after release")
     assert outcome[-1] == "entered after release"
+
+
+def test_an_unreadable_process_table_is_not_an_invitation_to_rebuild(live, monkeypatch):
+    """The hazard cross-model review found in the rule above.
+
+    A caller inside a pane can lose both tmux variables (`env -i`, a launcher
+    that scrubs its environment). What normally catches it is the kernel: an
+    ancestor is the pane's own process. But if `ps` cannot be read at all, that
+    check answers "cannot tell" — and if the environment were allowed to decide
+    on its own, the caller would be judged outside and the rebuild would kill
+    the window it is running in.
+
+    So the environment only gets a vote when the kernel evidence was READ and
+    merely silent about the terminal. Nothing observed means nothing concluded.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pids_before = _pane_pids(live.frame, roles)
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: None)
+
+    assert live.frame._pane_membership() == (None, False)
+    assert live.frame.caller_in_no_pane() is None
+    assert live.frame.caller_location(live.window) is None
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
+    assert _window_ids(live.frame) == [live.window]
+    assert _pane_pids(live.frame, roles) == pids_before
+
+
+def test_a_readable_table_with_no_terminal_still_settles_it(live, monkeypatch):
+    """The other side of that line, which is the shape the fix exists for.
+
+    An agent harness runs its commands on a pipe, so nothing in the ancestry
+    has a controlling terminal. The panes listed, the ancestry read, and no
+    ancestor is a pane's own process: that is a full reading whose only gap is
+    the terminal, and with neither tmux variable present the caller is in no
+    pane.
+    """
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: ([os.getpid()], None))
+
+    assert live.frame._pane_membership() == (None, True)
+    assert live.frame.caller_in_no_pane() is True
+    assert live.frame.caller_location(live.window) is False

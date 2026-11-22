@@ -548,3 +548,109 @@ def test_the_fallback_refuses_a_remembered_reference_it_cannot_prove(tmp_path, s
     assert "claude" not in updated["agents"]["resume_ids"]
     assert updated["driver"]["resume"]["reference"] is None
     assert updated["agents"]["resume_history"]["claude"] == ["not-a-uuid"]
+
+
+# -- cross-model review of Phase 84 (round 1) ---------------------------------------
+
+
+def test_the_fallback_never_reclaims_a_conversation_another_session_took(
+    tmp_path, stores
+):
+    """A displaced reference is fair game for another session to attach.
+
+    Found in review: `_previous_that_survives` asked only whether a candidate
+    still EXISTS. If session B attached it in the meantime, adopting it here
+    would put two drivers on one conversation — the fault that leaves a pane
+    permanently blank, and the reason `refuse_held_conversation` exists.
+    """
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # REF exists, OTHER does not
+    neighbour = store.create_session(
+        name="BETA",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="BETA", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    assert store.find_conversation_owner(
+        driver_id="claude", reference=REF, exclude_session_id=record["id"]
+    )["id"] == neighbour["id"]
+
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert any("starts a fresh conversation" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert "claude" not in updated["agents"]["resume_ids"]
+    assert updated["driver"]["resume"]["reference"] is None
+    # BETA keeps it, untouched.
+    assert store.find_session(neighbour["id"])["driver"]["resume"]["reference"] == REF
+
+
+def test_the_status_event_command_applies_the_same_displacement_rule(
+    tmp_path, stores, capsys
+):
+    """The hook's own CLI entry point is the one an external hook config calls.
+
+    Found in review: gating only the in-process receiver left this one wide
+    open, and a `waiting` event through it replaced the reference while the
+    launch command still pointed at the real conversation.
+    """
+    store, record, workspace = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=waiting",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    held = store.find_session(record["id"])
+    assert held["agents"]["resume_ids"]["claude"] == REF
+    assert store.read("status", record["id"])["conversation_reference"] == OTHER
+
+    # `working` IS a prompt, so the same id is taken.
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    assert store.find_session(record["id"])["agents"]["resume_ids"]["claude"] == OTHER
+
+
+def test_reactivating_a_remembered_reference_keeps_the_oldest_fallback(tmp_path):
+    """Found in review: the history was trimmed BEFORE the reactivated entry was
+    removed, so reopening the newest remembered conversation spent a slot on it
+    and evicted the oldest — which may be the only survivor left."""
+    _, record, _ = _session(tmp_path, reference=None)
+    agents = AgentResumeState(record)
+    references = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(10)]
+    for reference in references:
+        agents.remember("claude", reference)
+
+    history = agents.history_for("claude")
+    assert len(history) == AgentResumeState.HISTORY_LIMIT
+    oldest = history[-1]
+
+    # Reopen the newest remembered conversation: no slot may be spent on it.
+    agents.remember("claude", history[0])
+
+    assert oldest in agents.history_for("claude")
+    assert agents.history_for("claude").count(history[0]) == 0

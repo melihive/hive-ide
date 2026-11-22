@@ -775,11 +775,30 @@ class Frame:
         reading it as "outside" would let it replace the pane it is sitting in,
         which is the incident the caller guard exists for.
         """
+        return self._pane_membership()[0]
+
+    def _pane_membership(self) -> tuple[bool | None, bool]:
+        """`(caller_outside_panes verdict, was the evidence readable at all)`.
+
+        The two Nones this function used to return mean opposite things to a
+        caller that wants to fall back on the environment:
+
+        - the panes would not list, or the process table would not read: nothing
+          was observed, so nothing may be concluded, and a caller inside a pane
+          that cleared its tmux variables is indistinguishable from one outside;
+        - everything WAS read, no ancestor is a pane's own process, and the only
+          gap is a controlling terminal — which a process started by an agent
+          harness or a systemd unit simply does not have.
+
+        Only the second leaves room for the environment to decide. Keeping them
+        apart is why `caller_in_no_pane` cannot license a rebuild on a caller
+        whose `ps` merely failed (found in cross-model review of this change).
+        """
         listing = self.tmux(
             ["list-panes", "-a", "-F", "#{pane_pid}\t#{pane_tty}"]
         )
         if listing.returncode != 0:
-            return None
+            return None, False
         pane_pids: set[int] = set()
         pane_ttys: set[str] = set()
         for line in listing.stdout.splitlines():
@@ -789,13 +808,13 @@ class Frame:
             pane_ttys |= self._tty_names(tty)
         ancestry = self.caller_ancestry()
         if ancestry is None:
-            return None
+            return None, False
         pids, tty = ancestry
         if any(pid in pane_pids for pid in pids):
-            return False
+            return False, True
         if tty is None:
-            return None
-        return not (self._tty_names(tty) & pane_ttys)
+            return None, True
+        return not (self._tty_names(tty) & pane_ttys), True
 
     def caller_in_no_pane(self) -> bool | None:
         """Is the caller in NO pane of this server? Kernel first, environment last.
@@ -808,6 +827,11 @@ class Frame:
         so a caller carrying neither is in no pane of any server. The IDE socket
         marker cannot stand in for them; it is an ordinary variable that any
         descendant inherits, and it names a socket, never a pane.
+
+        The environment only gets that vote when the kernel evidence was
+        READ and merely silent (`_pane_membership`). If the panes would not
+        list or the process table would not read, nothing was observed and this
+        stays unknown.
 
         That last step is a verdict rather than a deferral because the inert
         outcome here is not safe. On 2026-11-22 a DJ DEV repair recorded
@@ -822,9 +846,14 @@ class Frame:
         still caught, because the kernel reading answers `False` there — an
         ancestor is the pane's own process — and `False` is believed.
         """
-        outside = self.caller_outside_panes()
+        outside, readable = self._pane_membership()
         if outside is not None:
             return outside
+        if not readable:
+            # The panes or the process table could not be read. A caller sitting
+            # in a pane with its tmux variables cleared looks exactly like one
+            # outside, so the environment gets no vote here.
+            return None
         if os.environ.get("TMUX") or self.caller_pane():
             return None
         return True

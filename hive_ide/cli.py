@@ -473,6 +473,15 @@ def _wake(args: argparse.Namespace) -> dict[str, Any]:
     problem = Frame.launch_prompt_problem(args.prompt, driver_id)
     if problem:
         raise _wake_outcome("bad_prompt", 2, problem)
+    # Reconcile FIRST, then read the driver the launch will actually use. The
+    # launch path reconciles anyway, and since a gone reference can now fall
+    # back to an older one rather than only being dropped, the reference checked
+    # here and the one launched could otherwise differ — and a fallback that
+    # resolves to an `attach` would silently drop this prompt while `wake`
+    # reported success.
+    Frame(store, socket=_socket(store, args.tmux_socket)).prepare_agent_launch(record)
+    record = store.find_session(record["id"]) or record
+    driver = record.get("driver") or {}
     if not AgentResumeState.reference_from_driver(driver):
         # Nothing to resume: a launch here would start a NEW conversation.
         raise _wake_outcome("no_conversation", 1)
@@ -865,7 +874,7 @@ def cmd_purge(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
-    store, _ = _context(args)
+    store, config = _context(args)
     if store.find_session(args.session_id) is None:
         raise UsageError(f"No session with id {args.session_id}.")
     document = {
@@ -903,7 +912,22 @@ def cmd_status_event(args: argparse.Namespace) -> dict[str, Any]:
             else None
         )
         if owner is None:
-            agents.remember(args.driver, args.conversation_reference)
+            # The same rule as the in-process hook: an id that has held no turn
+            # may fill an empty slot but never displace a different reference.
+            # This entry point is the one an external hook config calls, so a
+            # gate on only the other one would be no gate at all.
+            agents.remember(
+                args.driver,
+                args.conversation_reference,
+                proven=ConversationGuard(
+                    store, registry=configured_registry(config)
+                ).had_a_turn(
+                    args.driver,
+                    args.conversation_reference,
+                    working_dir=str(record.get("working_dir") or ""),
+                    state=args.state,
+                ),
+            )
         if (record.get("driver") or {}).get("id") == args.driver:
             agents.mark_active(args.driver)
         record["last_active"] = document["observed_at"]

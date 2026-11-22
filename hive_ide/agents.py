@@ -76,14 +76,11 @@ class AgentResumeState:
             return True
         if current and not proven:
             return False
-        if current:
-            self._set_history(
-                driver_id,
-                [current, *(r for r in self.history_for(driver_id) if r != current)],
-            )
-        self._set_history(
-            driver_id, [r for r in self.history_for(driver_id) if r != reference]
-        )
+        # One pass, then one trim: dropping the reactivated reference AFTER
+        # trimming would spend a slot on it and evict the oldest entry, which
+        # may be the only survivor left to fall back to.
+        kept = [r for r in self.history_for(driver_id) if r not in (current, reference)]
+        self._set_history(driver_id, [current, *kept] if current else kept)
         self.resume_ids[driver_id] = reference
         return True
 

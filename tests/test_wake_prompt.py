@@ -16,6 +16,7 @@ import sys
 
 import pytest
 
+from hive_ide.agents import AgentResumeState
 from hive_ide.cli import main
 from hive_ide.drivers import bundled_drivers
 from hive_ide.frame import Frame
@@ -338,3 +339,73 @@ def test_the_launch_check_is_bounded(tmp_path, tmux, monkeypatch):
     started = time.monotonic()
     frame._confirm_agent_launch("%2")          # a healthy pane: no marker, alive
     assert 0.3 <= time.monotonic() - started < 1.5
+
+
+# -- wake decides on the conversation it will actually launch ------------------------
+
+SURVIVOR = "9a8b7c6d-5e4f-4312-8211-100f0e0d0c0b"
+
+
+@pytest.fixture
+def live_guard(tmp_path, monkeypatch):
+    """The `tmux` fixture stubs the conversation guard out; these two tests are
+    about the guard running, so wire a real transcript store instead."""
+    fake = FakeTmux()
+    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: fake(self, args, **kw))
+    monkeypatch.setattr(Frame, "_refresh_source_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
+    monkeypatch.setattr(Frame, "LAUNCH_SETTLE_SECONDS", 0.0)
+    projects = tmp_path / "claude-config" / "projects"
+    projects.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    fake.projects = projects
+    return fake
+
+
+def _transcript(projects, reference: str) -> None:
+    path = projects / "-p" / f"{reference}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+
+
+def test_wake_refuses_a_conversation_that_is_already_gone(tmp_path, capsys, live_guard):
+    """`wake` used to check the reference BEFORE reconciling it.
+
+    A reference that is gone is not the same as no reference, but the promise is
+    the same: the neighbouring test says a wake must never quietly start a fresh
+    conversation and deliver the prompt there. Before reconciliation moved ahead
+    of these checks, a gone reference passed them, the launch path then dropped
+    it, and the prompt opened an empty conversation. Found in cross-model review
+    of the fallback, which made the pair diverge in a second way as well.
+    """
+    store, record = _session(tmp_path, "claude")  # REFERENCE has no transcript
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    assert (code, out["reason"]) == (1, "no_conversation")
+    assert live_guard.launches() == []
+    assert Frame._is_sleeping(store.find_session(record["id"]))
+
+
+def test_wake_resumes_the_fallback_the_guard_chose(tmp_path, capsys, live_guard):
+    """And when an older conversation does survive, that is what wakes."""
+    store, record = _session(tmp_path, "claude")
+    agents = AgentResumeState(record)
+    agents.remember("claude", SURVIVOR)
+    agents.remember("claude", REFERENCE)
+    store.write("sessions", record["id"], record)
+    _transcript(live_guard.projects, SURVIVOR)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+
+    code, _ = _wake(tmp_path, capsys, record["id"])
+
+    assert code == 0
+    launched = " ".join(
+        call if isinstance(call, str) else " ".join(call)
+        for call in live_guard.launches()
+    )
+    assert SURVIVOR in launched and REFERENCE not in launched
+    assert store.find_session(record["id"])["driver"]["resume"]["reference"] == SURVIVOR
