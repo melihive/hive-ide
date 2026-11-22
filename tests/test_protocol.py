@@ -1756,6 +1756,10 @@ def test_hook_updates_current_driver_when_clear_changes_claude_session(tmp_path,
     monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
     monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
 
+    # A `/clear` announces itself with `SessionStart`, which proves nothing about
+    # whether the new conversation has held a word. The status dot follows it
+    # immediately; the resume reference does not, because an id that has had no
+    # turn must not displace one that has (the 2026-11-22 DJ DEV incident).
     assert IdeHook.main(
         [
             "--state-home",
@@ -1764,7 +1768,28 @@ def test_hook_updates_current_driver_when_clear_changes_claude_session(tmp_path,
             "waiting",
             "--driver",
             "claude",
-            '{"session_id":"background-1"}',
+            '{"session_id":"background-1","hook_event_name":"SessionStart"}',
+        ]
+    ) == 0
+
+    status = store.read("status", record["id"])
+    assert status["conversation_reference"] == "background-1"
+    held = store.find_session(record["id"])
+    assert held["driver"]["resume"]["reference"] == "manual-1"
+    assert held["agents"]["resume_ids"]["claude"] == "manual-1"
+
+    # The first prompt in the cleared conversation is the proof, and the record
+    # switches then — keeping the displaced reference for the guard to fall back
+    # to if the new one is ever lost.
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "claude",
+            '{"session_id":"background-1","hook_event_name":"UserPromptSubmit"}',
         ]
     ) == 0
 
@@ -1773,6 +1798,7 @@ def test_hook_updates_current_driver_when_clear_changes_claude_session(tmp_path,
     updated = store.find_session(record["id"])
     assert updated["driver"]["resume"]["reference"] == "background-1"
     assert updated["agents"]["resume_ids"]["claude"] == "background-1"
+    assert updated["agents"]["resume_history"]["claude"] == ["manual-1"]
     assert updated["driver"]["launch_argv"] == [
         "claude",
         "--resume",
@@ -1824,7 +1850,7 @@ def test_hook_adopts_visible_tmux_pane_when_ide_env_is_missing(tmp_path, monkeyp
             "waiting",
             "--driver",
             "claude",
-            '{"session_id":"visible-pane-1"}',
+            '{"session_id":"visible-pane-1","hook_event_name":"Stop"}',
         ]
     ) == 0
 
@@ -6818,15 +6844,22 @@ def test_a_popup_on_this_server_is_not_the_agent_pane(tmp_path, monkeypatch):
     assert frame.pane_is_caller("%16") is False
 
 
-def test_marker_only_without_a_pane_id_stays_unknown(tmp_path, monkeypatch):
-    """The marker alone is not enough. It is an ordinary environment variable, so
-    a process can carry it from somewhere else; only `$TMUX` is tmux's own witness
-    that this process is on this server."""
+def test_marker_only_without_a_pane_id_is_outside_every_pane(tmp_path, monkeypatch):
+    """The marker alone cannot make us a pane — and with neither tmux variable
+    present we are in no pane at all.
+
+    It is an ordinary environment variable that any descendant inherits, and it
+    names a socket rather than a pane; only `$TMUX` is tmux's own witness that
+    this process is on this server. This asserted `None` until 2026-11-22, when
+    that deferral turned out to be unclearable: see
+    `test_a_caller_with_no_tmux_variables_at_all_is_outside` in
+    `tests/test_repair_self_guard.py` for the incident and the narrowness.
+    """
     frame = _verdict_frame(tmp_path)
     _caller_env(monkeypatch, HIVE_IDE_TMUX_SOCKET="hive-ide-next-aaaa1111")
 
     assert frame.caller_server() is True
-    assert frame.pane_is_caller("%16") is None
+    assert frame.pane_is_caller("%16") is False
 
 
 def test_the_agent_pane_itself_is_still_recognised(tmp_path, monkeypatch):

@@ -9,10 +9,12 @@ from pathlib import Path
 
 import pytest
 
+from hive_ide.agents import AgentResumeState
 from hive_ide.cli import main
 from hive_ide.conversation import ConversationGuard
 from hive_ide.drivers import ConversationState, bundled_drivers
 from hive_ide.frame import Frame
+from hive_ide.hook import IdeHook
 from hive_ide.repair import SessionRepair
 from hive_ide.store import StateStore
 
@@ -326,3 +328,223 @@ def test_adoption_sees_a_parked_reference(tmp_path):
     adopter = ConversationAdopter(store, {})
     assert REF in adopter.existing_references(driver_id="codex")
     assert OTHER in adopter.existing_references(driver_id="claude")
+
+
+# -- a session keeps the conversation it actually had (Phase 84) --------------------
+#
+# All three defects come from one night: 2026-11-22, session DJ DEV. The agent
+# pane's scope was OOM-killed after 4d 23h; a `claude` launch that was never
+# typed into minted `44dcfed8`; its hook event replaced `b5050320` (live since
+# 10-30, 69 MB of transcript) in the record; and the guard then found no
+# transcript for `44dcfed8`, dropped it, and reset the driver to a bare
+# `claude --name "DJ DEV"`. Only a hand-edit kept the conversation.
+
+
+def _hook_env(monkeypatch, tmp_path, store, record) -> None:
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+
+def _hook(store, *, state: str, payload: dict) -> None:
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            state,
+            "--driver",
+            "claude",
+            json.dumps(payload),
+        ]
+    ) == 0
+
+
+def test_a_conversation_with_no_transcript_cannot_displace_one_that_has_it(
+    tmp_path, stores, monkeypatch
+):
+    """The write that cost DJ DEV its conversation, refused.
+
+    `44dcfed8` is a real id from a real launch — it just never held a turn, so
+    no transcript was ever written for it. The status dot may follow it (the
+    pane IS running that process); the resume reference may not.
+    """
+    store, record, _ = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    assert store.read("status", record["id"])["conversation_reference"] == OTHER
+    held = store.find_session(record["id"])
+    assert held["agents"]["resume_ids"]["claude"] == REF
+    assert held["driver"]["resume"]["reference"] == REF
+    assert held["driver"]["launch_argv"] == [
+        "claude", "--resume", REF, "--name", "ALPHA",
+    ]
+
+
+def test_the_same_id_is_taken_once_it_has_a_transcript(tmp_path, stores, monkeypatch):
+    """The other half of the rule: proof is all that was being asked for.
+
+    Nothing about the id changes here — only that the conversation now exists on
+    disk. A gate that refused this too would stop the record ever following a
+    `/clear`.
+    """
+    store, record, _ = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+    _transcript(stores["claude"], OTHER)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["resume"]["reference"] == OTHER
+    # The displaced reference is kept, which is what the fallback below needs.
+    assert updated["agents"]["resume_history"]["claude"] == [REF]
+
+
+def test_a_turn_proves_a_conversation_a_driver_cannot_show_a_transcript_for(
+    tmp_path, stores, monkeypatch
+):
+    """`codex` keeps its rollouts where this package will not look for them, so
+    every reference probes UNKNOWN. A real turn is then the only proof available,
+    and refusing it would stop that driver recording anything at all."""
+    store, record, _ = _session(tmp_path, driver_id="codex", reference=REF)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "codex",
+            json.dumps({"session_id": OTHER, "hook_event_name": "UserPromptSubmit"}),
+        ]
+    ) == 0
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["codex"] == OTHER
+    assert updated["agents"]["resume_history"]["codex"] == [REF]
+
+
+def test_an_unproven_reference_still_fills_an_empty_slot(tmp_path, stores, monkeypatch):
+    """A session with nothing recorded loses nothing by trusting what arrives."""
+    store, record, _ = _session(tmp_path, reference=None)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+
+
+def test_the_guard_falls_back_to_the_newest_reference_that_still_exists(
+    tmp_path, stores
+):
+    """What repair should have done at 22:20:08 instead of resetting the driver."""
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # OTHER has no transcript: it is gone
+
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert result["changed"] is True
+    assert any("fell back to" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == REF
+    assert updated["driver"]["resume"]["reference"] == REF
+    assert updated["driver"]["launch_argv"] == [
+        "claude", "--resume", REF, "--name", "ALPHA",
+    ]
+    assert updated["agents"].get("resume_history", {}).get("claude", []) == []
+
+
+def test_the_guard_starts_fresh_only_when_no_remembered_reference_survives(
+    tmp_path, stores
+):
+    """A history of nothing but gone conversations still ends in a fresh one —
+    and the dead references are pruned rather than retried forever."""
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert result["changed"] is True
+    assert any("starts a fresh conversation" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert "claude" not in updated["agents"]["resume_ids"]
+    assert updated["driver"]["resume"]["reference"] is None
+    assert "--resume" not in updated["driver"]["launch_argv"]
+    assert updated["agents"].get("resume_history", {}).get("claude", []) == []
+
+
+def test_a_remembered_reference_the_driver_cannot_speak_for_is_kept_not_resumed(
+    tmp_path, stores, monkeypatch
+):
+    """UNKNOWN is not EXISTS: resuming it is what makes a pane exit on
+    `--resume`. So it is skipped — and kept, because it may be readable again
+    once whatever hid it (an unmounted home, a renamed config dir) is back."""
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "gone-config"))
+
+    guard = ConversationGuard(store)
+    assert guard.status("claude", REF, str(workspace)).state == ConversationState.UNKNOWN
+    # The ACTIVE reference is unknown too, so nothing is dropped at all.
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert result["changed"] is False
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["agents"]["resume_history"]["claude"] == [REF]
+
+
+def test_the_fallback_refuses_a_remembered_reference_it_cannot_prove(tmp_path, stores):
+    """The active conversation IS gone, and the one behind it cannot be probed.
+
+    A reference the driver cannot speak for is not a survivor: resuming it is
+    what leaves a pane exiting on `--resume`, which is the failure the guard was
+    written for in the first place. So it is skipped — and kept, because unknown
+    is not gone — and the launch starts fresh.
+
+    `not-a-uuid` probes UNKNOWN rather than GONE for `claude`: the id never
+    matches a transcript name, so absence proves nothing about it.
+    """
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", "not-a-uuid")
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+
+    guard = ConversationGuard(store)
+    assert guard.status("claude", OTHER, str(workspace)).state == ConversationState.GONE
+    assert (
+        guard.status("claude", "not-a-uuid", str(workspace)).state
+        == ConversationState.UNKNOWN
+    )
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert any("starts a fresh conversation" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert "claude" not in updated["agents"]["resume_ids"]
+    assert updated["driver"]["resume"]["reference"] is None
+    assert updated["agents"]["resume_history"]["claude"] == ["not-a-uuid"]

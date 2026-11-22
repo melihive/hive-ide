@@ -683,7 +683,7 @@ class Frame:
             #     misreporting and the kernel reading cannot say which.
             # Both cases have tests that predate this and assert deferral; the
             # fix does not get to overrule them by being newer.
-            return False if self.caller_outside_panes() is True else None
+            return False if self.caller_in_no_pane() is True else None
         if server is None or not pane:
             return None
         return pane == pane_id
@@ -797,6 +797,38 @@ class Frame:
             return None
         return not (self._tty_names(tty) & pane_ttys)
 
+    def caller_in_no_pane(self) -> bool | None:
+        """Is the caller in NO pane of this server? Kernel first, environment last.
+
+        `caller_outside_panes` asks the kernel and is believed whenever it can
+        answer either way. When it cannot answer at all — the panes would not
+        list, the process table would not read, nothing in the ancestry has a
+        controlling terminal — the environment settles the one case it can:
+        **tmux exports both `$TMUX` and `$TMUX_PANE` into every pane it creates**,
+        so a caller carrying neither is in no pane of any server. The IDE socket
+        marker cannot stand in for them; it is an ordinary variable that any
+        descendant inherits, and it names a socket, never a pane.
+
+        That last step is a verdict rather than a deferral because the inert
+        outcome here is not safe. On 2026-11-22 a DJ DEV repair recorded
+        `caller_pane: null` with `caller_in_window: null` twice, deferred as
+        "caller location unknown", and told the user to re-run it from another
+        pane or a plain terminal — which is where it already was. `force-rebuild`
+        refuses on the same verdict, so no terminal on the machine could finish
+        the rebuild, and the window stayed broken until the record was edited by
+        hand. A deferral nobody can clear is a stalemate, not caution.
+
+        A caller that strips its own environment inside a pane (`env -i`) is
+        still caught, because the kernel reading answers `False` there — an
+        ancestor is the pane's own process — and `False` is believed.
+        """
+        outside = self.caller_outside_panes()
+        if outside is not None:
+            return outside
+        if os.environ.get("TMUX") or self.caller_pane():
+            return None
+        return True
+
     def pane_ids(self, window_id: str) -> list[str] | None:
         """Every pane id in the window, or `None` when they cannot be observed."""
         result = self.tmux(["list-panes", "-t", window_id, "-F", "#{pane_id}"])
@@ -808,8 +840,9 @@ class Frame:
         """Is the caller inside `window_id`? Tri-state.
 
         `False` is a verdict: the caller is provably outside — not in tmux at all,
-        on a server that both the marker and `$TMUX` say is a different one, or in
-        a listed pane of some other window on this server. `True` is a verdict the
+        on a server that both the marker and `$TMUX` say is a different one, in a
+        listed pane of some other window on this server, or carrying no pane id
+        while `caller_in_no_pane` places it in no pane of this server at all. `True` is a verdict the
         other way. `None` covers everything that cannot be settled: partial or
         conflicting server evidence, a server match without a pane id, or a
         window whose panes could not be listed. A destructive caller treats `None`
@@ -819,6 +852,11 @@ class Frame:
         if server is False:
             return False
         caller = self.caller_pane()
+        if not caller and self.caller_in_no_pane() is True:
+            # No pane of this server holds us, so no window of it does either.
+            # This also answers the marker-only caller that `caller_server`
+            # leaves at `True`, which is the shape that deferred forever.
+            return False
         if server is None or not caller:
             return None
         panes = self.pane_ids(window_id)

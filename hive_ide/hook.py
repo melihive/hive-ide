@@ -47,6 +47,7 @@ from typing import Any
 
 from .agents import AgentResumeState
 from .config import configured_registry, load_config
+from .drivers import ConversationState
 from .paths import config_path
 from .python_cmd import PythonCommand
 from .store import StateStore, utc_now
@@ -276,13 +277,14 @@ class IdeHook:
                     else None
                 )
                 reference_available = owner is None
-                if reference and reference_available:
-                    agents.remember(parsed.driver, reference)
-                if (
-                    reference
-                    and reference_available
-                    and current_driver_matches
-                ):
+                taken = reference_available and agents.remember(
+                    parsed.driver,
+                    reference,
+                    proven=IdeHook._conversation_had_a_turn(
+                        driver, reference, record, payload, parsed.state
+                    ),
+                )
+                if taken and current_driver_matches:
                     agents.mark_active(parsed.driver)
                     record["driver"] = driver.resolve(
                         name=record["name"],
@@ -294,6 +296,46 @@ class IdeHook:
             pass
         return 0
 
+
+    #: Events only a real turn produces. `UserPromptSubmit` opens one and `Stop`
+    #: closes one; `SessionStart` and `Notification` say nothing about whether a
+    #: word was ever exchanged, and a launch that is never typed into sends only
+    #: those.
+    TURN_PROVING_EVENTS = frozenset({TurnSequence.PROMPT, TurnSequence.STOP})
+
+    @staticmethod
+    def _conversation_had_a_turn(
+        driver: Any,
+        reference: str | None,
+        record: dict[str, Any],
+        payload: dict,
+        state: str | None,
+    ) -> bool:
+        """Has this conversation actually been used? Either proof is enough.
+
+        A transcript is the stronger one: `claude` writes the file on the first
+        turn, so a reference with no transcript anywhere is an id that has held
+        no conversation yet. The event is the other, for a driver whose store
+        this package cannot read — it answers UNKNOWN for every reference, and
+        refusing them all would stop it recording anything.
+
+        Only used to decide whether a reference may DISPLACE a different one; an
+        empty slot is filled either way. False on anything unproven, which is
+        the inert direction: the session keeps the conversation it already has,
+        and the next real turn records the new one.
+        """
+        if not reference:
+            return False
+        if TurnSequence.event_name(payload, state) in IdeHook.TURN_PROVING_EVENTS:
+            return True
+        probe = getattr(driver, "conversation_status", None)
+        if not callable(probe):
+            return False
+        try:
+            status = probe(reference, str(record.get("working_dir") or ""))
+        except Exception:
+            return False
+        return getattr(status, "state", None) == ConversationState.EXISTS
 
     @staticmethod
     def _retarget_by_conversation(

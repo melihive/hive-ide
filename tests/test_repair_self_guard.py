@@ -226,9 +226,13 @@ def _tmux_var(socket: str, *, tmpdir: str = "/tmp") -> str:
         (None, None, None, False, False, False),
         # (a) A pane id with no server evidence: unknown.
         ("%3", None, None, None, None, None),
-        # (b) The marker names this server but there is no pane id: the server is
-        # known, the location and the pane are not.
-        (None, THIS, None, True, None, None),
+        # (b) The marker names this server but there is no pane id — and no
+        # `$TMUX` either. tmux exports both into every pane it creates, so this
+        # caller is in no pane of any server; the marker is an inheritable
+        # variable that names a socket, never a pane. Provably outside. (Here
+        # the kernel reading cannot help: there is no such server to list, so
+        # `caller_outside_panes` answers None and the environment decides.)
+        (None, THIS, None, True, False, False),
         # (c) The marker names another server while $TMUX names this one: unknown.
         ("%3", OTHER, _tmux_var(THIS), None, None, None),
         # The mirror conflict: marker says this server, $TMUX says another.
@@ -411,29 +415,60 @@ def test_unknown_caller_location_defers_rebuild_and_skips_pane_helpers(
     assert _pane_pids(live.frame, roles) == pids_before
 
 
-def test_marker_names_this_server_without_a_pane_id_defers(live, monkeypatch):
-    """Marker, no `$TMUX`, no pane id — and the kernel cannot settle it either.
+def test_a_caller_with_no_tmux_variables_at_all_is_outside(live, monkeypatch):
+    """Marker, no `$TMUX`, no pane id, and the kernel cannot settle it either.
 
-    This test used to assert deferral from the ENVIRONMENT alone, which was the
-    only evidence `pane_is_caller` had. It now has a second source: a caller whose
-    controlling terminal belongs to no pane of this server, and none of whose
-    ancestors is a pane's own process, is provably outside. The property this test
-    protects is unchanged and is asserted below — an identity that cannot be
-    settled must never let a pane helper touch a pane — so the kernel reading is
-    pinned to "cannot tell" here, and the two cases where it CAN tell have their
-    own tests: the caller is provably outside (the next test) or provably inside
-    (the one after it).
+    **This test asserted the opposite until 2026-11-22, deliberately.** The
+    property it protected was "an identity that cannot be settled must never let
+    a pane helper touch a pane", and it pinned the kernel reading to "cannot
+    tell" to hold the environment-only case at a deferral.
 
-    `rebuild` still defers on `caller-location-unknown` regardless: that path asks
-    `caller_location`, which this change does not touch.
+    What changed is that the deferral turned out to be unclearable. DJ DEV lost
+    its agent pane to an OOM kill; two repairs recorded `caller_pane: null` and
+    `caller_in_window: null`, deferred as "caller location unknown", and told the
+    user to re-run from another pane or a plain terminal — which is where they
+    already were. `force-rebuild` refuses on the same verdict, so no terminal on
+    the machine could finish the rebuild. A deferral nobody can clear is not the
+    inert outcome; it is a stalemate, and the window stayed broken until the
+    record was edited by hand.
+
+    So the environment now settles exactly one shape: **both** `$TMUX` and
+    `$TMUX_PANE` absent. tmux exports both into every pane it creates, so a
+    caller carrying neither is in no pane of any server, whatever the marker
+    says. The narrowness is the safety, and it is asserted by the two tests
+    below: a caller the kernel places in a pane still defers (`False` from the
+    kernel is believed over the environment), and a caller that still has
+    `$TMUX` — which is what a process double-forked out of a pane looks like,
+    since the environment survives a fork — also still defers.
     """
     roles = live.frame.role_panes(live.record["id"])
-    pids_before = _pane_pids(live.frame, roles)
     live.identity(pane=None, marker=live.socket, tmux=None)
     monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
 
+    assert live.frame.caller_in_no_pane() is True
+    assert live.frame.caller_location(live.window) is False
+    assert live.frame.pane_is_caller(roles["agent"]) is False
+    assert live.frame.rebuild(live.record)["rebuilt"] is True
+
+
+def test_a_caller_that_still_has_tmux_defers_when_the_kernel_cannot_tell(
+    live, monkeypatch
+):
+    """The narrowness of the rule above, pinned.
+
+    `$TMUX` present and the kernel unable to answer is the double-fork shape: a
+    process that forked out of a pane keeps the pane's environment, so the
+    variable is evidence it may still be in one. Only the ABSENCE of both
+    variables is a verdict, so this must stay a deferral.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pids_before = _pane_pids(live.frame, roles)
+    live.identity(pane=None, marker=live.socket, tmux=f"{live.frame.socket_path()},1,0")
+    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
+
+    assert live.frame.caller_in_no_pane() is None
+    assert live.frame.caller_location(live.window) is None
     assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
-    assert live.frame.respawn_agent(live.record, roles["agent"]) is False
     assert _window_ids(live.frame) == [live.window]
     assert _pane_pids(live.frame, roles) == pids_before
 
