@@ -294,7 +294,7 @@ def _build_fakes(monkeypatch, frame_cls):
     monkeypatch.setattr(frame_cls, "_tag", lambda self, target, rec: None)
     monkeypatch.setattr(frame_cls, "_apply_columns", lambda self, target: None)
     monkeypatch.setattr(frame_cls, "_environment", lambda self, rec, role: [])
-    monkeypatch.setattr(frame_cls, "prepare_agent_launch", lambda self, rec: None)
+    monkeypatch.setattr(frame_cls, "prepare_agent_launch", lambda self, rec, **kwargs: None)
     monkeypatch.setattr(frame_cls, "_is_sleeping", lambda self, rec: False)
     monkeypatch.setattr(
         frame_cls, "tmux",

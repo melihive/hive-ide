@@ -393,6 +393,16 @@ class DriverRegistry:
             resume_argv=list(config.get("resume_argv") or []),
             capabilities=tuple(config.get("capabilities") or ("launch",)),
             launch_flags=list(getattr(replaced, "launch_flags", None) or []),
+            # And its conversation probe. A wrapper around `claude` still keeps
+            # its conversations where `claude` does, so dropping the probe made
+            # every reference UNKNOWN: nothing could be reconciled, and `open`
+            # relaunched a dead conversation forever while a live one sat in
+            # the session's own history.
+            conversation_probe=(
+                str(config.get("conversation_probe"))
+                if config.get("conversation_probe")
+                else getattr(replaced, "conversation_probe", None)
+            ),
         )
 
     def get(self, driver_id: str) -> AgentDriver:

@@ -296,7 +296,7 @@ def test_the_cli_forwards_force_to_the_viewer(monkeypatch):
     monkeypatch.setattr(_Store, "find_session", lambda self, sid: {"id": sid}, raising=False)
     monkeypatch.setattr(
         cli.Frame, "__init__",
-        lambda self, store, socket=None: setattr(self, "store", store),
+        lambda self, store, socket=None, **kwargs: setattr(self, "store", store),
     )
     monkeypatch.setattr(
         cli.Frame, "current_plan",

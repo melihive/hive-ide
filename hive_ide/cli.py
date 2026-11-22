@@ -93,6 +93,18 @@ def _context(args: argparse.Namespace) -> tuple[StateStore, dict[str, Any]]:
     return store, config
 
 
+def _config_file(args: argparse.Namespace) -> Path:
+    """The config path THIS command resolved, for the frames it builds.
+
+    `--config` is visible only to the command that was given it, and a frame
+    reconciling a launch resolves the config for itself. Handing it over
+    explicitly keeps one command on one set of drivers; publishing it through
+    the environment would have done the same for child processes, but it also
+    outlives the call and pins every later resolution in the process.
+    """
+    return config_path(getattr(args, "config", None))
+
+
 def _refresh_workspace_sources(store: StateStore) -> None:
     store.refresh_stable_sources(collections=("sessions", "archive"))
 
@@ -362,7 +374,7 @@ def cmd_archive(args: argparse.Namespace) -> dict[str, Any]:
     archived = store.find_session(args.session_id, archived=True)
     if active is None and archived is None:
         raise UsageError(f"No session with id {args.session_id}.")
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     window_existed = args.session_id in frame.windows()
     closed_window = False
     if window_existed:
@@ -387,7 +399,7 @@ def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     _refresh_workspace_sources(store)
     record = store.resume_session(args.session_id)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     frame.ensure(record)
     frame.bind_keys()
     frame.select_session(record["id"])
@@ -400,7 +412,7 @@ def cmd_sleep(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageError("No current session id is available.")
     store, _ = _context(args)
     record = _session(store, session_id, None)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     result = frame.sleep_agent(record)
     now = utc_now()
     record = store.find_session(record["id"]) or record
@@ -479,7 +491,7 @@ def _wake(args: argparse.Namespace) -> dict[str, Any]:
     # here and the one launched could otherwise differ — and a fallback that
     # resolves to an `attach` would silently drop this prompt while `wake`
     # reported success.
-    Frame(store, socket=_socket(store, args.tmux_socket)).prepare_agent_launch(record)
+    Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).prepare_agent_launch(record)
     record = store.find_session(record["id"]) or record
     driver = record.get("driver") or {}
     if not AgentResumeState.reference_from_driver(driver):
@@ -493,15 +505,15 @@ def _wake(args: argparse.Namespace) -> dict[str, Any]:
         # A backgrounded conversation is attached, and an attach carries no prompt.
         raise _wake_outcome("conversation_backgrounded", 1)
 
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
-    # The launch path reconciles again, and a transcript can vanish in between.
-    # Re-read the reference we validated immediately before committing to the
-    # launch: if it is no longer the one we checked, the prompt would open a
-    # FRESH conversation while this command reported a successful wake.
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
+    # The conversation this wake PROMISES. The launch path reconciles the record
+    # once more, so a transcript deleted in between would have it start a fresh
+    # conversation and deliver this prompt there while the command reported
+    # success. Carried down to the launch rather than re-checked here, because
+    # only the launch can refuse after the last reconcile; a mismatch comes back
+    # as a failed launch, which puts the session back to sleep with its prompt
+    # unspent.
     validated = AgentResumeState.reference_from_driver(driver)
-    current = store.find_session(record["id"]) or record
-    if AgentResumeState.reference_from_driver(current.get("driver") or {}) != validated:
-        raise _wake_outcome("no_conversation", 1)
     slept = record.get("sleep")
     record["launch_prompt"] = args.prompt
     store.write("sessions", record["id"], record)
@@ -510,7 +522,7 @@ def _wake(args: argparse.Namespace) -> dict[str, Any]:
     frame.clear_sleep(record)
     record = store.find_session(record["id"]) or record
     try:
-        frame.wake_agent(record)
+        frame.wake_agent(record, expect_reference=validated)
     except (HiveIdeError, OSError) as exc:
         current = store.find_session(record["id"])
         if current is not None:
@@ -534,11 +546,11 @@ def cmd_rename(args: argparse.Namespace) -> dict[str, Any]:
     record["last_active"] = utc_now()
     SessionRepair(
         store,
-        Frame(store, socket=_socket(store, args.tmux_socket)),
+        Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)),
         registry=configured_registry(config),
     ).refresh_driver(record, [], apply=False)
     store.write("sessions", args.session_id, record)
-    Frame(store, socket=_socket(store, args.tmux_socket)).rename(
+    Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).rename(
         args.session_id, record["name"]
     )
     return record
@@ -569,7 +581,7 @@ def cmd_pane_lease(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, None)
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
-    return PaneLeases(Frame(store, socket=_socket(store, args.tmux_socket))).acquire(
+    return PaneLeases(Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))).acquire(
         record,
         role=args.role,
         title=args.title,
@@ -581,7 +593,7 @@ def cmd_pane_lease(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_pane_release(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
-    return PaneLeases(Frame(store, socket=_socket(store, args.tmux_socket))).release(
+    return PaneLeases(Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))).release(
         args.lease, args.token
     )
 
@@ -600,7 +612,7 @@ def cmd_pane_status(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_pane_focus(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     lease = LeaseStore(store).live(record["id"])
     pane = (frame.role_panes(record["id"]) or {}).get(lease["role"]) if lease else None
     if pane:
@@ -613,7 +625,7 @@ def cmd_pane_focus(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_current_plan(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
     _, config = _context(args)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     force = getattr(args, "force", False)
     if args.focus and LeaseStore(store).live(record["id"]) and not force:
         return frame.current_plan(record, focus=True)
@@ -633,14 +645,14 @@ def cmd_scratchpad(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
     if not (record.get("plan") or {}).get("path"):
         return {"ok": False, "reason": "no_plan", "session_id": record["id"]}
-    return Frame(store, socket=_socket(store, args.tmux_socket)).scratchpad(record)
+    return Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).scratchpad(record)
 
 
 def cmd_plan_popup(args: argparse.Namespace) -> dict[str, Any]:
     store, record = _current_record(args)
     if not (record.get("plan") or {}).get("path"):
         return {"ok": False, "reason": "no_plan", "session_id": record["id"]}
-    return Frame(store, socket=_socket(store, args.tmux_socket)).plan_popup(
+    return Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).plan_popup(
         record, mode=args.mode
     )
 
@@ -665,13 +677,13 @@ def cmd_current_chat(args: argparse.Namespace) -> dict[str, Any]:
         )
         with store.mutation_lock():
             store.write("sessions", record["id"], record)
-    return Frame(store, socket=_socket(store, args.tmux_socket)).current_chat(record)
+    return Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).current_chat(record)
 
 
 def cmd_driver_rename(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
     record = _session(store, args.session_id, None)
-    return Frame(store, socket=_socket(store, args.tmux_socket)).driver_rename(
+    return Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).driver_rename(
         record, name=args.name, force=args.force
     )
 
@@ -713,7 +725,7 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
             plan["path"] = args.path
         if args.active_task is not None:
             plan["active_task"] = args.active_task
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     force = bool(getattr(args, "force", False))
     deferred = None
     if plan.get("path") != previous_path:
@@ -745,7 +757,7 @@ def cmd_plan_set(args: argparse.Namespace) -> dict[str, Any]:
     if deferred is not None:
         return dict(record, pane_refresh_deferred=deferred)
     if record["plan"]["path"] != previous_path:
-        Frame(store, socket=_socket(store, args.tmux_socket)).refresh_plan_pane(record)
+        Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).refresh_plan_pane(record)
     return record
 
 
@@ -801,7 +813,7 @@ def cmd_working_dir_set(args: argparse.Namespace) -> dict[str, Any]:
     record["working_dir"] = str(directory)
     record["last_active"] = utc_now()
     store.write("sessions", record["id"], record)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     repair = SessionRepair(
         store, frame, registry=configured_registry(config)
     ).repair(record)
@@ -816,7 +828,7 @@ def cmd_working_dir_set(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
     record = _session(store, args.session_id, None)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     window_id = frame.windows().get(record["id"])
     if window_id and frame.caller_location(window_id) is not False:
         raise UsageError(
@@ -851,7 +863,7 @@ def cmd_force_rebuild(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_relayout(args: argparse.Namespace) -> dict[str, Any]:
     store, _ = _context(args)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     if not frame.exists():
         raise UsageError("The workspace frame is not running.")
     code = IdeRelayout.main(
@@ -874,7 +886,7 @@ def cmd_purge(args: argparse.Namespace) -> dict[str, Any]:
     if not args.confirm:
         raise UsageError("Permanent removal requires --confirm.")
     store, _ = _context(args)
-    Frame(store, socket=_socket(store, args.tmux_socket)).close(args.session_id)
+    Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).close(args.session_id)
     return {
         "session_id": args.session_id,
         "purged": store.purge_session(args.session_id),
@@ -987,7 +999,7 @@ def cmd_clear_error(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_repair(args: argparse.Namespace) -> dict[str, Any]:
     store, config = _context(args)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     repair = SessionRepair(store, frame, registry=configured_registry(config))
     if args.all:
         result = repair.repair_all(
@@ -1116,7 +1128,7 @@ def cmd_switch_driver(args: argparse.Namespace) -> dict[str, Any]:
     else:
         record.pop("handoff", None)
     store.write("sessions", record["id"], record)
-    rebuild = Frame(store, socket=_socket(store, args.tmux_socket)).rebuild(record)
+    rebuild = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).rebuild(record)
     if rebuild.get("deferred"):
         # The record is switched; the window still runs the previous driver. Leave
         # a marker naming the requested driver: a repair run from outside the
@@ -1157,7 +1169,7 @@ def cmd_source_set(args: argparse.Namespace) -> dict[str, Any]:
         args.source, config, default_interpreter=sys.executable
     )
     store.write("sessions", record["id"], record)
-    frame = Frame(store, socket=_socket(store, args.tmux_socket))
+    frame = Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args))
     if record["id"] in frame.windows():
         repair = SessionRepair(
             store, frame, registry=configured_registry(config)

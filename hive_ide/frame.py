@@ -85,8 +85,20 @@ class Frame:
     SIDEBAR_RETRY_SECONDS = 1
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
 
-    def __init__(self, store: StateStore, *, socket: str | None = None):
+    def __init__(
+        self,
+        store: StateStore,
+        *,
+        socket: str | None = None,
+        config_file: str | Path | None = None,
+    ):
         self.store = store
+        #: The config this frame reconciles launches with. A command invoked with
+        #: `--config` selects one that no other process can discover, and a
+        #: reconcile resolving the default instead would re-render a launch from
+        #: the bundled drivers — replacing a wrapper the user explicitly chose.
+        #: None means "resolve it the way every other process does".
+        self.config_file = config_file
         self.settings = store.read_path(store.config_snapshot_path()) or {}
         saved_tmux = self.settings.get("tmux") or {}
         self.socket = (
@@ -815,13 +827,17 @@ class Frame:
         pids, tty = ancestry
         if any(pid in pane_pids for pid in pids):
             return False, True
+        # A process can be WRITING into a pane whatever its controlling terminal
+        # says: a detached child keeps the pane's pty on its own descriptors
+        # while losing the pane from its ancestry (reproduced in review with a
+        # real pty and a double fork), and a helper can hold the pane on stderr
+        # while its controlling terminal is something else entirely. Our own
+        # descriptors are not inheritable evidence, so they always count.
+        held = self._own_tty_names()
+        if held & pane_ttys:
+            return False, True
         if tty is None:
-            # No controlling terminal in the ancestry — but a process can still
-            # be WRITING into a pane: a detached child keeps the pane's pty on
-            # its own descriptors while losing both the terminal and the pane
-            # ancestry (reproduced in review with a real pty and a double fork).
-            # Our own descriptors are not inheritable evidence, so they settle it.
-            return (False, True) if self._own_tty_names() & pane_ttys else (None, True)
+            return None, True
         return not (self._tty_names(tty) & pane_ttys), True
 
     def _own_tty_names(self) -> set[str]:
@@ -2196,11 +2212,15 @@ class Frame:
         leaves the bundled set, which is what every caller had before.
         """
         try:
-            return configured_registry(load_config(config_path()), plugins=True)
+            return configured_registry(
+                load_config(config_path(self.config_file)), plugins=True
+            )
         except (HiveIdeError, OSError, ValueError):
             return DriverRegistry()
 
-    def prepare_agent_launch(self, record: dict[str, Any]) -> None:
+    def prepare_agent_launch(
+        self, record: dict[str, Any], *, expect_reference: str | None = None
+    ) -> None:
         """Drop confirmed-gone conversation refs, and refuse a held conversation.
 
         Every driver launch goes through here — `respawn_agent` and the window
@@ -2215,6 +2235,20 @@ class Frame:
         except (HiveIdeError, OSError):
             # A failed reconcile must never stop a window from opening.
             pass
+        if expect_reference is not None and AgentResumeState.reference_from_driver(
+            record.get("driver") or {}
+        ) != expect_reference:
+            # A caller that already PROMISED this conversation. `wake` validates
+            # a reference and the reconcile above runs again at launch time, so
+            # a transcript deleted in between would have the launch start a
+            # fresh conversation and deliver the caller's one-shot prompt into
+            # it while the command reported success. A per-request decision is
+            # threaded to the place that can still refuse, rather than checked
+            # where another reconcile can follow it.
+            raise HiveIdeError(
+                "The conversation this launch promised is no longer available; "
+                "nothing was started."
+            )
         self.refuse_held_conversation(record)
 
     def refuse_held_conversation(self, record: dict[str, Any]) -> None:
@@ -2278,7 +2312,13 @@ class Frame:
         raw = result.stdout.strip()
         return int(raw) if raw.isdigit() else None
 
-    def respawn_agent(self, record: dict[str, Any], pane_id: str) -> bool:
+    def respawn_agent(
+        self,
+        record: dict[str, Any],
+        pane_id: str,
+        *,
+        expect_reference: str | None = None,
+    ) -> bool:
         """Relaunch the driver in the agent pane.
 
         False, and nothing killed, unless the pane is provably not the caller's.
@@ -2290,7 +2330,7 @@ class Frame:
         """
         if self.pane_is_caller(pane_id) is not False:
             return False
-        self.prepare_agent_launch(record)
+        self.prepare_agent_launch(record, expect_reference=expect_reference)
         result = self.tmux(
             [
                 "respawn-pane",
@@ -2312,7 +2352,9 @@ class Frame:
         self._clear_open_error(record)
         return True
 
-    def wake_agent(self, record: dict[str, Any]) -> str:
+    def wake_agent(
+        self, record: dict[str, Any], *, expect_reference: str | None = None
+    ) -> str:
         """Launch a woken session's driver through the ordinary launch paths.
 
         The caller has already cleared the sleep state and stored the one-shot
@@ -2323,7 +2365,7 @@ class Frame:
         """
         target = self.windows().get(record["id"])
         if not target:
-            target = self.build(record)
+            target = self.build(record, expect_reference=expect_reference)
             self._confirm_agent_launch((self._role_panes_in_window(target) or {}).get("agent"))
             return "built"
         roles = self._role_panes_in_window(target)
@@ -2333,7 +2375,7 @@ class Frame:
                 "The session window's agent pane could not be found; run "
                 "`hive-ide repair` and retry."
             )
-        if not self.respawn_agent(record, pane_id):
+        if not self.respawn_agent(record, pane_id, expect_reference=expect_reference):
             raise HiveIdeError(
                 "The agent pane may be the pane this command runs in; run wake "
                 "from another pane or a plain terminal."
@@ -2821,6 +2863,7 @@ class Frame:
         force: bool = False,
         no_driver: str | bool = False,
         launch_delay: float = 0.0,
+        expect_reference: str | None = None,
     ) -> str:
         PaneLeases(self).check(record["id"], force=force)
         working_dir = record["working_dir"]
@@ -2876,7 +2919,7 @@ class Frame:
         try:
             window = self._finish_build(
                 record, target, working_dir, no_driver=no_driver,
-                launch_delay=launch_delay,
+                launch_delay=launch_delay, expect_reference=expect_reference,
             )
         except BaseException:
             # The window exists but is not a frame window yet: it holds only the
@@ -2899,6 +2942,7 @@ class Frame:
         *,
         no_driver: str | bool = False,
         launch_delay: float = 0.0,
+        expect_reference: str | None = None,
     ) -> str:
         """Fill the window's agent and plan panes.
 
@@ -2914,7 +2958,7 @@ class Frame:
         # is the same mistake as refusing the frame: a check placed where it does
         # not apply. `wake` runs the launch paths, and prepares there.
         if not no_driver and not self._is_sleeping(record):
-            self.prepare_agent_launch(record)
+            self.prepare_agent_launch(record, expect_reference=expect_reference)
         if no_driver:
             agent_command = (
                 self._blocked_agent_command(no_driver)

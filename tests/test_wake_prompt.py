@@ -416,10 +416,14 @@ def test_wake_does_not_report_success_after_the_conversation_vanishes(
 ):
     """The launch path reconciles again after `wake` has had its say.
 
-    Found in review: a transcript can disappear between the two, and then the
-    prompt opens a FRESH conversation while the command reports `woke: true`.
-    `_attach_argv` runs inside that window, so dropping the reference from it
-    stands in for the transcript going away at exactly the wrong moment.
+    Found in review: a transcript can disappear between the two probes, and the
+    prompt then opens a FRESH conversation while the command reports
+    `woke: true`. Re-checking in `wake` could not close this — another reconcile
+    follows it — so the validated reference is carried into the launch, which is
+    the last place that can still refuse.
+
+    `_attach_argv` runs inside exactly that window, so deleting the transcript
+    from it makes the first probe answer EXISTS and the second GONE.
     """
     store, record = _session(tmp_path, "claude")
     _transcript(live_guard.projects, REFERENCE)
@@ -427,17 +431,19 @@ def test_wake_does_not_report_success_after_the_conversation_vanishes(
     live_guard.calls.clear()
 
     def vanish(driver):
-        current = store.find_session(record["id"])
-        if current is not None and current.get("driver", {}).get("resume"):
-            current["driver"]["resume"]["reference"] = None
-            current["agents"]["resume_ids"].pop("claude", None)
-            store.write("sessions", current["id"], current)
+        for path in live_guard.projects.rglob(f"{REFERENCE}.jsonl"):
+            path.unlink()
         return None
 
     monkeypatch.setattr(Frame, "_attach_argv", staticmethod(vanish))
 
     code, out = _wake(tmp_path, capsys, record["id"])
 
-    assert (code, out["reason"]) == (1, "no_conversation")
-    assert live_guard.launches() == []
-    assert Frame._is_sleeping(store.find_session(record["id"]))
+    # Refused by the launch itself: back asleep, prompt unspent, and no driver
+    # started on a conversation nobody validated.
+    assert code == 1 and out["reason"] == "launch_failed"
+    assert "no longer available" in out["detail"]
+    assert not any("--resume" in call for call in live_guard.launches())
+    asleep = store.find_session(record["id"])
+    assert Frame._is_sleeping(asleep)
+    assert "launch_prompt" not in asleep

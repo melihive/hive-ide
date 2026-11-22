@@ -369,7 +369,7 @@ def test_cli_archive_closes_live_window_before_hiding_session(tmp_path, monkeypa
     closed: list[str] = []
 
     class FakeFrame:
-        def __init__(self, _store, *, socket=None):
+        def __init__(self, _store, *, socket=None, **kwargs):
             self.socket = socket
 
         def windows(self):
@@ -418,7 +418,7 @@ def test_cli_archive_refuses_to_hide_session_when_live_window_close_fails(
     )
 
     class FakeFrame:
-        def __init__(self, _store, *, socket=None):
+        def __init__(self, _store, *, socket=None, **kwargs):
             self.socket = socket
 
         def windows(self):
@@ -641,7 +641,7 @@ def test_cli_resume_repairs_and_selects_restored_session(tmp_path, monkeypatch, 
     calls = []
 
     class FakeFrame:
-        def __init__(self, _store, *, socket=None):
+        def __init__(self, _store, *, socket=None, **kwargs):
             self.socket = socket
 
         def ensure(self, restored):

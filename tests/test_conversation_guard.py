@@ -737,18 +737,28 @@ def test_a_frame_reconciles_with_the_configured_drivers_not_the_bundled_ones(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HIVE_IDE_CONFIG", str(config))
     store, _record, _workspace = _session(tmp_path)
+    # No environment channel: `--config` is visible only to the command that was
+    # given it, so the frame must be HANDED the path. Pinning it through the
+    # environment instead would outlive the call and fix every later resolution
+    # in the process.
+    monkeypatch.delenv("HIVE_IDE_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
 
-    assert Frame(store).driver_registry().get("claude").command == [
+    assert Frame(store, config_file=config).driver_registry().get("claude").command == [
         "/custom/claude",
         "--house-flag",
     ]
 
-    # A config that will not load leaves the bundled set rather than raising
-    # into a launch.
-    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "nothing-here.json"))
+    # Handed nothing, a frame resolves the config the way every other process
+    # does — here an empty one, so the bundled drivers stand.
     assert Frame(store).driver_registry().get("claude").command == ["claude"]
+
+    # And a config that will not load leaves the bundled set rather than
+    # raising into the middle of a launch.
+    assert Frame(
+        store, config_file=tmp_path / "nothing-here.json"
+    ).driver_registry().get("claude").command == ["claude"]
 
 
 def test_an_accepted_status_event_moves_the_launch_too(tmp_path, stores, capsys):
@@ -775,3 +785,61 @@ def test_an_accepted_status_event_moves_the_launch_too(tmp_path, stores, capsys)
     assert updated["driver"]["resume"]["reference"] == OTHER
     assert OTHER in updated["driver"]["launch_argv"]
     assert REF not in updated["driver"]["launch_argv"]
+
+
+# -- cross-model review of Phase 84 (round 3) ---------------------------------------
+
+
+def test_a_record_whose_launch_disagrees_keeps_both_conversations(tmp_path, stores):
+    """An upgrade case: `resume_ids` says B, the launch still resumes A.
+
+    Older versions of this package could write exactly that — they moved
+    `resume_ids` without re-rendering the launch. An event confirming B then
+    walked straight through the equality check, the launch was re-rendered to B,
+    and A was gone from the record entirely: the next repair found B dead and
+    started fresh, with nothing to fall back to. Found in review.
+    """
+    store, record, workspace = _session(tmp_path, reference=REF)
+    record["agents"]["resume_ids"]["claude"] = OTHER  # the inconsistent state
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+
+    reloaded = store.find_session(record["id"])
+    agents = AgentResumeState(reloaded)
+    assert agents.reference_for("claude") == OTHER
+    assert agents.history_for("claude") == [REF]
+
+    # B is confirmed, and A is still the fallback rather than a casualty.
+    assert agents.remember("claude", OTHER) is True
+    store.write("sessions", reloaded["id"], reloaded)
+    result = ConversationGuard(store).check(
+        reloaded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("fell back to" in action for action in result["actions"])
+    assert store.find_session(record["id"])["agents"]["resume_ids"]["claude"] == REF
+
+
+def test_a_configured_wrapper_keeps_the_probe_of_the_driver_it_replaces(tmp_path):
+    """Found in review: `add_declarative` dropped the conversation probe, so a
+    wrapper around `claude` answered UNKNOWN for every reference. Nothing could
+    be reconciled, and `open` relaunched a dead conversation forever while a
+    live one sat in the session's own history."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+        },
+    )
+
+    assert registry.get("claude").conversation_probe == "claude"
+    # And an explicit one still wins, for a wrapper that keeps its own store.
+    registry.add_declarative(
+        "codex",
+        {"label": "C", "command": ["/c"], "conversation_probe": "claude"},
+    )
+    assert registry.get("codex").conversation_probe == "claude"

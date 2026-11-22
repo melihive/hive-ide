@@ -1679,3 +1679,22 @@ def test_a_caller_still_writing_into_a_pane_is_not_outside_it(live, monkeypatch)
     assert live.frame.caller_in_no_pane() is False
     assert live.frame.caller_location(live.window) is None
     assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
+
+
+def test_a_pane_held_on_stderr_counts_even_with_another_terminal(live, monkeypatch):
+    """Found in review round 3: the own-descriptor check ran only when the
+    ancestry had no controlling terminal at all. A helper can have a different
+    controlling terminal while still holding the target pane on stderr, and that
+    combination was read as outside."""
+    roles = live.frame.role_panes(live.record["id"])
+    pane_tty = live.frame.pane_tty(roles["agent"])
+    assert pane_tty.startswith("/dev/")
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(
+        Frame, "caller_ancestry", lambda self: ([os.getpid()], "/dev/pts/999")
+    )
+    monkeypatch.setattr(os, "ttyname", lambda fd: pane_tty if fd == 2 else "/dev/null")
+
+    assert live.frame._pane_membership() == (False, True)
+    assert live.frame.caller_in_no_pane() is False
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"

@@ -33,13 +33,28 @@ class AgentResumeState:
         return reference if isinstance(reference, str) and reference else None
 
     def seed_current_driver(self) -> None:
+        """Take the launched conversation into the driver's references.
+
+        Usually `resume_ids` already names it. When it names a DIFFERENT one the
+        record is internally inconsistent — which older versions of this package
+        could write, by moving `resume_ids` without re-rendering the launch — and
+        the launched reference is then the one that is actually in use. It is
+        remembered rather than ignored, so an event that confirms the other one
+        cannot quietly make it the last trace of a real conversation.
+        """
         driver = self.record.get("driver")
         if not isinstance(driver, dict):
             return
         driver_id = driver.get("id")
         reference = self.reference_from_driver(driver)
-        if isinstance(driver_id, str) and driver_id and reference:
-            self.resume_ids.setdefault(driver_id, reference)
+        if not (isinstance(driver_id, str) and driver_id and reference):
+            return
+        current = self.reference_for(driver_id)
+        if not current:
+            self.resume_ids[driver_id] = reference
+            return
+        if current != reference and reference not in self.history_for(driver_id):
+            self._set_history(driver_id, [reference, *self.history_for(driver_id)])
 
     #: How many displaced references to keep per driver. The fallback only ever
     #: wants the newest one that still exists; a long tail is dead weight that
