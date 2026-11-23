@@ -99,10 +99,13 @@ def test_reference_free_status_event_after_forget_does_not_reclaim_another_sessi
         "the guard forgets a conversation that is gone"
     )
 
-    # B legitimately attaches X.
-    b = _session(store, "B", None)
-    AgentResumeState(b).remember("claude", X)
-    store.write("sessions", b["id"], b)
+    # B legitimately attaches X. Its LAUNCH has to name X too, not just its
+    # slot: `refuse_owned_conversation` is bounded by the rendered argv, so a B
+    # whose command carries no reference makes the "B can still launch"
+    # assertion below vacuous — it would pass on any code at all.
+    b = _session(store, "B", X)
+    assert X in " ".join(b["driver"]["launch_argv"]), "B's command really resumes X"
+    assert b["agents"]["resume_ids"]["claude"] == X
 
     # One status event for A, carrying NO conversation reference.
     cli.cmd_status_event(
@@ -128,11 +131,14 @@ def test_reference_free_status_event_after_forget_does_not_reclaim_another_sessi
     )
     assert b_after["agents"]["resume_ids"]["claude"] == X, "B still holds X"
 
-    # And the consequences, which are what the user would actually hit.
+    # And the consequences, which are what the user would actually hit. Both
+    # records now carry X in their rendered command, so the ownership guard
+    # really does look up an owner for each of them.
     frame = Frame(store, socket="sock")
     frame.refuse_owned_conversation(b_after)        # B can launch its own chat
-    with pytest.raises(HeldConversationError):
+    with pytest.raises(HeldConversationError) as refusal:
         frame.refuse_owned_conversation(a_after)    # A may not resume B's
+    assert "B" in str(refusal.value), "the refusal names the session that owns X"
 
 
 def test_creating_a_session_on_a_conversation_claims_it_on_the_first_write(
