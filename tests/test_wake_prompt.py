@@ -16,6 +16,7 @@ import sys
 
 import pytest
 
+from hive_ide.agents import AgentResumeState
 from hive_ide.cli import main
 from hive_ide.drivers import bundled_drivers
 from hive_ide.frame import Frame
@@ -338,3 +339,191 @@ def test_the_launch_check_is_bounded(tmp_path, tmux, monkeypatch):
     started = time.monotonic()
     frame._confirm_agent_launch("%2")          # a healthy pane: no marker, alive
     assert 0.3 <= time.monotonic() - started < 1.5
+
+
+# -- wake decides on the conversation it will actually launch ------------------------
+
+SURVIVOR = "9a8b7c6d-5e4f-4312-8211-100f0e0d0c0b"
+
+
+@pytest.fixture
+def live_guard(tmp_path, monkeypatch):
+    """The `tmux` fixture stubs the conversation guard out; these two tests are
+    about the guard running, so wire a real transcript store instead."""
+    fake = FakeTmux()
+    monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: fake(self, args, **kw))
+    monkeypatch.setattr(Frame, "_refresh_source_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
+    monkeypatch.setattr(Frame, "LAUNCH_SETTLE_SECONDS", 0.0)
+    projects = tmp_path / "claude-config" / "projects"
+    projects.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    fake.projects = projects
+    return fake
+
+
+def _transcript(projects, reference: str) -> None:
+    path = projects / "-p" / f"{reference}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+
+
+def test_wake_refuses_a_conversation_that_is_already_gone(tmp_path, capsys, live_guard):
+    """`wake` used to check the reference BEFORE reconciling it.
+
+    A reference that is gone is not the same as no reference, but the promise is
+    the same: the neighbouring test says a wake must never quietly start a fresh
+    conversation and deliver the prompt there. Before reconciliation moved ahead
+    of these checks, a gone reference passed them, the launch path then dropped
+    it, and the prompt opened an empty conversation. Found in cross-model review
+    of the fallback, which made the pair diverge in a second way as well.
+    """
+    store, record = _session(tmp_path, "claude")  # REFERENCE has no transcript
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    assert (code, out["reason"]) == (1, "no_conversation")
+    assert live_guard.launches() == []
+    assert Frame._is_sleeping(store.find_session(record["id"]))
+
+
+def test_wake_resumes_the_fallback_the_guard_chose(tmp_path, capsys, live_guard):
+    """And when an older conversation does survive, that is what wakes."""
+    store, record = _session(tmp_path, "claude")
+    agents = AgentResumeState(record)
+    agents.remember("claude", SURVIVOR)
+    agents.remember("claude", REFERENCE)
+    store.write("sessions", record["id"], record)
+    _transcript(live_guard.projects, SURVIVOR)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+
+    code, _ = _wake(tmp_path, capsys, record["id"])
+
+    assert code == 0
+    launched = " ".join(
+        call if isinstance(call, str) else " ".join(call)
+        for call in live_guard.launches()
+    )
+    assert SURVIVOR in launched and REFERENCE not in launched
+    assert store.find_session(record["id"])["driver"]["resume"]["reference"] == SURVIVOR
+
+
+def test_wake_does_not_report_success_after_the_conversation_vanishes(
+    tmp_path, capsys, live_guard, monkeypatch
+):
+    """The launch path reconciles again after `wake` has had its say.
+
+    Found in review: a transcript can disappear between the two probes, and the
+    prompt then opens a FRESH conversation while the command reports
+    `woke: true`. Re-checking in `wake` could not close this — another reconcile
+    follows it — so the validated reference is carried into the launch, which is
+    the last place that can still refuse.
+
+    `_attach_argv` runs inside exactly that window, so deleting the transcript
+    from it makes the first probe answer EXISTS and the second GONE.
+    """
+    store, record = _session(tmp_path, "claude")
+    _transcript(live_guard.projects, REFERENCE)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+
+    def vanish(driver):
+        for path in live_guard.projects.rglob(f"{REFERENCE}.jsonl"):
+            path.unlink()
+        return None
+
+    monkeypatch.setattr(Frame, "_attach_argv", staticmethod(vanish))
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    # Refused by the launch itself: back asleep, prompt unspent, and no driver
+    # started on a conversation nobody validated.
+    assert code == 1 and out["reason"] == "launch_failed"
+    assert "no longer available" in out["detail"]
+    assert not any("--resume" in call for call in live_guard.launches())
+    asleep = store.find_session(record["id"])
+    assert Frame._is_sleeping(asleep)
+    assert "launch_prompt" not in asleep
+
+
+def test_wake_refuses_when_the_conversation_went_to_the_background(
+    tmp_path, capsys, live_guard, monkeypatch
+):
+    """Found in review round 4: checking the reference was not enough.
+
+    If a background host for the SAME conversation appears after `wake`
+    validated it, the launch resolves to `attach` — and an attach carries no
+    argv, so the one-shot prompt is dropped while the command reports success.
+    """
+    store, record = _session(tmp_path, "claude")
+    _transcript(live_guard.projects, REFERENCE)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+    attach: list[str] = []
+
+    original = Frame._attach_argv  # bound classmethod, captured before the patch
+
+    def appears(driver):
+        # Empty until wake has had its say, then the host exists.
+        if not attach:
+            attach.append("now")
+            return original(driver)
+        return ["claude", "attach", REFERENCE]
+
+    monkeypatch.setattr(Frame, "_attach_argv", staticmethod(appears))
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    assert code == 1 and out["reason"] == "launch_failed"
+    assert "carries no prompt" in out["detail"]
+    asleep = store.find_session(record["id"])
+    assert Frame._is_sleeping(asleep)
+    assert "launch_prompt" not in asleep
+
+
+def test_a_background_host_appearing_late_cannot_eat_the_prompt(
+    tmp_path, capsys, live_guard, monkeypatch
+):
+    """Round 6: `prepare_agent_launch` read the background host and
+    `_agent_command` read it again, so a host appearing in between made the two
+    disagree — validation passed, the command became an attach, and the prompt
+    went nowhere while `wake` reported success.
+
+    One decision now: a launch carrying a one-shot prompt never attaches. Here
+    the host appears only for the SECOND read, which used to be the losing case.
+    """
+    store, record = _session(tmp_path, "claude")
+    _transcript(live_guard.projects, REFERENCE)
+    _sleep(tmp_path, record)
+    live_guard.calls.clear()
+    reads: list[int] = []
+    original = Frame._attach_argv
+
+    def late(driver):
+        # Three reads on this path: `wake`'s own backgrounded check, the
+        # validation inside `prepare_agent_launch`, and finally the one that
+        # BUILDS the command. The host appears only for the last, which is the
+        # read the earlier fixes could not see.
+        reads.append(1)
+        if len(reads) <= 2:
+            return original(driver)
+        return ["claude", "attach", REFERENCE]
+
+    monkeypatch.setattr(Frame, "_attach_argv", staticmethod(late))
+
+    code, out = _wake(tmp_path, capsys, record["id"])
+
+    launched = " ".join(
+        call if isinstance(call, str) else " ".join(call)
+        for call in live_guard.launches()
+    )
+    # Strictly: the launch that ran carries the prompt, and is not an attach.
+    # Accepting "either a resume or a refusal" let the guard be removed with the
+    # test still green (found by mutation).
+    assert (code, out.get("reason")) == (0, None), out
+    assert "attach" not in launched
+    assert PROMPT in launched
+    assert len(reads) >= 3, reads  # the build-time read is the one that used to win

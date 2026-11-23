@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from .agents import AgentResumeState
 from .frame import Frame
 from .store import StateStore
 
@@ -62,8 +63,11 @@ class SessionHealth:
                 "status hook observed_at is older than session last_active; "
                 "activity ordering may be stale until the agent emits a fresh status event"
             )
-        resume = driver.get("resume") or {}
-        if resume.get("reference") and not status.get("conversation_reference"):
+        # "Remembered" is the session's own reference, which a status event moves
+        # without touching the launch argv; asking the argv would stop warning for
+        # exactly the sessions whose status rows have the most to report.
+        remembered = AgentResumeState.session_reference(record)
+        if remembered and not status.get("conversation_reference"):
             warnings.append(
                 "status hook did not report the remembered conversation reference; "
                 "resume still uses the session record, but status diagnostics are partial"

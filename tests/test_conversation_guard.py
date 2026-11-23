@@ -9,10 +9,18 @@ from pathlib import Path
 
 import pytest
 
+from hive_ide.agents import AgentResumeState
 from hive_ide.cli import main
+from hive_ide.config import configured_registry, load_config
 from hive_ide.conversation import ConversationGuard
-from hive_ide.drivers import ConversationState, bundled_drivers
+from hive_ide.drivers import (
+    ConversationProbe,
+    ConversationState,
+    DriverRegistry,
+    bundled_drivers,
+)
 from hive_ide.frame import Frame
+from hive_ide.hook import IdeHook
 from hive_ide.repair import SessionRepair
 from hive_ide.store import StateStore
 
@@ -326,3 +334,1034 @@ def test_adoption_sees_a_parked_reference(tmp_path):
     adopter = ConversationAdopter(store, {})
     assert REF in adopter.existing_references(driver_id="codex")
     assert OTHER in adopter.existing_references(driver_id="claude")
+
+
+# -- a session keeps the conversation it actually had (Phase 84) --------------------
+#
+# All three defects come from one night: 2026-11-22, session DJ DEV. The agent
+# pane's scope was OOM-killed after 4d 23h; a `claude` launch that was never
+# typed into minted `44dcfed8`; its hook event replaced `b5050320` (live since
+# 10-30, 69 MB of transcript) in the record; and the guard then found no
+# transcript for `44dcfed8`, dropped it, and reset the driver to a bare
+# `claude --name "DJ DEV"`. Only a hand-edit kept the conversation.
+
+
+def _hook_env(monkeypatch, tmp_path, store, record) -> None:
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+
+
+def _hook(store, *, state: str, payload: dict) -> None:
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            state,
+            "--driver",
+            "claude",
+            json.dumps(payload),
+        ]
+    ) == 0
+
+
+def test_a_conversation_with_no_transcript_cannot_displace_one_that_has_it(
+    tmp_path, stores, monkeypatch
+):
+    """The write that cost DJ DEV its conversation, refused.
+
+    `44dcfed8` is a real id from a real launch — it just never held a turn, so
+    no transcript was ever written for it. The status dot may follow it (the
+    pane IS running that process); the resume reference may not.
+    """
+    store, record, _ = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    assert store.read("status", record["id"])["conversation_reference"] == OTHER
+    held = store.find_session(record["id"])
+    assert held["agents"]["resume_ids"]["claude"] == REF
+    assert held["driver"]["resume"]["reference"] == REF
+    assert held["driver"]["launch_argv"] == [
+        "claude", "--resume", REF, "--name", "ALPHA",
+    ]
+
+
+def test_the_same_id_is_taken_once_it_has_a_transcript(tmp_path, stores, monkeypatch):
+    """The other half of the proof rule: proof is all that was being asked for.
+
+    Nothing about the id changes here — only that the conversation now exists on
+    disk. A gate that refused this too would stop the record ever following a
+    `/clear`. The launch is left to launch time (see the test above); what an
+    event owns is `resume_ids` and the displaced reference behind it.
+    """
+    store, record, _ = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+    _transcript(stores["claude"], OTHER)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    # The displaced reference is kept, which is what the fallback needs.
+    assert updated["agents"]["resume_history"]["claude"] == [REF]
+
+
+def test_a_turn_proves_a_conversation_a_driver_cannot_show_a_transcript_for(
+    tmp_path, stores, monkeypatch
+):
+    """`codex` keeps its rollouts where this package will not look for them, so
+    every reference probes UNKNOWN. A real turn is then the only proof available,
+    and refusing it would stop that driver recording anything at all."""
+    store, record, _ = _session(tmp_path, driver_id="codex", reference=REF)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "working",
+            "--driver",
+            "codex",
+            json.dumps({"session_id": OTHER, "hook_event_name": "UserPromptSubmit"}),
+        ]
+    ) == 0
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["codex"] == OTHER
+    assert updated["agents"]["resume_history"]["codex"] == [REF]
+
+
+def test_an_unproven_reference_still_fills_an_empty_slot(tmp_path, stores, monkeypatch):
+    """A session with nothing recorded loses nothing by trusting what arrives."""
+    store, record, _ = _session(tmp_path, reference=None)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+
+
+def test_the_guard_falls_back_to_the_newest_reference_that_still_exists(
+    tmp_path, stores
+):
+    """What repair should have done at 22:20:08 instead of resetting the driver."""
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # OTHER has no transcript: it is gone
+
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert result["changed"] is True
+    assert any("now resumes" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == REF
+    assert updated["driver"]["resume"]["reference"] == REF
+    assert updated["driver"]["launch_argv"] == [
+        "claude", "--resume", REF, "--name", "ALPHA",
+    ]
+    assert updated["agents"].get("resume_history", {}).get("claude", []) == []
+
+
+def test_the_guard_starts_fresh_only_when_no_remembered_reference_survives(
+    tmp_path, stores
+):
+    """A history of nothing but gone conversations still ends in a fresh one —
+    and the dead references are pruned rather than retried forever."""
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert result["changed"] is True
+    assert any("starts fresh" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert "claude" not in updated["agents"]["resume_ids"]
+    assert updated["driver"]["resume"]["reference"] is None
+    assert "--resume" not in updated["driver"]["launch_argv"]
+    assert updated["agents"].get("resume_history", {}).get("claude", []) == []
+
+
+def test_a_remembered_reference_the_driver_cannot_speak_for_is_kept_not_resumed(
+    tmp_path, stores, monkeypatch
+):
+    """UNKNOWN is not EXISTS: resuming it is what makes a pane exit on
+    `--resume`. So it is skipped — and kept, because it may be readable again
+    once whatever hid it (an unmounted home, a renamed config dir) is back."""
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "gone-config"))
+
+    guard = ConversationGuard(store)
+    assert guard.status("claude", REF, str(workspace)).state == ConversationState.UNKNOWN
+    # The ACTIVE reference is unknown too, so nothing is dropped at all.
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert result["changed"] is False
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["agents"]["resume_history"]["claude"] == [REF]
+
+
+def test_the_fallback_refuses_a_remembered_reference_it_cannot_prove(tmp_path, stores):
+    """The active conversation IS gone, and the one behind it cannot be probed.
+
+    A reference the driver cannot speak for is not a survivor: resuming it is
+    what leaves a pane exiting on `--resume`, which is the failure the guard was
+    written for in the first place. So it is skipped — and kept, because unknown
+    is not gone — and the launch starts fresh.
+
+    `not-a-uuid` probes UNKNOWN rather than GONE for `claude`: the id never
+    matches a transcript name, so absence proves nothing about it.
+    """
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", "not-a-uuid")
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+
+    guard = ConversationGuard(store)
+    assert guard.status("claude", OTHER, str(workspace)).state == ConversationState.GONE
+    assert (
+        guard.status("claude", "not-a-uuid", str(workspace)).state
+        == ConversationState.UNKNOWN
+    )
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert any("starts fresh" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert "claude" not in updated["agents"]["resume_ids"]
+    assert updated["driver"]["resume"]["reference"] is None
+    assert updated["agents"]["resume_history"]["claude"] == ["not-a-uuid"]
+
+
+# -- cross-model review of Phase 84 (round 1) ---------------------------------------
+
+
+def test_the_fallback_never_reclaims_a_conversation_another_session_took(
+    tmp_path, stores
+):
+    """A displaced reference is fair game for another session to attach.
+
+    Found in review: `_previous_that_survives` asked only whether a candidate
+    still EXISTS. If session B attached it in the meantime, adopting it here
+    would put two drivers on one conversation — the fault that leaves a pane
+    permanently blank, and the reason `refuse_held_conversation` exists.
+    """
+    store, record, workspace = _session(tmp_path, reference=OTHER)
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # REF exists, OTHER does not
+    neighbour = store.create_session(
+        name="BETA",
+        working_dir=workspace,
+        source=_source(),
+        driver=bundled_drivers()["claude"].resolve(
+            name="BETA", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    assert store.find_conversation_owner(
+        driver_id="claude", reference=REF, exclude_session_id=record["id"]
+    )["id"] == neighbour["id"]
+
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert any("starts fresh" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert "claude" not in updated["agents"]["resume_ids"]
+    assert updated["driver"]["resume"]["reference"] is None
+    # BETA keeps it, untouched.
+    assert store.find_session(neighbour["id"])["driver"]["resume"]["reference"] == REF
+
+
+def test_the_status_event_command_applies_the_same_displacement_rule(
+    tmp_path, stores, capsys
+):
+    """The hook's own CLI entry point is the one an external hook config calls.
+
+    Found in review: gating only the in-process receiver left this one wide
+    open, and a `waiting` event through it replaced the reference while the
+    launch command still pointed at the real conversation.
+    """
+    store, record, workspace = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=waiting",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    held = store.find_session(record["id"])
+    assert held["agents"]["resume_ids"]["claude"] == REF
+    assert store.read("status", record["id"])["conversation_reference"] == OTHER
+
+    # `working` IS a prompt, so the same id is taken.
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    assert store.find_session(record["id"])["agents"]["resume_ids"]["claude"] == OTHER
+
+
+def test_reactivating_a_remembered_reference_keeps_the_oldest_fallback(tmp_path):
+    """Found in review: the history was trimmed BEFORE the reactivated entry was
+    removed, so reopening the newest remembered conversation spent a slot on it
+    and evicted the oldest — which may be the only survivor left."""
+    _, record, _ = _session(tmp_path, reference=None)
+    agents = AgentResumeState(record)
+    references = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(10)]
+    for reference in references:
+        agents.remember("claude", reference)
+
+    history = agents.history_for("claude")
+    assert len(history) == AgentResumeState.HISTORY_LIMIT
+    oldest = history[-1]
+
+    # Reopen the newest remembered conversation: no slot may be spent on it.
+    agents.remember("claude", history[0])
+
+    assert oldest in agents.history_for("claude")
+    assert agents.history_for("claude").count(history[0]) == 0
+
+
+# -- cross-model review of Phase 84 (round 2) ---------------------------------------
+
+
+def test_the_fallback_re_renders_with_the_registry_it_was_given(tmp_path, stores):
+    """Re-rendering a launch must use the drivers THIS installation defines.
+
+    Found in review: the guard was built with the bundled registry, so adopting
+    a fallback rewrote a configured `/custom/claude --resume B` into a bare
+    `claude --resume A --name S`, and every later launch bypassed the configured
+    wrapper and its flags.
+
+    The driver here stands in for a PLUGIN driver, which is the only kind this
+    is reachable with: `add_declarative` does not carry a conversation probe, so
+    a config-declared driver answers UNKNOWN for every reference and the guard
+    never reconciles it at all. That is its own gap, noted on the plan.
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+        },
+    )
+    registry.get("claude").conversation_probe = "claude"
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+
+    ConversationGuard(store, registry=registry).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == REF
+    argv = updated["driver"]["launch_argv"]
+    assert argv[0] == "/custom/claude" and "--house-flag" in argv
+    assert REF in argv and "claude" != argv[0]
+
+
+def test_a_frame_reconciles_with_the_configured_drivers_not_the_bundled_ones(
+    tmp_path, monkeypatch
+):
+    """The other half of that finding: which registry a launch's reconcile uses.
+
+    `prepare_agent_launch` used to build the guard with no registry at all,
+    which means the bundled one whatever this installation configures.
+    """
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "drivers": {
+                    "claude": {
+                        "label": "Claude",
+                        "command": ["/custom/claude", "--house-flag"],
+                        "resume_strategy": "conversation_id",
+                        "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    store, _record, _workspace = _session(tmp_path)
+    # No environment channel: `--config` is visible only to the command that was
+    # given it, so the frame must be HANDED the path. Pinning it through the
+    # environment instead would outlive the call and fix every later resolution
+    # in the process.
+    monkeypatch.delenv("HIVE_IDE_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+
+    assert Frame(store, config_file=config).driver_registry().get("claude").command == [
+        "/custom/claude",
+        "--house-flag",
+    ]
+
+    # Handed nothing, a frame resolves the config the way every other process
+    # does — here an empty one, so the bundled drivers stand.
+    assert Frame(store).driver_registry().get("claude").command == ["claude"]
+
+    # And a config that will not load leaves the bundled set rather than
+    # raising into the middle of a launch.
+    assert Frame(
+        store, config_file=tmp_path / "nothing-here.json"
+    ).driver_registry().get("claude").command == ["claude"]
+
+
+def test_an_event_records_the_conversation_and_the_launch_follows_at_launch_time(
+    tmp_path, stores, capsys
+):
+    """The contract after six review rounds: an event records, a launch renders.
+
+    An event observes which conversation a session is on, and `resume_ids` is
+    where an observation belongs. It no longer rewrites the command, because
+    rendering from an event rebuilds it out of whatever config THAT process
+    resolved — which cost a `--config`-selected wrapper, a name-based `codex`
+    launch and, through `wake`, a prompt delivered to the previous conversation.
+
+    The launch catches up at launch time, where the session's own drivers are
+    known. That is what makes the split safe rather than merely safer, so both
+    halves are asserted here together.
+    """
+    store, record, workspace = _session(tmp_path)
+    _transcript(stores["claude"], REF)
+    _transcript(stores["claude"], OTHER)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    recorded = store.find_session(record["id"])
+    assert recorded["agents"]["resume_ids"]["claude"] == OTHER
+    assert recorded["driver"]["resume"]["reference"] == REF  # untouched by the event
+
+    result = ConversationGuard(store).check(
+        recorded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("now resumes" in action for action in result["actions"])
+    launched = store.find_session(record["id"])["driver"]
+    assert launched["resume"]["reference"] == OTHER
+    assert OTHER in launched["launch_argv"] and REF not in launched["launch_argv"]
+
+
+def test_a_record_whose_launch_disagrees_keeps_the_live_conversation(
+    tmp_path, stores
+):
+    """An upgrade case: `resume_ids` says B, the launch still resumes A.
+
+    Older versions of this package could write exactly that. B is gone and A is
+    alive, so the only correct outcome is the one the launch already has: B is
+    forgotten, A keeps running, and nothing is reset to a fresh conversation.
+    """
+    store, record, workspace = _session(tmp_path, reference=REF)
+    record["agents"]["resume_ids"]["claude"] = OTHER  # the inconsistent state
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # A is alive; B was never written
+
+    reloaded = store.find_session(record["id"])
+    agents = AgentResumeState(reloaded)
+    assert agents.reference_for("claude") == OTHER
+    assert agents.history_for("claude") == [REF]
+
+    result = ConversationGuard(store).check(
+        reloaded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("forgot" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["resume"]["reference"] == REF
+    assert REF in updated["driver"]["launch_argv"]
+
+
+def test_a_configured_wrapper_does_not_inherit_a_conversation_probe(tmp_path):
+    """A probe is opt-IN for a configured driver, and this test asserted the
+    opposite for one round.
+
+    Inheriting it looked like a clear win: a wrapper around `claude` keeps its
+    conversations where `claude` does, so without a probe every reference reads
+    UNKNOWN, nothing can be reconciled, and `open` relaunches a dead
+    conversation forever (review round 3). But the probe reads the IDE's OWN
+    environment to find the store, so a wrapper that sets its own
+    `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would have its LIVE conversations
+    reported GONE and their references deleted — the exact loss this phase
+    exists to prevent, and the opposite of inert (review round 4).
+
+    So the limit stands, and a wrapper that shares the store it wraps says so
+    with the explicit key.
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+        },
+    )
+    assert registry.get("claude").conversation_probe is None
+
+    registry.add_declarative(
+        "codex",
+        {"label": "C", "command": ["/c"], "conversation_probe": "claude"},
+    )
+    assert registry.get("codex").conversation_probe == "claude"
+
+
+
+# -- cross-model review of Phase 84 (round 4) ---------------------------------------
+
+
+def test_the_fallback_re_renders_the_launch_of_a_record_that_disagreed(
+    tmp_path, stores
+):
+    """Found in review: whether the LAUNCH must be rebuilt is a question about
+    the driver, not about one reference.
+
+    An older record can launch A while `resume_ids` says B. Dropping B used to
+    match on the reference, decide the launch was not involved, adopt the
+    survivor and report a successful fallback — while `launch_argv` still
+    resumed a dead A. A second repair then found nothing to do.
+    """
+    third = "7f6e5d4c-3b2a-4190-8876-554433221100"
+    store, record, workspace = _session(tmp_path, reference=third)  # launches a dead A
+    record["agents"]["resume_ids"]["claude"] = OTHER  # and remembers a dead B
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # the survivor, one step back
+
+    reloaded = store.find_session(record["id"])
+    agents = AgentResumeState(reloaded)
+    agents._set_history("claude", [REF, *agents.history_for("claude")])
+    store.write("sessions", reloaded["id"], reloaded)
+
+    result = ConversationGuard(store).check(
+        reloaded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("now resumes" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == REF
+    assert updated["driver"]["resume"]["reference"] == REF
+    assert third not in updated["driver"]["launch_argv"]
+
+
+def test_an_unproven_event_cannot_move_a_launch_that_names_something_else(
+    tmp_path, stores, capsys
+):
+    """Found in review: `remember` short-circuits when `resume_ids` already
+    names the incoming reference, which on an inconsistent record says nothing
+    about what the launch is running. A bare `waiting` event for an unprobeable
+    id could therefore re-render the launch away from a real conversation."""
+    store, record, workspace = _session(tmp_path, reference=REF)
+    record["agents"]["resume_ids"]["claude"] = OTHER
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=waiting",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    held = store.find_session(record["id"])
+    assert held["driver"]["resume"]["reference"] == REF
+    assert REF in held["driver"]["launch_argv"]
+
+
+def test_an_event_that_changes_nothing_keeps_the_configured_launch(
+    tmp_path, stores, capsys
+):
+    """Found in review: the handler re-resolved the launch for every accepted
+    reference, so an ordinary event for the conversation ALREADY running
+    rebuilt the command from this process's config — replacing a wrapper that
+    had been selected with `--config` when the session was created."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+        },
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    _transcript(stores["claude"], REF)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={REF}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]
+
+
+def test_the_hook_receiver_applies_the_same_launch_rule_as_its_cli_twin(
+    tmp_path, stores, monkeypatch
+):
+    """The in-process receiver and `status-event` are two doors to one rule.
+
+    Found by mutation: the CLI side had a test for "an unproven event may not
+    move a launch that names something else" and the hook side did not, so the
+    hook's narrowing could be reverted with the suite still green.
+    """
+    store, record, _ = _session(tmp_path, reference=REF)
+    record["agents"]["resume_ids"]["claude"] = OTHER
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="waiting", payload={"session_id": OTHER, "hook_event_name": "SessionStart"})
+
+    held = store.find_session(record["id"])
+    assert held["driver"]["resume"]["reference"] == REF
+    assert REF in held["driver"]["launch_argv"]
+
+
+# -- cross-model review of Phase 84 (round 5): one rule, three faces ---------------
+#
+# Rounds 1-4 patched the launch re-render case by case and rounds 4 and 5 kept
+# finding another face of it. They are all one mistake: `resolve()` is the only
+# renderer, so re-rendering a launch this package did not produce replaces it
+# with the shape this package knows. Phase 83 settled the same question for the
+# kill path — only the launch this package DEFINES may authorize acting on it.
+
+
+def _wrapper_registry() -> DriverRegistry:
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude", "--house-flag"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/custom/claude", "--house-flag", "--resume"],
+            "conversation_probe": "claude",
+        },
+    )
+    return registry
+
+
+def test_an_event_without_the_sessions_config_leaves_its_launch_alone(
+    tmp_path, stores, capsys
+):
+    """Face one: a session opened with `--config`, an event arriving without it.
+
+    The reference still moves — the next launch this package renders will pick
+    it up — but the wrapper's own command is not rebuilt into the bundled one.
+    """
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    _transcript(stores["claude"], OTHER)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]
+
+
+def test_a_launch_that_resumes_by_name_survives_a_dead_reference_beside_it(
+    tmp_path, stores
+):
+    """Face two: a `codex` session launched by NAME, with a stale dead UUID in
+    `resume_ids`. Codex resumes by name perfectly well, so the dead UUID
+    establishes nothing about the launch the user is actually using — and
+    resetting it to a bare `codex` discards a working session."""
+    store, record, workspace = _session(tmp_path, driver_id="codex", reference=None)
+    named = dict(record["driver"])
+    named["launch_argv"] = ["codex", "resume", "--name", "ALPHA"]
+    named["resume"] = {"reference": None, "strategy": "name"}
+    record["driver"] = named
+    record["agents"]["resume_ids"]["codex"] = REF  # a UUID with no rollout: gone
+    store.write("sessions", record["id"], record)
+
+    reloaded = store.find_session(record["id"])
+    guard = ConversationGuard(store)
+    assert guard.launch_is_ours(reloaded, "codex") is False
+    guard.check(reloaded, working_dir=str(workspace), apply=True)
+
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"] == ["codex", "resume", "--name", "ALPHA"]
+
+
+def test_a_driver_that_cannot_resume_is_not_a_fallback(tmp_path, stores):
+    """Face three: `conversation_probe` is independent of `resume_strategy`, so a
+    wrapper can prove a conversation EXISTS and still have no way to resume it.
+    Adopting one would be a fresh chat wearing a resumed conversation's name."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/custom/claude"],
+            "conversation_probe": "claude",
+        },  # no resume_strategy: cannot resume anything
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # REF exists, OTHER does not
+
+    guard = ConversationGuard(store, registry=registry)
+    assert guard.launch_would_resume(record, "claude", REF) is False
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert not any("now resumes" in action for action in result["actions"])
+    assert REF in agents.history_for("claude")
+
+
+def test_the_hook_receiver_also_refuses_to_rebuild_a_launch_it_cannot_vouch_for(
+    tmp_path, stores, monkeypatch
+):
+    """The hook and `status-event` are two doors to one rule, and mutation has
+    now twice found a rule tested on only one of them."""
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=REF
+        ),
+    )
+    _transcript(stores["claude"], OTHER)
+    # The hook process resolves a config that knows nothing of the wrapper.
+    _hook_env(monkeypatch, tmp_path, store, record)
+
+    _hook(store, state="working", payload={"session_id": OTHER, "hook_event_name": "UserPromptSubmit"})
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+
+
+# -- cross-model review of Phase 84 (round 6): what the split closes --------------
+
+
+def test_a_first_event_on_a_configured_session_leaves_its_wrapper_alone(
+    tmp_path, stores, capsys
+):
+    """Round 6: `not launched` bypassed every vouch check, so the FIRST event on
+    a freshly created configured session rewrote its wrapper into the bundled
+    driver. With events out of the rendering business there is no bypass left to
+    find — the command is rendered once, at launch, from the session's own
+    drivers."""
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S",
+        working_dir=workspace,
+        source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=None
+        ),
+    )
+    assert record["driver"]["launch_argv"][0] == "/custom/claude"
+    _transcript(stores["claude"], OTHER)
+
+    assert main([
+        "--state-home", str(store.home),
+        "--workspace-key", store.workspace_key,
+        "status-event",
+        f"--session-id={record['id']}",
+        "--state=working",
+        "--driver=claude",
+        f"--conversation-reference={OTHER}",
+    ]) == 0
+    capsys.readouterr()
+
+    updated = store.find_session(record["id"])
+    assert updated["agents"]["resume_ids"]["claude"] == OTHER
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]
+
+
+def test_a_bundled_codex_launch_by_name_survives_a_stale_dead_uuid(tmp_path, stores):
+    """Round 6: the name-based `codex` case was NOT fixed, and the test that
+    claimed it was hand-built its argv and took a different branch.
+
+    This one renders the launch with the BUNDLED driver, exactly as `create`
+    does, and puts a gone UUID beside it in `resume_ids`. Codex resumes by name
+    perfectly well, so the dead UUID says nothing about this launch.
+    """
+    # A name-based launch: codex takes the session NAME in the same slot a
+    # rollout id would go, and `ALPHA` probes UNKNOWN rather than GONE.
+    store, record, workspace = _session(tmp_path, driver_id="codex", reference="ALPHA")
+    assert "ALPHA" in record["driver"]["launch_argv"]
+    before = list(record["driver"]["launch_argv"])
+    record["agents"]["resume_ids"]["codex"] = REF  # a UUID with no rollout: gone
+    store.write("sessions", record["id"], record)
+
+    reloaded = store.find_session(record["id"])
+    result = ConversationGuard(store).check(
+        reloaded, working_dir=str(workspace), apply=True
+    )
+
+    assert any("forgot" in action for action in result["actions"])
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"] == before
+    assert "ALPHA" in updated["driver"]["launch_argv"]
+    # The name is seeded back as the driver's own reference; the dead UUID is
+    # gone for good.
+    assert updated["agents"]["resume_ids"].get("codex") in (None, "ALPHA")
+
+
+def test_a_reference_inside_an_argv_element_counts_as_resumable(tmp_path, stores):
+    """Round 6: `launch_would_resume` demanded a whole argv element, so a plugin
+    rendering `--resume=<id>` had every fallback rejected."""
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "label": "Claude",
+            "command": ["/p"],
+            "resume_strategy": "conversation_id",
+            "resume_argv": ["/p", "--resume="],
+            "conversation_probe": "claude",
+        },
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S", working_dir=workspace, source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    guard = ConversationGuard(store, registry=registry)
+    rendered = registry.get("claude").resolve(
+        name="S", working_dir=str(workspace), conversation_reference=REF
+    )
+
+    assert any(REF in part for part in rendered["launch_argv"])
+    assert guard.launch_would_resume(record, "claude", REF) is True
+
+
+class _FusedDriver:
+    """A plugin-shaped driver that fuses the reference into one argv element.
+
+    `add_declarative` always appends the reference as its own element, so a
+    `--resume=<id>` renderer can only come from a plugin. This stands in for
+    one — the registry below is what `load_entry_points` would have produced.
+    """
+
+    id = "claude"
+    label = "Fused"
+    launch_flags: list[str] = []
+
+    def resolve(self, *, name, working_dir, conversation_reference):
+        argv = ["/p"]
+        if conversation_reference:
+            argv.append(f"--resume={conversation_reference}")
+        return {
+            "id": self.id,
+            "label": self.label,
+            "launch_argv": argv,
+            "resume": {
+                "reference": conversation_reference,
+                "strategy": "conversation_id",
+            },
+            "capabilities": ["launch", "resume", "conversation_check"],
+        }
+
+    def conversation_status(self, reference, working_dir):
+        return ConversationProbe.claude(reference)
+
+
+class _FusedRegistry(DriverRegistry):
+    def __init__(self):
+        super().__init__()
+        self._drivers["claude"] = _FusedDriver()
+
+
+def test_a_reference_fused_into_an_argv_element_counts_as_resumable(tmp_path, stores):
+    """Round 6: `launch_would_resume` demanded a whole argv element, so a plugin
+    rendering `--resume=<id>` had every surviving fallback rejected and started
+    fresh instead."""
+    registry = _FusedRegistry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S", working_dir=workspace, source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # REF survives, OTHER does not
+
+    guard = ConversationGuard(store, registry=registry)
+    assert guard.launch_would_resume(record, "claude", REF) is True
+    result = guard.check(record, working_dir=str(workspace), apply=True)
+
+    assert any("now resumes" in action for action in result["actions"])
+    assert f"--resume={REF}" in store.find_session(record["id"])["driver"]["launch_argv"]
+
+
+def test_a_launch_this_installation_cannot_render_is_left_alone_with_a_warning(
+    tmp_path, stores
+):
+    """The vouch gate, asserted where it now lives: at launch time.
+
+    A wrapper's session whose conversation is gone, reconciled by a process that
+    knows nothing of the wrapper. Rewriting the command would replace
+    `/custom/claude --house-flag` with the bundled `claude`; saying so instead
+    leaves a visible stalemate, which beats a silent substitution.
+    """
+    registry = _wrapper_registry()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    store = StateStore(tmp_path / "state", workspace)
+    record = store.create_session(
+        name="S", working_dir=workspace, source=_source(),
+        driver=registry.get("claude").resolve(
+            name="S", working_dir=str(workspace), conversation_reference=OTHER
+        ),
+    )
+    agents = AgentResumeState(record)
+    agents.remember("claude", REF)
+    agents.remember("claude", OTHER)
+    store.write("sessions", record["id"], record)
+    _transcript(stores["claude"], REF)  # a survivor is available...
+
+    # ...but this guard has the BUNDLED drivers, so it cannot render /custom/claude.
+    result = ConversationGuard(store).check(
+        record, working_dir=str(workspace), apply=True
+    )
+
+    assert any("not a command this installation" in w for w in result["warnings"])
+    updated = store.find_session(record["id"])
+    assert updated["driver"]["launch_argv"][0] == "/custom/claude"
+    assert "--house-flag" in updated["driver"]["launch_argv"]

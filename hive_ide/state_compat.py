@@ -6,6 +6,7 @@ rendering behavior stable while state identity and paths move to the public prot
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 
@@ -108,11 +109,24 @@ class StateIO:
         out = dict(record)
         driver = dict(out.get("driver") or {})
         driver_id = driver.get("id") or "term"
-        reference = (driver.get("resume") or {}).get("reference")
+        # The conversation the session is ON. The launched reference is only the
+        # fallback for a record that has never had an event; taking it over one a
+        # status event recorded is how the sidebar came to name the conversation a
+        # session had just left.
+        # Asked WITHOUT the driver id on purpose. `driver_id` here is already a
+        # synthetic fallback — `driver.get("id") or "term"` — and naming it
+        # scopes the accessor's launch fallback to a driver the record does not
+        # claim, so a record whose driver block carries a reference but no id
+        # would project no reference at all, where it used to project one.
+        reference = AgentResumeState.session_reference(out)
         out["repo"] = out.get("workspace_key")
         out["cwd"] = out.get("working_dir")
         plan = out.get("plan")
         out["plan"] = plan.get("path") if isinstance(plan, dict) else plan
+        # `dict(record)` is shallow, so the agents block is still the caller's.
+        # This is a pure read of the record; it must not seed through to it.
+        existing = out.get("agents")
+        out["agents"] = copy.deepcopy(existing) if isinstance(existing, dict) else {}
         agents = AgentResumeState(out)
         agents.remember(driver_id, reference)
         agents.mark_active(driver_id)

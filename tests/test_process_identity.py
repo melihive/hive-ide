@@ -220,12 +220,36 @@ def test_the_guard_uses_kernel_evidence_when_the_environment_cannot_tell(
     ).stdout.split()[0]
 
     # Provably outside every pane -> a verdict, so the guard allows the target.
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: True)
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (True, True))
     assert scratch_frame.pane_is_caller(pane) is False
 
-    # Cannot tell -> still unknown, and the guard still refuses.
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
-    assert scratch_frame.pane_is_caller(pane) is None
+    # Cannot tell, and no tmux variable either -> the environment settles it:
+    # tmux exports `$TMUX` and `$TMUX_PANE` into every pane it creates, so a
+    # caller with neither is in no pane. Until 2026-11-22 this was deferred, and
+    # the deferral proved unclearable (see
+    # `test_a_caller_with_no_tmux_variables_at_all_is_outside`).
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (None, True))
+    assert scratch_frame.pane_is_caller(pane) is False
+
+    # The shape that must STILL be unsettled: `$TMUX` present and the kernel
+    # unable to answer. A process double-forked out of a pane looks exactly like
+    # this, because the environment survives a fork — so the ENVIRONMENT rule
+    # above must not fire for it.
+    #
+    # Asserted on `caller_in_no_pane`, not `pane_is_caller`: with `$TMUX` naming
+    # this server and no pane id at all, `pane_is_caller` answers `False` for an
+    # older and separate reason — tmux exports `$TMUX_PANE` into every pane, so
+    # a process on this server without one is a popup, a `run-shell` or a hook,
+    # none of which can BE a pane. What the double-fork shape must not do is
+    # license a window REBUILD, and that path asks `caller_location`
+    # (`test_a_caller_that_still_has_tmux_defers_when_the_kernel_cannot_tell`).
+    monkeypatch.setenv("TMUX", f"{scratch_frame.socket_path()},1,0")
+    window = subprocess.run(
+        ["tmux", "-L", scratch_frame.socket, "display-message", "-p", "#{window_id}"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert scratch_frame.caller_in_no_pane() is None
+    assert scratch_frame.caller_location(window) is None
 
 
 def test_a_process_table_that_fails_midway_is_unknown_not_truncated(tmp_path, monkeypatch):

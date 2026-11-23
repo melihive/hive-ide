@@ -226,8 +226,13 @@ def _tmux_var(socket: str, *, tmpdir: str = "/tmp") -> str:
         (None, None, None, False, False, False),
         # (a) A pane id with no server evidence: unknown.
         ("%3", None, None, None, None, None),
-        # (b) The marker names this server but there is no pane id: the server is
-        # known, the location and the pane are not.
+        # (b) The marker names this server but there is no pane id, and no
+        # `$TMUX` either. The environment alone would settle this — tmux exports
+        # both into every pane it creates — but this frame has no server, so
+        # `tmux list-panes` fails and the kernel evidence is UNREADABLE rather
+        # than merely silent. Nothing observed, nothing concluded: unknown. The
+        # shape that DOES settle it, against a live server, is
+        # `test_a_caller_with_no_tmux_variables_at_all_is_outside`.
         (None, THIS, None, True, None, None),
         # (c) The marker names another server while $TMUX names this one: unknown.
         ("%3", OTHER, _tmux_var(THIS), None, None, None),
@@ -411,29 +416,62 @@ def test_unknown_caller_location_defers_rebuild_and_skips_pane_helpers(
     assert _pane_pids(live.frame, roles) == pids_before
 
 
-def test_marker_names_this_server_without_a_pane_id_defers(live, monkeypatch):
-    """Marker, no `$TMUX`, no pane id — and the kernel cannot settle it either.
+def test_a_caller_with_no_tmux_variables_at_all_is_outside(live, monkeypatch):
+    """Marker, no `$TMUX`, no pane id, and the kernel cannot settle it either.
 
-    This test used to assert deferral from the ENVIRONMENT alone, which was the
-    only evidence `pane_is_caller` had. It now has a second source: a caller whose
-    controlling terminal belongs to no pane of this server, and none of whose
-    ancestors is a pane's own process, is provably outside. The property this test
-    protects is unchanged and is asserted below — an identity that cannot be
-    settled must never let a pane helper touch a pane — so the kernel reading is
-    pinned to "cannot tell" here, and the two cases where it CAN tell have their
-    own tests: the caller is provably outside (the next test) or provably inside
-    (the one after it).
+    **This test asserted the opposite until 2026-11-22, deliberately.** The
+    property it protected was "an identity that cannot be settled must never let
+    a pane helper touch a pane", and it pinned the kernel reading to "cannot
+    tell" to hold the environment-only case at a deferral.
 
-    `rebuild` still defers on `caller-location-unknown` regardless: that path asks
-    `caller_location`, which this change does not touch.
+    What changed is that the deferral turned out to be unclearable. DJ DEV lost
+    its agent pane to an OOM kill; two repairs recorded `caller_pane: null` and
+    `caller_in_window: null`, deferred as "caller location unknown", and told the
+    user to re-run from another pane or a plain terminal — which is where they
+    already were. `force-rebuild` refuses on the same verdict, so no terminal on
+    the machine could finish the rebuild. A deferral nobody can clear is not the
+    inert outcome; it is a stalemate, and the window stayed broken until the
+    record was edited by hand.
+
+    So the environment now settles exactly one shape: **both** `$TMUX` and
+    `$TMUX_PANE` absent. tmux exports both into every pane it creates, so a
+    caller carrying neither is in no pane of any server, whatever the marker
+    says. The narrowness is the safety, and it is asserted by the two tests
+    below: a caller the kernel places in a pane still defers (`False` from the
+    kernel is believed over the environment), and a caller that still has
+    `$TMUX` — which is what a process double-forked out of a pane looks like,
+    since the environment survives a fork — also still defers.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    # Read in full, silent only about the terminal — the one None the
+    # environment may speak for. The unreadable case has its own test below.
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (None, True))
+
+    assert live.frame.caller_in_no_pane() is True
+    assert live.frame.caller_location(live.window) is False
+    assert live.frame.pane_is_caller(roles["agent"]) is False
+    assert live.frame.rebuild(live.record)["rebuilt"] is True
+
+
+def test_a_caller_that_still_has_tmux_defers_when_the_kernel_cannot_tell(
+    live, monkeypatch
+):
+    """The narrowness of the rule above, pinned.
+
+    `$TMUX` present and the kernel unable to answer is the double-fork shape: a
+    process that forked out of a pane keeps the pane's environment, so the
+    variable is evidence it may still be in one. Only the ABSENCE of both
+    variables is a verdict, so this must stay a deferral.
     """
     roles = live.frame.role_panes(live.record["id"])
     pids_before = _pane_pids(live.frame, roles)
-    live.identity(pane=None, marker=live.socket, tmux=None)
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: None)
+    live.identity(pane=None, marker=live.socket, tmux=f"{live.frame.socket_path()},1,0")
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (None, True))
 
+    assert live.frame.caller_in_no_pane() is None
+    assert live.frame.caller_location(live.window) is None
     assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
-    assert live.frame.respawn_agent(live.record, roles["agent"]) is False
     assert _window_ids(live.frame) == [live.window]
     assert _pane_pids(live.frame, roles) == pids_before
 
@@ -448,7 +486,7 @@ def test_a_caller_provably_outside_every_pane_may_act_on_one(live, monkeypatch):
     """
     roles = live.frame.role_panes(live.record["id"])
     live.identity(pane=None, marker=live.socket, tmux=None)
-    monkeypatch.setattr(Frame, "caller_outside_panes", lambda self: True)
+    monkeypatch.setattr(Frame, "_pane_membership", lambda self: (True, True))
 
     assert live.frame.pane_is_caller(roles["agent"]) is False
 
@@ -1571,3 +1609,113 @@ def test_mutation_lock_non_blocking_refuses_another_threads_hold(tmp_path):
     with store.mutation_lock(blocking=False):
         outcome.append("entered after release")
     assert outcome[-1] == "entered after release"
+
+
+def test_an_unreadable_process_table_is_not_an_invitation_to_rebuild(live, monkeypatch):
+    """The hazard cross-model review found in the rule above.
+
+    A caller inside a pane can lose both tmux variables (`env -i`, a launcher
+    that scrubs its environment). What normally catches it is the kernel: an
+    ancestor is the pane's own process. But if `ps` cannot be read at all, that
+    check answers "cannot tell" — and if the environment were allowed to decide
+    on its own, the caller would be judged outside and the rebuild would kill
+    the window it is running in.
+
+    So the environment only gets a vote when the kernel evidence was READ and
+    merely silent about the terminal. Nothing observed means nothing concluded.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pids_before = _pane_pids(live.frame, roles)
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: None)
+
+    assert live.frame._pane_membership() == (None, False)
+    assert live.frame.caller_in_no_pane() is None
+    assert live.frame.caller_location(live.window) is None
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
+    assert _window_ids(live.frame) == [live.window]
+    assert _pane_pids(live.frame, roles) == pids_before
+
+
+def test_a_readable_table_with_no_terminal_still_settles_it(live, monkeypatch):
+    """The other side of that line, which is the shape the fix exists for.
+
+    An agent harness runs its commands on a pipe, so nothing in the ancestry
+    has a controlling terminal. The panes listed, the ancestry read, and no
+    ancestor is a pane's own process: that is a full reading whose only gap is
+    the terminal, and with neither tmux variable present the caller is in no
+    pane.
+    """
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: ([os.getpid()], None))
+
+    assert live.frame._pane_membership() == (None, True)
+    assert live.frame.caller_in_no_pane() is True
+    assert live.frame.caller_location(live.window) is False
+
+
+def test_a_caller_still_writing_into_a_pane_is_not_outside_it(live, monkeypatch):
+    """A detached child keeps the pane's terminal on its own descriptors.
+
+    Found in review, reproduced there with a real pty and a double fork: such a
+    process has no controlling terminal and no pane in its ancestry (it was
+    reparented), so the two readings the guard had both came back silent — and
+    with its tmux variables cleared the environment rule would call it outside
+    and let the rebuild kill the window it is still printing into.
+
+    `os.ttyname` on our own descriptors cannot be inherited the way an
+    environment variable can, so it settles this. An agent harness runs its
+    commands on pipes, which is why the shape the rule exists for is unaffected
+    (the test above it).
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pane_tty = live.frame.pane_tty(roles["agent"])
+    assert pane_tty.startswith("/dev/")
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: ([os.getpid()], None))
+    monkeypatch.setattr(os, "ttyname", lambda fd: pane_tty if fd == 1 else "/dev/null")
+
+    assert live.frame._pane_membership() == (False, True)
+    assert live.frame.caller_in_no_pane() is False
+    assert live.frame.caller_location(live.window) is None
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
+
+
+def test_a_pane_held_on_stderr_counts_even_with_another_terminal(live, monkeypatch):
+    """Found in review round 3: the own-descriptor check ran only when the
+    ancestry had no controlling terminal at all. A helper can have a different
+    controlling terminal while still holding the target pane on stderr, and that
+    combination was read as outside."""
+    roles = live.frame.role_panes(live.record["id"])
+    pane_tty = live.frame.pane_tty(roles["agent"])
+    assert pane_tty.startswith("/dev/")
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(
+        Frame, "caller_ancestry", lambda self: ([os.getpid()], "/dev/pts/999")
+    )
+    monkeypatch.setattr(os, "ttyname", lambda fd: pane_tty if fd == 2 else "/dev/null")
+
+    assert live.frame._pane_membership() == (False, True)
+    assert live.frame.caller_in_no_pane() is False
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"
+
+
+def test_a_pane_terminal_on_a_high_descriptor_still_counts(live, monkeypatch):
+    """Found in review round 4, reproduced there with a real pty on fd 4.
+
+    A helper can have pipes on its standard streams and the pane's terminal on
+    any descriptor above them. Checking only 0-2 read that as outside and
+    authorized a rebuild of the window it was writing into.
+    """
+    roles = live.frame.role_panes(live.record["id"])
+    pane_tty = live.frame.pane_tty(roles["agent"])
+    assert pane_tty.startswith("/dev/")
+    live.identity(pane=None, marker=live.socket, tmux=None)
+    monkeypatch.setattr(Frame, "caller_ancestry", lambda self: ([os.getpid()], None))
+    monkeypatch.setattr(
+        os, "ttyname", lambda fd: pane_tty if fd == 4 else (_ for _ in ()).throw(OSError)
+    )
+
+    assert live.frame._pane_membership() == (False, True)
+    assert live.frame.caller_in_no_pane() is False
+    assert live.frame.rebuild(live.record)["reason"] == "caller-location-unknown"

@@ -15,11 +15,14 @@ from typing import Any
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
+from .config import configured_registry, load_config
 from .agents import AgentResumeState
 from .conversation import ConversationGuard
+from .drivers import DriverRegistry
 from .errors import HeldConversationError, HiveIdeError, UsageError
 from .holders import ConversationHolders
 from .layout import IdeLayout
+from .paths import config_path
 from .pane_lease import LeaseStore, PaneLeases, serialized
 from .python_cmd import PythonCommand
 from .socket_gc import SocketReaper
@@ -82,8 +85,20 @@ class Frame:
     SIDEBAR_RETRY_SECONDS = 1
     SHELL_COMMANDS = {"sh", "bash", "fish", "zsh"}
 
-    def __init__(self, store: StateStore, *, socket: str | None = None):
+    def __init__(
+        self,
+        store: StateStore,
+        *,
+        socket: str | None = None,
+        config_file: str | Path | None = None,
+    ):
         self.store = store
+        #: The config this frame reconciles launches with. A command invoked with
+        #: `--config` selects one that no other process can discover, and a
+        #: reconcile resolving the default instead would re-render a launch from
+        #: the bundled drivers — replacing a wrapper the user explicitly chose.
+        #: None means "resolve it the way every other process does".
+        self.config_file = config_file
         self.settings = store.read_path(store.config_snapshot_path()) or {}
         saved_tmux = self.settings.get("tmux") or {}
         self.socket = (
@@ -683,7 +698,7 @@ class Frame:
             #     misreporting and the kernel reading cannot say which.
             # Both cases have tests that predate this and assert deferral; the
             # fix does not get to overrule them by being newer.
-            return False if self.caller_outside_panes() is True else None
+            return False if self.caller_in_no_pane() is True else None
         if server is None or not pane:
             return None
         return pane == pane_id
@@ -775,11 +790,30 @@ class Frame:
         reading it as "outside" would let it replace the pane it is sitting in,
         which is the incident the caller guard exists for.
         """
+        return self._pane_membership()[0]
+
+    def _pane_membership(self) -> tuple[bool | None, bool]:
+        """`(caller_outside_panes verdict, was the evidence readable at all)`.
+
+        The two Nones this function used to return mean opposite things to a
+        caller that wants to fall back on the environment:
+
+        - the panes would not list, or the process table would not read: nothing
+          was observed, so nothing may be concluded, and a caller inside a pane
+          that cleared its tmux variables is indistinguishable from one outside;
+        - everything WAS read, no ancestor is a pane's own process, and the only
+          gap is a controlling terminal — which a process started by an agent
+          harness or a systemd unit simply does not have.
+
+        Only the second leaves room for the environment to decide. Keeping them
+        apart is why `caller_in_no_pane` cannot license a rebuild on a caller
+        whose `ps` merely failed (found in cross-model review of this change).
+        """
         listing = self.tmux(
             ["list-panes", "-a", "-F", "#{pane_pid}\t#{pane_tty}"]
         )
         if listing.returncode != 0:
-            return None
+            return None, False
         pane_pids: set[int] = set()
         pane_ttys: set[str] = set()
         for line in listing.stdout.splitlines():
@@ -789,13 +823,100 @@ class Frame:
             pane_ttys |= self._tty_names(tty)
         ancestry = self.caller_ancestry()
         if ancestry is None:
-            return None
+            return None, False
         pids, tty = ancestry
         if any(pid in pane_pids for pid in pids):
-            return False
+            return False, True
+        # A process can be WRITING into a pane whatever its controlling terminal
+        # says: a detached child keeps the pane's pty on its own descriptors
+        # while losing the pane from its ancestry (reproduced in review with a
+        # real pty and a double fork), and a helper can hold the pane on stderr
+        # while its controlling terminal is something else entirely. Our own
+        # descriptors are not inheritable evidence, so they always count.
+        held = self._own_tty_names()
+        if held & pane_ttys:
+            return False, True
         if tty is None:
+            return None, True
+        return not (self._tty_names(tty) & pane_ttys), True
+
+    #: How many of the caller's own descriptors to ask about. Far past the
+    #: standard three, because a helper can hold a pane's pty on any of them,
+    #: and small enough that the scan is a handful of failed syscalls.
+    OWN_DESCRIPTOR_SCAN = 64
+
+    def _own_tty_names(self) -> set[str]:
+        """The terminals this process's own stdin/stdout/stderr are open on.
+
+        `os.ttyname` asks the kernel about a descriptor we hold, so unlike an
+        environment variable it cannot have been inherited from a pane we are
+        not in — and unlike `lsof` it is stdlib and works on macOS too. An
+        agent harness runs its commands on pipes, which is why this stays empty
+        for the shape the no-tmux-variables rule exists for.
+
+        Scanned as a RANGE, not just the standard three: review reproduced a
+        helper with pipes on 0-2 and the pane's pty on fd 4, which the
+        three-descriptor version read as outside. `os.ttyname` on a closed
+        descriptor is a cheap `OSError`, and it needs no `/proc`, so the scan
+        stays portable to macOS.
+        """
+        try:
+            descriptors = [int(name) for name in os.listdir("/proc/self/fd")]
+        except (OSError, ValueError):
+            # No `/proc` (macOS): fall back to a bounded scan. The bound is a
+            # stated limit — a pane terminal held above it reads as outside —
+            # and raising it costs an `lsof` dependency for a shape nothing in
+            # this package produces.
+            descriptors = list(range(self.OWN_DESCRIPTOR_SCAN))
+        names: set[str] = set()
+        for fd in descriptors:
+            try:
+                names |= self._tty_names(os.ttyname(fd))
+            except (OSError, ValueError):
+                continue
+        return names
+
+    def caller_in_no_pane(self) -> bool | None:
+        """Is the caller in NO pane of this server? Kernel first, environment last.
+
+        `caller_outside_panes` asks the kernel and is believed whenever it can
+        answer either way. When it cannot answer at all — the panes would not
+        list, the process table would not read, nothing in the ancestry has a
+        controlling terminal — the environment settles the one case it can:
+        **tmux exports both `$TMUX` and `$TMUX_PANE` into every pane it creates**,
+        so a caller carrying neither is in no pane of any server. The IDE socket
+        marker cannot stand in for them; it is an ordinary variable that any
+        descendant inherits, and it names a socket, never a pane.
+
+        The environment only gets that vote when the kernel evidence was
+        READ and merely silent (`_pane_membership`). If the panes would not
+        list or the process table would not read, nothing was observed and this
+        stays unknown.
+
+        That last step is a verdict rather than a deferral because the inert
+        outcome here is not safe. On 2026-11-22 a DJ DEV repair recorded
+        `caller_pane: null` with `caller_in_window: null` twice, deferred as
+        "caller location unknown", and told the user to re-run it from another
+        pane or a plain terminal — which is where it already was. `force-rebuild`
+        refuses on the same verdict, so no terminal on the machine could finish
+        the rebuild, and the window stayed broken until the record was edited by
+        hand. A deferral nobody can clear is a stalemate, not caution.
+
+        A caller that strips its own environment inside a pane (`env -i`) is
+        still caught, because the kernel reading answers `False` there — an
+        ancestor is the pane's own process — and `False` is believed.
+        """
+        outside, readable = self._pane_membership()
+        if outside is not None:
+            return outside
+        if not readable:
+            # The panes or the process table could not be read. A caller sitting
+            # in a pane with its tmux variables cleared looks exactly like one
+            # outside, so the environment gets no vote here.
             return None
-        return not (self._tty_names(tty) & pane_ttys)
+        if os.environ.get("TMUX") or self.caller_pane():
+            return None
+        return True
 
     def pane_ids(self, window_id: str) -> list[str] | None:
         """Every pane id in the window, or `None` when they cannot be observed."""
@@ -808,8 +929,9 @@ class Frame:
         """Is the caller inside `window_id`? Tri-state.
 
         `False` is a verdict: the caller is provably outside — not in tmux at all,
-        on a server that both the marker and `$TMUX` say is a different one, or in
-        a listed pane of some other window on this server. `True` is a verdict the
+        on a server that both the marker and `$TMUX` say is a different one, in a
+        listed pane of some other window on this server, or carrying no pane id
+        while `caller_in_no_pane` places it in no pane of this server at all. `True` is a verdict the
         other way. `None` covers everything that cannot be settled: partial or
         conflicting server evidence, a server match without a pane id, or a
         window whose panes could not be listed. A destructive caller treats `None`
@@ -819,6 +941,11 @@ class Frame:
         if server is False:
             return False
         caller = self.caller_pane()
+        if not caller and self.caller_in_no_pane() is True:
+            # No pane of this server holds us, so no window of it does either.
+            # This also answers the marker-only caller that `caller_server`
+            # leaves at `True`, which is the shape that deferred forever.
+            return False
         if server is None or not caller:
             return None
         panes = self.pane_ids(window_id)
@@ -1384,6 +1511,10 @@ class Frame:
         unreadable process table into "resume as usual" deliberately — not seeing a
         host is not evidence there is none, and a normal resume is the recoverable
         direction, where a wrong attach would reconnect nothing.
+
+        Reads the LAUNCH's reference for the same reason `_refuse_if_held` does:
+        it builds the command for a launch whose record `prepare_agent_launch`
+        has already reconciled, so the argv names the conversation being joined.
         """
         if driver.get("id") != "claude":
             return None
@@ -1463,7 +1594,13 @@ class Frame:
             [os.environ.get("SHELL", "/bin/sh")], record
         )
         attach = cls._attach_argv(driver)
-        if attach:
+        if attach and not record.get("launch_prompt"):
+            # An attach carries no argv, so it cannot deliver a one-shot prompt.
+            # `prepare_agent_launch` refuses such a launch with a clear message,
+            # but it reads the background host SEPARATELY from this line, and a
+            # host appearing in between made the two disagree: validation
+            # passed, the command became an attach, and the prompt was dropped
+            # while `wake` reported success. One decision, made here.
             argv = attach
         command = shlex.join(argv)
         handoff = record.get("handoff")
@@ -2092,7 +2229,27 @@ class Frame:
         raw = result.stdout.strip()
         return int(raw) if raw.isdigit() else None
 
-    def prepare_agent_launch(self, record: dict[str, Any]) -> None:
+    def driver_registry(self) -> DriverRegistry:
+        """The drivers THIS installation defines, declarative ones included.
+
+        The guard re-renders a session's launch whenever it changes its
+        conversation reference, and `resolve()` is the only renderer. Rendering
+        from the bundled registry would quietly rewrite a declarative driver's
+        own executable and flags into the bundled shape — reported in review
+        with a configured `/custom/claude` becoming a bare `claude`. Read the
+        config the way the hook receiver does; a config that will not load
+        leaves the bundled set, which is what every caller had before.
+        """
+        try:
+            return configured_registry(
+                load_config(config_path(self.config_file)), plugins=True
+            )
+        except (HiveIdeError, OSError, ValueError):
+            return DriverRegistry()
+
+    def prepare_agent_launch(
+        self, record: dict[str, Any], *, expect_reference: str | None = None
+    ) -> None:
         """Drop confirmed-gone conversation refs, and refuse a held conversation.
 
         Every driver launch goes through here — `respawn_agent` and the window
@@ -2101,13 +2258,88 @@ class Frame:
         exposed, and `open` is the path that produced the original fault.
         """
         try:
-            ConversationGuard(self.store).check(
+            ConversationGuard(self.store, registry=self.driver_registry()).check(
                 record, working_dir=self.safe_working_dir(record), apply=True
             )
         except (HiveIdeError, OSError):
             # A failed reconcile must never stop a window from opening.
             pass
+        if expect_reference is not None and AgentResumeState.reference_from_driver(
+            record.get("driver") or {}
+        ) != expect_reference:
+            # A caller that already PROMISED this conversation. `wake` validates
+            # a reference and the reconcile above runs again at launch time, so
+            # a transcript deleted in between would have the launch start a
+            # fresh conversation and deliver the caller's one-shot prompt into
+            # it while the command reported success. A per-request decision is
+            # threaded to the place that can still refuse, rather than checked
+            # where another reconcile can follow it.
+            raise HiveIdeError(
+                "The conversation this launch promised is no longer available; "
+                "nothing was started."
+            )
+        if (
+            expect_reference is not None
+            and record.get("launch_prompt")
+            and self._attach_argv(record.get("driver") or {})
+        ):
+            # A background host for this conversation appeared after the caller
+            # validated it. The launch would `attach`, and an attach carries no
+            # argv — so the prompt would be dropped while the command reported
+            # success. Checking the reference alone missed this (review round 4).
+            raise HiveIdeError(
+                "The conversation is now running in the background, and an "
+                "attach carries no prompt; nothing was started."
+            )
+        self.refuse_owned_conversation(record)
         self.refuse_held_conversation(record)
+
+    def refuse_owned_conversation(self, record: dict[str, Any]) -> None:
+        """Raise when the launch would resume a conversation another session is ON.
+
+        The holder guard below asks the PROCESS TABLE, and a sleeping session has
+        no process — so it cannot answer for one. That gap is reachable now that
+        ownership is decided by what a session is on rather than by what its argv
+        says, which is correct and has this consequence: a session that moves
+        from X to Y stops owning X, another session may legitimately attach X,
+        and the first session's stored `--resume X` is left behind. When Y is
+        later deleted the guard forgets Y and the stale argv is all that remains
+        — and it resumes the other session's conversation. On the `wake` path
+        that delivers a one-shot prompt into someone else's chat.
+        """
+        driver = record.get("driver") or {}
+        driver_id = driver.get("id")
+        reference = AgentResumeState.reference_from_driver(driver)
+        if not reference or not isinstance(driver_id, str) or not driver_id:
+            return
+        if not any(reference in str(part) for part in driver.get("launch_argv") or []):
+            # The command does not carry the conversation, so running it cannot
+            # join it. A declarative driver whose `resume_strategy` is `none`
+            # keeps the reference in its metadata while rendering only a fresh
+            # launch, and refusing there blocks a command that was never a
+            # collision. The argv is what actually runs, so the argv is asked.
+            return
+        owner = self.store.find_conversation_owner(
+            driver_id=driver_id,
+            reference=reference,
+            exclude_session_id=record.get("id"),
+        )
+        if owner is None:
+            return
+        # Refuses rather than silently dropping the reference. Dropping would
+        # start a fresh chat under a name the user recognizes, which is the
+        # failure they would NOT look for; a refusal that names the other
+        # session is the one they can act on. `ConversationGuard` has already
+        # had its chance to move this launch somewhere legitimate, and reaching
+        # here means it could not.
+        raise HeldConversationError(
+            f"Conversation {reference[:8]} belongs to "
+            f"{owner.get('name') or owner.get('id')}; not starting a second agent "
+            "on it. Give this session another conversation with "
+            f"`hive-ide attach-conversation --session-id={record['id']} "
+            "--reference=<id>`, or start a fresh one by clearing this session's "
+            "stored conversation."
+        )
 
     def refuse_held_conversation(self, record: dict[str, Any]) -> None:
         """Raise when a process outside this session's own agent pane holds its
@@ -2133,6 +2365,14 @@ class Frame:
           session to attach, and `_agent_command` launches `attach` for it. Refusing
           it instead made a perfectly live session unopenable and, because the raise
           lands mid-`build`, left a half-built window behind on every retry.
+
+        Reads the LAUNCH's reference, not the session's, and may do so because
+        of where it runs: `prepare_agent_launch` reconciles the record through
+        `ConversationGuard` before any of this, so by here the launch names the
+        conversation this launch is about to join. That is the question a
+        collision check asks — who else is on the conversation we are joining —
+        and it is not the same as `AgentResumeState.session_reference`, which
+        answers what the session is on right now.
         """
         reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
         if not reference:
@@ -2170,7 +2410,13 @@ class Frame:
         raw = result.stdout.strip()
         return int(raw) if raw.isdigit() else None
 
-    def respawn_agent(self, record: dict[str, Any], pane_id: str) -> bool:
+    def respawn_agent(
+        self,
+        record: dict[str, Any],
+        pane_id: str,
+        *,
+        expect_reference: str | None = None,
+    ) -> bool:
         """Relaunch the driver in the agent pane.
 
         False, and nothing killed, unless the pane is provably not the caller's.
@@ -2182,7 +2428,7 @@ class Frame:
         """
         if self.pane_is_caller(pane_id) is not False:
             return False
-        self.prepare_agent_launch(record)
+        self.prepare_agent_launch(record, expect_reference=expect_reference)
         result = self.tmux(
             [
                 "respawn-pane",
@@ -2204,7 +2450,9 @@ class Frame:
         self._clear_open_error(record)
         return True
 
-    def wake_agent(self, record: dict[str, Any]) -> str:
+    def wake_agent(
+        self, record: dict[str, Any], *, expect_reference: str | None = None
+    ) -> str:
         """Launch a woken session's driver through the ordinary launch paths.
 
         The caller has already cleared the sleep state and stored the one-shot
@@ -2215,7 +2463,7 @@ class Frame:
         """
         target = self.windows().get(record["id"])
         if not target:
-            target = self.build(record)
+            target = self.build(record, expect_reference=expect_reference)
             self._confirm_agent_launch((self._role_panes_in_window(target) or {}).get("agent"))
             return "built"
         roles = self._role_panes_in_window(target)
@@ -2225,7 +2473,7 @@ class Frame:
                 "The session window's agent pane could not be found; run "
                 "`hive-ide repair` and retry."
             )
-        if not self.respawn_agent(record, pane_id):
+        if not self.respawn_agent(record, pane_id, expect_reference=expect_reference):
             raise HiveIdeError(
                 "The agent pane may be the pane this command runs in; run wake "
                 "from another pane or a plain terminal."
@@ -2713,6 +2961,7 @@ class Frame:
         force: bool = False,
         no_driver: str | bool = False,
         launch_delay: float = 0.0,
+        expect_reference: str | None = None,
     ) -> str:
         PaneLeases(self).check(record["id"], force=force)
         working_dir = record["working_dir"]
@@ -2768,7 +3017,7 @@ class Frame:
         try:
             window = self._finish_build(
                 record, target, working_dir, no_driver=no_driver,
-                launch_delay=launch_delay,
+                launch_delay=launch_delay, expect_reference=expect_reference,
             )
         except BaseException:
             # The window exists but is not a frame window yet: it holds only the
@@ -2791,6 +3040,7 @@ class Frame:
         *,
         no_driver: str | bool = False,
         launch_delay: float = 0.0,
+        expect_reference: str | None = None,
     ) -> str:
         """Fill the window's agent and plan panes.
 
@@ -2806,7 +3056,7 @@ class Frame:
         # is the same mistake as refusing the frame: a check placed where it does
         # not apply. `wake` runs the launch paths, and prepares there.
         if not no_driver and not self._is_sleeping(record):
-            self.prepare_agent_launch(record)
+            self.prepare_agent_launch(record, expect_reference=expect_reference)
         if no_driver:
             agent_command = (
                 self._blocked_agent_command(no_driver)

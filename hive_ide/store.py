@@ -369,20 +369,46 @@ class StateStore:
         for record in self._sessions_in_every_workspace():
             if record.get("id") == exclude_session_id:
                 continue
-            driver = record.get("driver") if isinstance(record, dict) else None
-            resume = driver.get("resume") if isinstance(driver, dict) else None
-            if (
-                isinstance(driver, dict)
-                and driver.get("id") == driver_id
-                and isinstance(resume, dict)
-                and resume.get("reference") == reference
-            ):
-                return record
-            agents = record.get("agents")
-            resume_ids = agents.get("resume_ids") if isinstance(agents, dict) else None
-            if isinstance(resume_ids, dict) and resume_ids.get(driver_id) == reference:
+            if not isinstance(record, dict):
+                continue
+            if self._owns_conversation(record, driver_id, reference):
                 return record
         return None
+
+    @staticmethod
+    def _owns_conversation(
+        record: dict[str, Any], driver_id: str, reference: str
+    ) -> bool:
+        """Does this record OWN that conversation — not merely still name it?
+
+        Ownership is `agents.resume_ids`, and the stored launch is deliberately
+        NOT part of it. That is the whole invariant this package now keeps: the
+        launch is what a session was started on, never evidence of what it is on
+        now. Both directions of getting this wrong have been in the field:
+
+        - counting the launch made a MOVER outrank the real holder, so repairing
+          the session that genuinely held a conversation found the mover as its
+          "owner" and deleted the holder's reference;
+        - counting it also made a session's own leftover argv outrank the
+          session that had legitimately attached the conversation, so the real
+          owner was refused its own launch.
+
+        One exception, and it is narrow: a record with NO `agents` block at all,
+        written before `resume_ids` existed, where the launch is the only
+        reference there has ever been. An EMPTY `resume_ids` is not that — it is
+        a session that remembered something and forgot it, which owns nothing.
+        """
+        agents = record.get("agents")
+        if isinstance(agents, dict):
+            resume_ids = agents.get("resume_ids")
+            if not isinstance(resume_ids, dict):
+                return False
+            return resume_ids.get(driver_id) == reference
+        driver = record.get("driver")
+        driver = driver if isinstance(driver, dict) else {}
+        if driver.get("id") != driver_id:
+            return False
+        return AgentResumeState.reference_from_driver(driver) == reference
 
     def _sessions_in_every_workspace(self) -> Iterator[dict[str, Any]]:
         yield from self._records_in_every_workspace("sessions")
