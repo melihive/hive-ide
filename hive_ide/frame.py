@@ -2312,6 +2312,13 @@ class Frame:
         reference = AgentResumeState.reference_from_driver(driver)
         if not reference or not isinstance(driver_id, str) or not driver_id:
             return
+        if not any(reference in str(part) for part in driver.get("launch_argv") or []):
+            # The command does not carry the conversation, so running it cannot
+            # join it. A declarative driver whose `resume_strategy` is `none`
+            # keeps the reference in its metadata while rendering only a fresh
+            # launch, and refusing there blocks a command that was never a
+            # collision. The argv is what actually runs, so the argv is asked.
+            return
         owner = self.store.find_conversation_owner(
             driver_id=driver_id,
             reference=reference,

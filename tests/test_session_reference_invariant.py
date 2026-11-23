@@ -771,32 +771,136 @@ def test_repair_says_it_could_not_clear_a_launch_it_could_not_render(store):
     assert not any("will start without that ref" in w for w in warnings)
 
 
-def test_verify_only_says_stop_it_for_a_holder_that_blocks_the_launch(
+def test_verify_does_not_promise_which_process_must_be_stopped(tmp_path, monkeypatch):
+    """"Stop that process before reopening" was confidently wrong, both ways.
+
+    Reported unconditionally it sent the user after a process that blocks
+    nothing. The version that promised it only for the holder of the STORED
+    command was backwards for the common case: for a bundled driver the guard
+    rewrites the command to the session's conversation at launch, so the one
+    labelled "the launch target" is the one that will NOT be resumed.
+
+    Predicting it needs the guard's decision, which a diagnostic over other
+    workspaces' records cannot have. So the finding states the fact and makes
+    the instruction conditional — true whichever conversation is resumed.
+    """
+    from hive_ide import cli
+    from test_verify_stale_findings import _verify_args
+
+    (tmp_path / "workspace").mkdir()
+    monkeypatch.setattr(cli, "_refresh_workspace_sources", lambda store: None)
+    monkeypatch.setattr(cli, "inspect_interpreter", lambda i: {"package_version": "0"})
+    monkeypatch.setattr(Frame, "verify_user_config", lambda self: [])
+    monkeypatch.setattr(Frame, "exists", lambda self: True)
+    monkeypatch.setattr(Frame, "attached_clients", lambda self: [])
+    monkeypatch.setattr(Frame, "unmanaged_sessions", lambda self: [])
+    monkeypatch.setattr(Frame, "half_built_windows", lambda self: [])
+    monkeypatch.setattr(cli.HookInstaller, "verify", lambda self: [])
+    monkeypatch.setattr(
+        cli,
+        "_conversation_holders",
+        lambda frame, sessions, rows: [
+            {"session": "S", "reference": LEFT, "pid": 7, "ppid": 1, "orphaned": True}
+        ],
+    )
+
+    finding = cli.cmd_verify(_verify_args(tmp_path))["holder_findings"][0]
+
+    assert "if reopening this session is refused" in finding
+    assert "before reopening the session" not in finding, "the false promise"
+    assert "not blocked by it" not in finding, "the other false promise"
+
+
+def test_the_legitimate_owner_can_still_launch_after_the_mover_is_refused(store):
+    """The refusal must not catch the session that actually attached it.
+
+    A moves X -> Y and forgets Y; its leftover `--resume X` is all that is left.
+    B attaches X legitimately. Counting A's launch as ownership refused BOTH: A
+    correctly, and B — the real owner — for colliding with A's leftover. Both
+    launches are asserted here, in that order, because the second only goes
+    wrong once the first has been made to go right.
+    """
+    from hive_ide.errors import HeldConversationError
+
+    workspace = store.workspace_key
+    a = store.create_session(
+        name="A",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
+        driver=bundled_drivers()["claude"].resolve(
+            name="A", working_dir=str(workspace), conversation_reference=LEFT
+        ),
+    )
+    # A remembered Y and forgot it when Y was deleted: an EMPTY map, which is
+    # not the same as a legacy record that never had one.
+    a["agents"] = {"resume_ids": {}}
+    store.write("sessions", a["id"], a)
+    b = _moved(store, name="B", left=LEFT, joined=LEFT)
+
+    frame = Frame(store, socket="sock")
+    with pytest.raises(HeldConversationError):
+        frame.refuse_owned_conversation(a)
+    frame.refuse_owned_conversation(b)      # must not raise
+
+
+def test_a_command_that_cannot_join_the_conversation_is_not_a_collision(store):
+    """A driver whose `resume_strategy` is `none` keeps the reference in
+    metadata while rendering only a fresh launch. Refusing that command blocks
+    one that was never going to join anything — the argv is what runs, so the
+    argv is what decides.
+    """
+    _moved(store, name="OWNER", left=LEFT, joined=LEFT)
+    workspace = store.workspace_key
+    record = store.create_session(
+        name="NO_RESUME",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
+        driver={
+            "id": "claude",
+            # The reference rides in metadata; the command does not carry it.
+            "resume": {"reference": LEFT},
+            "launch_argv": ["claude", "--name", "NO_RESUME"],
+        },
+    )
+    record["agents"] = {"resume_ids": {}}
+
+    Frame(store, socket="sock").refuse_owned_conversation(record)   # must not raise
+
+
+def test_chat_refuses_a_reference_free_session_archived_while_it_waited(
     store, monkeypatch
 ):
-    """"Stop that process before reopening" has to be true when it is printed.
+    """The existence check must not depend on there being a launch to re-render.
 
-    A holder of the conversation the session is ON, while the stored command
-    resumes a different one, blocks nothing — sending the user to kill it is
-    sending them after the wrong process.
+    Driver detection runs before the lock and can take a while; a session with
+    no conversation gets archived during it exactly like one with, and was
+    handed to the launch anyway — rebuilding what the user just put away.
     """
-    from hive_ide.cli import _conversation_holders
+    from hive_ide import cli
+    from hive_ide.errors import UsageError
 
-    record = _moved(store)
-    frame = Frame(store, socket="sock")
-    monkeypatch.setattr(Frame, "exists", lambda self: True)
-    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
-    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
-    rows = [
-        (100, 1, "sh -c agent"),
-        (4242, 1, f"claude --resume {JOINED}"),
-        (4343, 1, f"claude --resume {LEFT}"),
-    ]
+    workspace = store.workspace_key
+    record = store.create_session(
+        name="FRESH",
+        working_dir=workspace,
+        source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
+        driver={"id": "claude", "launch_argv": ["claude"], "resume": {}},
+    )
+    _stub_registry(monkeypatch, [])
 
-    found = {f["reference"]: f for f in _conversation_holders(frame, [record], rows)}
+    real_lock = StateStore.mutation_lock
+    fired: list[bool] = []
 
-    assert found[LEFT]["is_launch_target"] is True, "the stored command resumes it"
-    assert found[JOINED]["is_launch_target"] is False, "the session is on it"
+    def _archive_then_lock(self, *args, **kwargs):
+        if not fired and kwargs.get("blocking", True):
+            fired.append(True)
+            self.delete("sessions", record["id"])
+        return real_lock(self, *args, **kwargs)
+
+    monkeypatch.setattr(StateStore, "mutation_lock", _archive_then_lock)
+
+    with pytest.raises(UsageError):
+        cli.cmd_current_chat(_chat_args(store, record))
 
 
 def test_the_launch_path_itself_asks_whether_the_conversation_is_someone_elses(
@@ -805,8 +909,13 @@ def test_the_launch_path_itself_asks_whether_the_conversation_is_someone_elses(
     """Through `prepare_agent_launch`, not the predicate alone.
 
     A guard nothing calls is dead code that reads as protection. The predicate
-    has its own test above; this one pins that the launch path runs it, so
+    has its own tests above; this one pins that the launch path runs it, so
     deleting the call cannot pass.
+
+    (It has already not-passed once: an edit that removed a neighbouring test
+    truncated the file from that point, taking this one with it. The suite
+    stayed green — a deleted test cannot fail — and only the mutation harness
+    noticed, by reporting this exact call as a survivor.)
     """
     from hive_ide.errors import HeldConversationError
 

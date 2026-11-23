@@ -684,33 +684,35 @@ def cmd_current_chat(args: argparse.Namespace) -> dict[str, Any]:
     # `prepare_agent_launch` at launch time, where it can first establish that
     # the launch is one this package can reproduce.
     reference = AgentResumeState.reference_from_driver(driver_record)
-    if reference:
-        with store.mutation_lock():
-            # Re-read INSIDE the lock. The record was read before it, and
-            # writing that snapshot back put the session on whatever it named at
-            # read time — undoing a hook event that landed in between.
-            fresh = store.read("sessions", record["id"])
-            if not fresh:
-                # Archived or removed while we waited. Launching the snapshot we
-                # read would rebuild a session the user has just put away.
-                raise UsageError("The session is no longer available.")
-            # The fresh record is what launches, whether or not it still matches.
-            # Detecting that it had changed and then handing the STALE one to the
-            # launch was the worse half of the race it was meant to close: a
-            # conversation attached, or a driver switched, while `chat` waited,
-            # and `chat` went on to start the command from before.
-            record = fresh
-            fresh_driver = fresh.get("driver") or {}
-            if (
-                fresh_driver.get("id") == driver_id
-                and AgentResumeState.reference_from_driver(fresh_driver) == reference
-            ):
-                fresh["driver"] = driver.resolve(
-                    name=fresh.get("name") or record["name"],
-                    working_dir=fresh.get("working_dir") or record["working_dir"],
-                    conversation_reference=reference,
-                )
-                store.write("sessions", record["id"], fresh)
+    # Unconditionally, not only when there is a reference to re-render. Driver
+    # detection above can take a while, and a session archived during it was
+    # still handed to the launch — which rebuilds what the user just put away.
+    # A session with no conversation gets archived exactly like one with.
+    with store.mutation_lock():
+        # Re-read INSIDE the lock. The record was read before it, and writing
+        # that snapshot back put the session on whatever it named at read time —
+        # undoing a hook event that landed in between.
+        fresh = store.read("sessions", record["id"])
+        if not fresh:
+            raise UsageError("The session is no longer available.")
+        # The fresh record is what launches, whether or not it still matches.
+        # Detecting that it had changed and then handing the STALE one to the
+        # launch was the worse half of the race it was meant to close: a
+        # conversation attached, or a driver switched, while `chat` waited, and
+        # `chat` went on to start the command from before.
+        record = fresh
+        fresh_driver = fresh.get("driver") or {}
+        if (
+            reference
+            and fresh_driver.get("id") == driver_id
+            and AgentResumeState.reference_from_driver(fresh_driver) == reference
+        ):
+            fresh["driver"] = driver.resolve(
+                name=fresh.get("name") or record["name"],
+                working_dir=fresh.get("working_dir") or record["working_dir"],
+                conversation_reference=reference,
+            )
+            store.write("sessions", record["id"], fresh)
     return Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).current_chat(record)
 
 
@@ -1428,13 +1430,6 @@ def _conversation_holders(
                         "pid": holder["pid"],
                         "ppid": holder["ppid"],
                         "orphaned": holder["orphaned"],
-                        # Whether the STORED COMMAND resumes this conversation,
-                        # which decides what the remedy can honestly promise.
-                        # "Stop it before reopening" is only true of a holder the
-                        # next launch would actually collide with; said of the
-                        # other one it sends the user to kill a process that was
-                        # never in the way.
-                        "is_launch_target": reference == launched,
                     }
                 )
     return out
@@ -1769,17 +1764,9 @@ def cmd_verify(args: argparse.Namespace) -> dict[str, Any]:
     holder_findings = [
         f"{h['session']}: conversation {h['reference'][:8]} is held by pid {h['pid']}"
         + (" (orphaned — ppid 1, nothing will reap it)" if h["orphaned"] else "")
-        + ", outside its own agent pane. A second driver on one conversation leaves "
-        "the pane permanently blank"
-        + (
-            "; stop that process before reopening the session."
-            if h.get("is_launch_target")
-            # The stored command resumes a DIFFERENT conversation, so stopping
-            # this process unblocks nothing — it is reported because the session
-            # is on that conversation and something else is sitting on it.
-            else ", and this session is on that conversation. The stored command "
-            "resumes a different one, so reopening is not blocked by it."
-        )
+        + ", outside its own agent pane. A second driver on one conversation "
+        "leaves the pane permanently blank; if reopening this session is "
+        "refused, this is the process to stop."
         for h in held
     ]
     # None means the scan could not run, which must reach `incomplete` rather than
