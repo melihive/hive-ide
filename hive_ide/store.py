@@ -369,18 +369,19 @@ class StateStore:
         for record in self._sessions_in_every_workspace():
             if record.get("id") == exclude_session_id:
                 continue
-            driver = record.get("driver") if isinstance(record, dict) else None
-            resume = driver.get("resume") if isinstance(driver, dict) else None
-            if (
-                isinstance(driver, dict)
-                and driver.get("id") == driver_id
-                and isinstance(resume, dict)
-                and resume.get("reference") == reference
-            ):
-                return record
-            agents = record.get("agents")
-            resume_ids = agents.get("resume_ids") if isinstance(agents, dict) else None
-            if isinstance(resume_ids, dict) and resume_ids.get(driver_id) == reference:
+            if not isinstance(record, dict):
+                continue
+            # What that session is ON, never what its stored argv still names.
+            # A session that moved conversation keeps a stale `--resume <old>`
+            # until something launches it, and reading that as ownership made
+            # the stale record outrank the live one: repairing the session that
+            # genuinely holds the conversation found the mover as its "owner",
+            # deleted the real holder's reference and blanked its launch.
+            #
+            # `session_reference` falls back to the launch exactly when that
+            # driver has nothing remembered, so a legacy record with no
+            # `resume_ids` still answers for the conversation it was launched on.
+            if AgentResumeState.session_reference(record, driver_id) == reference:
                 return record
         return None
 

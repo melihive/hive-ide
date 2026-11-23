@@ -1511,6 +1511,10 @@ class Frame:
         unreadable process table into "resume as usual" deliberately — not seeing a
         host is not evidence there is none, and a normal resume is the recoverable
         direction, where a wrong attach would reconnect nothing.
+
+        Reads the LAUNCH's reference for the same reason `_refuse_if_held` does:
+        it builds the command for a launch whose record `prepare_agent_launch`
+        has already reconciled, so the argv names the conversation being joined.
         """
         if driver.get("id") != "claude":
             return None
@@ -2313,6 +2317,14 @@ class Frame:
           session to attach, and `_agent_command` launches `attach` for it. Refusing
           it instead made a perfectly live session unopenable and, because the raise
           lands mid-`build`, left a half-built window behind on every retry.
+
+        Reads the LAUNCH's reference, not the session's, and may do so because
+        of where it runs: `prepare_agent_launch` reconciles the record through
+        `ConversationGuard` before any of this, so by here the launch names the
+        conversation this launch is about to join. That is the question a
+        collision check asks — who else is on the conversation we are joining —
+        and it is not the same as `AgentResumeState.session_reference`, which
+        answers what the session is on right now.
         """
         reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
         if not reference:

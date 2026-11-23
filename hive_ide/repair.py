@@ -789,12 +789,19 @@ class SessionRepair:
         *,
         apply: bool,
     ) -> None:
-        agents_data = record.get("agents")
-        resume_ids = (
-            agents_data.get("resume_ids") if isinstance(agents_data, dict) else None
-        )
-        if not isinstance(resume_ids, dict):
-            return
+        # ONE state object for the whole sweep, built before anything is read.
+        #
+        # Constructing it seeds an empty slot from the launch, so building a
+        # fresh one per iteration would re-seed the very reference the previous
+        # iteration had just removed as a duplicate — a second driver's turn
+        # through the loop resurrecting the first driver's stolen conversation.
+        #
+        # It also normalizes a record that carries no `agents` block at all.
+        # Returning early on one, as this did, meant a legacy record's LAUNCH
+        # was never checked for a rival owner — the one record shape where the
+        # launch is the only reference there is.
+        agents_state = AgentResumeState(record)
+        resume_ids = agents_state.resume_ids
         current_driver = record.get("driver") if isinstance(record.get("driver"), dict) else {}
         current_driver_id = current_driver.get("id")
         current_resume = current_driver.get("resume") if isinstance(current_driver, dict) else {}
@@ -812,28 +819,65 @@ class SessionRepair:
             )
             if owner is None:
                 continue
-            AgentResumeState(record).forget(driver_id)
+            agents_state.forget(driver_id)
             changed = True
             actions.append(
                 "driver: removed duplicate "
                 f"{driver_id} conversation ref owned by {owner.get('name')}"
             )
             if current_driver_id == driver_id and current_reference == reference:
-                warnings.append(
-                    f"active {driver_id} conversation ref belonged to "
-                    f"{owner.get('name')}; next launch will start without that ref"
-                )
-                try:
-                    driver = self.registry.get(driver_id)
-                except HiveIdeError:
-                    continue
-                record["driver"] = driver.resolve(
-                    name=str(record.get("name") or ""),
-                    working_dir=str(record.get("working_dir") or self.store.workspace_key),
-                    conversation_reference=None,
-                )
+                if self._clear_launch_reference(record, driver_id, owner, warnings):
+                    current_reference = None
+        # The launch can name a conversation `resume_ids` does not, because a
+        # status event moves the session without re-rendering the argv. The loop
+        # above only ever sees what the session remembers, so a launch left
+        # pointing at someone else's conversation would survive it and be the
+        # command the next `open` runs.
+        if (
+            isinstance(current_driver_id, str)
+            and current_driver_id
+            and isinstance(current_reference, str)
+            and current_reference
+            # THIS driver's slot, not any slot. A conversation id belongs to one
+            # driver, so asking "does any parked driver remember this string"
+            # let an unrelated driver's reference stand in for the launch's own
+            # and skip the ownership check entirely.
+            and resume_ids.get(current_driver_id) != current_reference
+        ):
+            stale_owner = self.store.find_conversation_owner(
+                driver_id=current_driver_id,
+                reference=current_reference,
+                exclude_session_id=record["id"],
+            )
+            if stale_owner is not None and self._clear_launch_reference(
+                record, current_driver_id, stale_owner, warnings
+            ):
+                changed = True
         if changed and apply:
             self.store.write("sessions", record["id"], record)
+
+    def _clear_launch_reference(
+        self,
+        record: dict[str, Any],
+        driver_id: str,
+        owner: dict[str, Any],
+        warnings: list[str],
+    ) -> bool:
+        """Re-render the launch with no conversation. Returns whether it changed."""
+        warnings.append(
+            f"active {driver_id} conversation ref belonged to "
+            f"{owner.get('name')}; next launch will start without that ref"
+        )
+        try:
+            driver = self.registry.get(driver_id)
+        except HiveIdeError:
+            return False
+        record["driver"] = driver.resolve(
+            name=str(record.get("name") or ""),
+            working_dir=str(record.get("working_dir") or self.store.workspace_key),
+            conversation_reference=None,
+        )
+        return True
 
     def refresh_driver(
         self, record: dict[str, Any], actions: list[str], *, apply: bool
@@ -986,7 +1030,17 @@ class SessionRepair:
         its age, because a month-old agent disappearing silently is worse than
         the stalemate it resolves.
         """
-        reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        # The conversation the session is ON. The stranded holder is a driver that
+        # is still running, so it sits on the session's live conversation, which a
+        # status event can have moved away from the stored argv.
+        #
+        # Gate 2 then renders OUR launch for that reference and demands the
+        # holder's argv match it, so a holder that moved conversation after it
+        # started — `/clear` inside the agent — will not match and will not be
+        # stopped. That is the pre-existing shape of the gate, not a new limit:
+        # the argv a process was started with never names a conversation it
+        # switched to later. Refusing to kill is the recoverable direction.
+        reference = AgentResumeState.session_reference(record)
         if not reference:
             return
         if self._has_live_shell_agent(record) or self._pane_runs_a_driver(record):

@@ -273,14 +273,6 @@ class ConversationGuard:
             return ConversationStatus(ConversationState.GONE)
         return ConversationStatus(ConversationState.UNKNOWN)
 
-    @staticmethod
-    def _is_active_reference(record: dict[str, Any], driver_id: str, reference: str) -> bool:
-        driver = record.get("driver") or {}
-        return (
-            driver.get("id") == driver_id
-            and AgentResumeState.reference_from_driver(driver) == reference
-        )
-
     def _previous_that_survives(
         self,
         agents: AgentResumeState,

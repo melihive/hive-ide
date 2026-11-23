@@ -434,9 +434,9 @@ def _write_sleeping_status(store: StateStore, record: dict[str, Any], now: str) 
         {
             "session_id": record["id"],
             "driver": (record.get("driver") or {}).get("id"),
-            "conversation_reference": (
-                (record.get("driver") or {}).get("resume") or {}
-            ).get("reference"),
+            # What the sleeping agent is ON. A status row is a report about the
+            # session, so it answers the session's question, not the argv's.
+            "conversation_reference": AgentResumeState.session_reference(record),
             "state": "sleeping",
             "observed_at": now,
         },
@@ -664,19 +664,46 @@ def cmd_current_chat(args: argparse.Namespace) -> dict[str, Any]:
     driver_id = driver_record.get("id")
     if not driver_id:
         raise UsageError("The session has no driver to resume.")
-    reference = (driver_record.get("resume") or {}).get("reference")
     driver = configured_registry(config).get(driver_id)
     availability = driver.detect()
     if not availability.available and driver_id != "term":
         raise UsageError(f"Driver {driver_id!r} is unavailable: {availability.detail}.")
+    # The LAUNCH's own reference, never the session's.
+    #
+    # This is a launch renderer, not a reader of session state: it canonicalizes
+    # a stale `launch_argv` through the driver definition, which is how a flag
+    # that is not the driver's gets dropped and a private one restored. With the
+    # same reference in and out, that is all it does.
+    #
+    # Rendering the SESSION's reference here instead injected one nothing had
+    # validated. A Codex session that resumes BY NAME has no reference at all,
+    # so it skips this entirely — but reading `resume_ids` gave it a uuid, this
+    # wrote the uuid over the name, the guard then rejected the uuid, and a bare
+    # `codex` with no session is what started. Moving a launch to the
+    # conversation the session is on is `ConversationGuard`'s decision, taken in
+    # `prepare_agent_launch` at launch time, where it can first establish that
+    # the launch is one this package can reproduce.
+    reference = AgentResumeState.reference_from_driver(driver_record)
     if reference:
-        record["driver"] = driver.resolve(
-            name=record["name"],
-            working_dir=record["working_dir"],
-            conversation_reference=reference,
-        )
         with store.mutation_lock():
-            store.write("sessions", record["id"], record)
+            # Re-read INSIDE the lock. The record was read before it, and
+            # writing that snapshot back put the session on whatever it named at
+            # read time — undoing a hook event that landed in between. If the
+            # launch has moved since, leave it: the guard reconciles at launch.
+            fresh = store.read("sessions", record["id"])
+            fresh_driver = (fresh or {}).get("driver") or {}
+            if (
+                fresh
+                and fresh_driver.get("id") == driver_id
+                and AgentResumeState.reference_from_driver(fresh_driver) == reference
+            ):
+                fresh["driver"] = driver.resolve(
+                    name=fresh.get("name") or record["name"],
+                    working_dir=fresh.get("working_dir") or record["working_dir"],
+                    conversation_reference=reference,
+                )
+                store.write("sessions", record["id"], fresh)
+                record = fresh
     return Frame(store, socket=_socket(store, args.tmux_socket), config_file=_config_file(args)).current_chat(record)
 
 
@@ -1351,8 +1378,24 @@ def _conversation_holders(
         return []          # could not observe; report nothing rather than guess
     out: list[dict[str, Any]] = []
     for session in sessions:
-        reference = AgentResumeState.reference_from_driver(session.get("driver") or {})
-        if not reference:
+        # BOTH conversations, because either one can block the next `open`.
+        #
+        # The session's own (`resume_ids`) is what a holder is sitting on after
+        # a `/clear`, and asking only the argv reported that orphan as absent.
+        # But the argv is not redundant: when the guard CANNOT reproduce a
+        # launch — a configured wrapper — it leaves the command alone, so the
+        # next launch really does resume the old conversation, and an orphan
+        # there raises `HeldConversationError` while verify said nothing. A
+        # diagnostic that names neither of the two things that refuse a launch
+        # is worse than one that occasionally names both.
+        references = []
+        for candidate in (
+            AgentResumeState.session_reference(session),
+            AgentResumeState.reference_from_driver(session.get("driver") or {}),
+        ):
+            if candidate and candidate not in references:
+                references.append(candidate)
+        if not references:
             continue
         agent_pane = (frame.role_panes(session["id"]) or {}).get("agent")
         pane_pid = frame.pane_pid(agent_pane) if agent_pane else None
@@ -1361,26 +1404,27 @@ def _conversation_holders(
             # outside one, and reporting its own agent as a foreign holder would make
             # this finding noise on every healthy session.
             continue
-        backgrounded = ConversationHolders.background_tree(reference, rows=rows)
-        for holder in ConversationHolders.holders(
-            reference, exclude_tree=pane_pid, rows=rows
-        ):
-            if holder["pid"] in backgrounded:
-                # A backgrounded session holds its own conversation by design, and
-                # opening it attaches rather than launching a second driver. Calling
-                # that a finding would mark a frame unhealthy for using a supported
-                # feature — and the remedy this finding prints is "stop that
-                # process", which here means killing live work.
-                continue
-            out.append(
-                {
-                    "session": session.get("name") or session["id"],
-                    "reference": reference,
-                    "pid": holder["pid"],
-                    "ppid": holder["ppid"],
-                    "orphaned": holder["orphaned"],
-                }
-            )
+        for reference in references:
+            backgrounded = ConversationHolders.background_tree(reference, rows=rows)
+            for holder in ConversationHolders.holders(
+                reference, exclude_tree=pane_pid, rows=rows
+            ):
+                if holder["pid"] in backgrounded:
+                    # A backgrounded session holds its own conversation by design, and
+                    # opening it attaches rather than launching a second driver. Calling
+                    # that a finding would mark a frame unhealthy for using a supported
+                    # feature — and the remedy this finding prints is "stop that
+                    # process", which here means killing live work.
+                    continue
+                out.append(
+                    {
+                        "session": session.get("name") or session["id"],
+                        "reference": reference,
+                        "pid": holder["pid"],
+                        "ppid": holder["ppid"],
+                        "orphaned": holder["orphaned"],
+                    }
+                )
     return out
 
 

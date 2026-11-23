@@ -29,8 +29,59 @@ class AgentResumeState:
 
     @staticmethod
     def reference_from_driver(driver: dict[str, Any]) -> str | None:
+        """The conversation the STORED LAUNCH COMMAND would resume.
+
+        Not the same question as `session_reference`. Read this one only when
+        the subject is the command itself — matching a process's argv, or
+        deciding what a relaunch is about to do — and read it only AFTER
+        `ConversationGuard` has reconciled the launch, which `Frame` does in
+        `prepare_agent_launch` before anything inspects the argv.
+        """
         reference = (driver.get("resume") or {}).get("reference")
         return reference if isinstance(reference, str) and reference else None
+
+    @staticmethod
+    def session_reference(
+        record: dict[str, Any], driver_id: str | None = None
+    ) -> str | None:
+        """The conversation this session is ON, whoever rendered its launch.
+
+        Status events move a session to a new conversation by writing
+        `agents.resume_ids` alone; the launch command is only brought into line
+        at launch time. Between those two moments the two fields name different
+        conversations, and every question of the form "what is this session
+        talking to right now" — is a holder stranded on it, what does the
+        sidebar show, which chat does `current_chat` open — is about
+        `resume_ids`, never about the argv.
+
+        Falls back to the launched reference, because a session that has never
+        had an event has no `resume_ids` entry and its launch is then the only
+        evidence there is.
+
+        `driver_id` names a driver to ask about; omitting it asks about the
+        session's current one. Naming one scopes the fallback — a launch speaks
+        for its own driver and for no other — while omitting it falls back to
+        the launch whatever the record calls it, so a driver block too thin to
+        carry an `id` degrades to exactly what reading the launch gave before.
+
+        Static and non-mutating on purpose. Constructing `AgentResumeState`
+        would answer the same question — `seed_current_driver` fills the empty
+        slot — but it writes three keys into the record, which a read-only
+        caller such as `verify` must not do.
+        """
+        driver = record.get("driver")
+        driver = driver if isinstance(driver, dict) else {}
+        wanted = driver_id or driver.get("id")
+        if isinstance(wanted, str) and wanted:
+            agents = record.get("agents")
+            resume_ids = agents.get("resume_ids") if isinstance(agents, dict) else None
+            if isinstance(resume_ids, dict):
+                remembered = resume_ids.get(wanted)
+                if isinstance(remembered, str) and remembered:
+                    return remembered
+        if driver_id is not None and driver.get("id") != driver_id:
+            return None
+        return AgentResumeState.reference_from_driver(driver)
 
     def seed_current_driver(self) -> None:
         """Take the launched conversation into the driver's references.
