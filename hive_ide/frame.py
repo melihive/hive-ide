@@ -2291,7 +2291,48 @@ class Frame:
                 "The conversation is now running in the background, and an "
                 "attach carries no prompt; nothing was started."
             )
+        self.refuse_owned_conversation(record)
         self.refuse_held_conversation(record)
+
+    def refuse_owned_conversation(self, record: dict[str, Any]) -> None:
+        """Raise when the launch would resume a conversation another session is ON.
+
+        The holder guard below asks the PROCESS TABLE, and a sleeping session has
+        no process — so it cannot answer for one. That gap is reachable now that
+        ownership is decided by what a session is on rather than by what its argv
+        says, which is correct and has this consequence: a session that moves
+        from X to Y stops owning X, another session may legitimately attach X,
+        and the first session's stored `--resume X` is left behind. When Y is
+        later deleted the guard forgets Y and the stale argv is all that remains
+        — and it resumes the other session's conversation. On the `wake` path
+        that delivers a one-shot prompt into someone else's chat.
+        """
+        driver = record.get("driver") or {}
+        driver_id = driver.get("id")
+        reference = AgentResumeState.reference_from_driver(driver)
+        if not reference or not isinstance(driver_id, str) or not driver_id:
+            return
+        owner = self.store.find_conversation_owner(
+            driver_id=driver_id,
+            reference=reference,
+            exclude_session_id=record.get("id"),
+        )
+        if owner is None:
+            return
+        # Refuses rather than silently dropping the reference. Dropping would
+        # start a fresh chat under a name the user recognizes, which is the
+        # failure they would NOT look for; a refusal that names the other
+        # session is the one they can act on. `ConversationGuard` has already
+        # had its chance to move this launch somewhere legitimate, and reaching
+        # here means it could not.
+        raise HeldConversationError(
+            f"Conversation {reference[:8]} belongs to "
+            f"{owner.get('name') or owner.get('id')}; not starting a second agent "
+            "on it. Give this session another conversation with "
+            f"`hive-ide attach-conversation --session-id={record['id']} "
+            "--reference=<id>`, or start a fresh one by clearing this session's "
+            "stored conversation."
+        )
 
     def refuse_held_conversation(self, record: dict[str, Any]) -> None:
         """Raise when a process outside this session's own agent pane holds its

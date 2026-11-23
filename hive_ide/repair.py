@@ -863,19 +863,38 @@ class SessionRepair:
         owner: dict[str, Any],
         warnings: list[str],
     ) -> bool:
-        """Re-render the launch with no conversation. Returns whether it changed."""
-        warnings.append(
-            f"active {driver_id} conversation ref belonged to "
-            f"{owner.get('name')}; next launch will start without that ref"
-        )
+        """Re-render the launch with no conversation. Returns whether it changed.
+
+        The warning is written from what HAPPENED, not from what was intended.
+        Announcing "next launch will start without that ref" before the registry
+        lookup meant a driver whose definition is unavailable here — a wrapper
+        from a config this invocation does not load — reported a conflict
+        resolved while the stored argv still resumed the other session's
+        conversation. A repair that says it fixed something it did not is worse
+        than one that says it could not.
+
+        It does not go further and refuse the launch. That would be a new
+        refusal path for a record this command cannot render, and the launch
+        already passes through `ConversationGuard` and the holder guard; what
+        was missing here was a true sentence, not another gate.
+        """
         try:
             driver = self.registry.get(driver_id)
         except HiveIdeError:
+            warnings.append(
+                f"active {driver_id} conversation ref belongs to "
+                f"{owner.get('name')}, and {driver_id} is not available here to "
+                "re-render the launch; it still resumes that conversation"
+            )
             return False
         record["driver"] = driver.resolve(
             name=str(record.get("name") or ""),
             working_dir=str(record.get("working_dir") or self.store.workspace_key),
             conversation_reference=None,
+        )
+        warnings.append(
+            f"active {driver_id} conversation ref belonged to "
+            f"{owner.get('name')}; next launch will start without that ref"
         )
         return True
 

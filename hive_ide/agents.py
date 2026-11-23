@@ -36,8 +36,15 @@ class AgentResumeState:
         deciding what a relaunch is about to do — and read it only AFTER
         `ConversationGuard` has reconciled the launch, which `Frame` does in
         `prepare_agent_launch` before anything inspects the argv.
+
+        `resume` is type-checked, not merely truth-checked. `("bad" or {})` is
+        the string, and `.get` on it raises — which did not matter while every
+        caller held a record it had just written, and does now: ownership asks
+        this of every session in every workspace, so ONE malformed record
+        anywhere aborted the scan before it reached the real owner.
         """
-        reference = (driver.get("resume") or {}).get("reference")
+        resume = driver.get("resume") if isinstance(driver, dict) else None
+        reference = resume.get("reference") if isinstance(resume, dict) else None
         return reference if isinstance(reference, str) and reference else None
 
     @staticmethod
