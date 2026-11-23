@@ -565,9 +565,15 @@ def test_the_legacy_projection_still_answers_for_a_driver_with_no_id(store):
         source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
         driver={"resume": {"reference": LEFT}},
     )
-    record.pop("agents")          # legacy: the shape the fallback still serves
 
-    projected = StateIO._legacy(record)
+    # Asked of the record EXACTLY as `create_session` returns it. An earlier
+    # revision of this test deleted the `agents` block first, which made it pass
+    # by testing the legacy shape instead — and masked a real regression: once
+    # creation began writing an explicit block, this record had one it could
+    # never fill, so the projection fell silent. Codex round 2 caught it.
+    assert record.get("agents") == {"resume_ids": {}, "resume_history": {}}
+
+    projected = StateIO._legacy(store.find_session(record["id"]))
 
     assert projected["agents"]["resume_ids"]["term"] == LEFT
 

@@ -484,13 +484,19 @@ def test_the_stranded_holder_release_declines_a_conversation_no_longer_claimed(
     store.write("sessions", record["id"], record)
 
     repair = SessionRepair(store, Frame(store, socket="sock"))
-    calls = []
-    repair._has_live_shell_agent = lambda rec: calls.append("probed") or False
 
+    def _first_probe(_record):
+        # Fail HERE, not after the call returns. This runs with apply=True, so
+        # letting the regression proceed past this point lets repair scan real
+        # host processes and SIGTERM a matching driver on a detached server —
+        # a test that terminates one of the machine's own processes to prove a
+        # bug. Codex round 2, finding 2.
+        pytest.fail(
+            "the release must decline on the empty claim, before it probes for "
+            "a holder of a conversation this session no longer claims"
+        )
+
+    repair._has_live_shell_agent = _first_probe
     repair._release_stranded_holder(
         store.find_session(record["id"]), [], [], apply=True
-    )
-    assert calls == [], (
-        "the release must decline on the empty claim, before it starts probing "
-        "for a holder of a conversation this session no longer claims"
     )

@@ -103,7 +103,17 @@ class AgentResumeState:
                     return remembered
         if driver_id is not None and driver.get("id") != driver_id:
             return None
-        if isinstance(record.get("agents"), dict):
+        # An empty block means "released" only for a record that could have
+        # recorded a claim in the first place. Claims are keyed by driver, so a
+        # record whose driver block carries no `id` has no key to store one
+        # under — its empty block is silence, not a release, and its launch
+        # still speaks. `create_session` writes a block for every new record,
+        # so without this an id-less driver lost its reference the moment the
+        # session was created and the sidebar showed nothing.
+        own_driver_id = driver.get("id")
+        if isinstance(record.get("agents"), dict) and (
+            isinstance(own_driver_id, str) and own_driver_id
+        ):
             return None
         return AgentResumeState.reference_from_driver(driver)
 
