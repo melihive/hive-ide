@@ -791,12 +791,15 @@ class SessionRepair:
     ) -> None:
         # ONE state object for the whole sweep, built before anything is read.
         #
-        # Constructing it seeds an empty slot from the launch, so building a
-        # fresh one per iteration would re-seed the very reference the previous
-        # iteration had just removed as a duplicate — a second driver's turn
-        # through the loop resurrecting the first driver's stolen conversation.
+        # It used to matter for a second reason: constructing one seeded an empty
+        # slot from the launch, so a fresh object per iteration re-seeded the very
+        # reference the previous iteration had just removed as a duplicate. Phase
+        # 85 removed that seeding — a claim is made at creation or adoption and
+        # nowhere else — so construction no longer resurrects anything, and this
+        # sweep is no longer the thing standing between a forgotten conversation
+        # and its own stale argv.
         #
-        # It also normalizes a record that carries no `agents` block at all.
+        # It still normalizes a record that carries no `agents` block at all.
         # Returning early on one, as this did, meant a legacy record's LAUNCH
         # was never checked for a rival owner — the one record shape where the
         # launch is the only reference there is.

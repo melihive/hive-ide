@@ -11,7 +11,13 @@ class AgentResumeState:
     def __init__(self, record: dict[str, Any]):
         self.record = record
         agents = record.get("agents")
-        if not isinstance(agents, dict):
+        # A record with no `agents` block at all predates per-driver references:
+        # its launch is the only claim it has ever made, so converting it is the
+        # moment that claim becomes explicit. A record that HAS the block has
+        # already spoken for itself — an empty `resume_ids` is a session that
+        # remembered and forgot, and forgetting is not an invitation to re-infer.
+        legacy = not isinstance(agents, dict)
+        if legacy:
             agents = {}
             record["agents"] = agents
         self.agents = agents
@@ -25,7 +31,7 @@ class AgentResumeState:
             history = {}
             agents["resume_history"] = history
         self.resume_history = history
-        self.seed_current_driver()
+        self.seed_current_driver(legacy=legacy)
 
     @staticmethod
     def reference_from_driver(driver: dict[str, Any]) -> str | None:
@@ -90,15 +96,30 @@ class AgentResumeState:
             return None
         return AgentResumeState.reference_from_driver(driver)
 
-    def seed_current_driver(self) -> None:
-        """Take the launched conversation into the driver's references.
+    def seed_current_driver(self, *, legacy: bool = False) -> None:
+        """Reconcile the launched conversation with the driver's references.
 
-        Usually `resume_ids` already names it. When it names a DIFFERENT one the
-        record is internally inconsistent — which older versions of this package
-        could write, by moving `resume_ids` without re-rendering the launch — and
-        the launched reference is then the one that is actually in use. It is
-        remembered rather than ignored, so an event that confirms the other one
-        cannot quietly make it the last trace of a real conversation.
+        Constructing this object must not ACQUIRE a conversation. A claim is
+        made at the two moments a session can honestly make one — it is created
+        on a conversation, or it is told about one — and an empty slot means the
+        opposite of a claim: the session had a reference and gave it up. Seeding
+        the launch back into that slot handed the conversation straight back, so
+        one `status-event` after a forget could take it from whichever session
+        had since attached it, with nothing but a stale argv as evidence. The
+        event did not even have to carry a reference; merely constructing the
+        state object was enough.
+
+        `legacy` is the one case where the launch still speaks: a record with no
+        `agents` block at all has never recorded a reference anywhere else, so
+        converting it is where its existing claim becomes explicit.
+
+        The other half stands on its own. When `resume_ids` names a DIFFERENT
+        conversation the record is internally inconsistent — which older
+        versions of this package could write, by moving `resume_ids` without
+        re-rendering the launch — and the launched reference is remembered as
+        history rather than dropped, so an event confirming the other one cannot
+        quietly erase the last trace of a real conversation. That needs a
+        current reference to disagree WITH, so an empty slot is not it.
         """
         driver = self.record.get("driver")
         if not isinstance(driver, dict):
@@ -109,7 +130,8 @@ class AgentResumeState:
             return
         current = self.reference_for(driver_id)
         if not current:
-            self.resume_ids[driver_id] = reference
+            if legacy:
+                self.resume_ids[driver_id] = reference
             return
         if current != reference and reference not in self.history_for(driver_id):
             self._set_history(driver_id, [reference, *self.history_for(driver_id)])
