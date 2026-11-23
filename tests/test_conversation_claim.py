@@ -216,3 +216,150 @@ def test_an_empty_slot_does_not_push_the_launch_into_history(tmp_path, claude_st
         "an empty slot must leave history empty; a launch parked there is a "
         "claim the fallback would act on"
     )
+
+
+def test_the_in_process_hook_is_the_same_entry_point_for_the_claim_rule(
+    tmp_path, claude_store, monkeypatch
+):
+    """The CLI is not the only way an event arrives.
+
+    `cmd_status_event` is what an external hook config calls; a pane that the
+    package wired itself goes through `IdeHook.main` instead, and that path
+    builds its own `AgentResumeState`. Both are writers, so both can acquire a
+    conversation the moment construction does it for them — a rule enforced at
+    one of two doors is not enforced.
+    """
+    import json
+
+    from hive_ide.hook import IdeHook
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    _transcript(claude_store, X)
+
+    a = _session(store, "A", X)
+    AgentResumeState(a).forget("claude")      # A gave up its claim
+    store.write("sessions", a["id"], a)
+
+    b = _session(store, "B", None)
+    AgentResumeState(b).remember("claude", X)
+    store.write("sessions", b["id"], b)
+
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", store.workspace_key)
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", a["id"])
+    monkeypatch.setenv("HIVE_IDE_CONFIG", str(tmp_path / "missing-config.json"))
+    monkeypatch.delenv("HIVE_IDE_TMUX_SOCKET", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+    assert IdeHook.main(
+        [
+            "--state-home",
+            str(store.home),
+            "--state",
+            "waiting",
+            "--driver",
+            "claude",
+            json.dumps({"session_id": "", "hook_event_name": "Stop"}),
+        ]
+    ) == 0
+
+    assert "claude" not in store.find_session(a["id"])["agents"]["resume_ids"], (
+        "the hook entry point must not re-seed A's claim from its stale argv"
+    )
+    assert store.find_session(b["id"])["agents"]["resume_ids"]["claude"] == X
+
+
+def test_repair_leaves_nothing_for_a_later_read_to_infer_a_claim_from(
+    tmp_path, claude_store
+):
+    """Repair builds state several times per run; a reload must stay harmless.
+
+    The sweep hoists ONE state object precisely because rebuilding one used to
+    re-seed what the previous iteration had removed. That hoist only ever
+    covered the sweep's own loop — `ConversationGuard.check` constructs state
+    again later in the SAME run, and the next run constructs it again from disk.
+
+    What makes those later constructions safe is not the hoist and not the
+    removed seeding: it is that clearing a duplicate clears the LAUNCH too, and
+    re-renders the argv without it. Nothing is left on the record for a later
+    read to infer a claim from.
+
+    That is worth pinning because it is the load-bearing half. The first draft
+    of this test asserted the slot stayed empty across a reload and passed with
+    the seeding restored — it could not go red, because by then the launch was
+    already gone. The assertion that moves is the one below.
+    """
+    from hive_ide.repair import SessionRepair
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+    _transcript(claude_store, X)
+
+    # B owns X. A's record names it too — the duplicate the sweep exists to clear.
+    b = _session(store, "B", X)
+    a = _session(store, "A", X)
+
+    repair = SessionRepair(store, Frame(store, socket="sock"))
+    a_record = store.find_session(a["id"])
+    repair._remove_duplicate_conversation_refs(a_record, [], [], apply=True)
+    store.write("sessions", a_record["id"], a_record)
+
+    assert "claude" not in a_record["agents"]["resume_ids"], "the duplicate is cleared"
+    assert AgentResumeState.reference_from_driver(a_record["driver"]) is None, (
+        "the LAUNCH must be cleared with the slot; a conversation left in the "
+        "stored command is a claim waiting for the next thing that reads it"
+    )
+    assert X not in " ".join(a_record["driver"].get("launch_argv") or []), (
+        "and the argv is re-rendered without it"
+    )
+
+    # So the stages that follow — a reload, the sweep again, and the guard's own
+    # construction inside the same run — have nothing to hand back.
+    a_again = store.find_session(a["id"])
+    AgentResumeState(a_again)
+    repair._remove_duplicate_conversation_refs(a_again, [], [], apply=True)
+    ConversationGuard(store).check(a_again, working_dir=str(workspace), apply=True)
+
+    assert "claude" not in store.find_session(a["id"])["agents"]["resume_ids"]
+    assert store.find_session(b["id"])["agents"]["resume_ids"]["claude"] == X, (
+        "B keeps the conversation it owns throughout"
+    )
+
+
+def test_the_first_unproven_event_still_fills_a_slot_that_is_now_genuinely_empty(
+    tmp_path, claude_store
+):
+    """Removing the seeding makes an old asymmetry reachable for the first time.
+
+    `remember(proven=False)` has always been allowed to FILL an empty slot and
+    forbidden to REPLACE a different one — the 2026-11-22 DJ DEV rule. Until
+    now the fill arm was nearly unreachable, because constructing the state
+    object had already put the launch there. With seeding gone the slot really
+    can be empty when an unproven event arrives, so the arm needs its own test
+    rather than inheriting one.
+
+    Filling it is still right: a session holding no reference loses nothing by
+    trusting the only one on offer. What it must not do is reach that state by
+    reading its own argv, which is what the tests above pin.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+
+    record = _session(store, "A", X)
+    state = AgentResumeState(record)
+    state.forget("claude")
+    assert record["agents"]["resume_ids"] == {}
+
+    # No transcript was written for Y, so this reference is unproven.
+    assert state.remember("claude", Y, proven=False) is True
+    assert record["agents"]["resume_ids"]["claude"] == Y
+
+    # And it still may not displace a reference that is there.
+    assert state.remember("claude", X, proven=False) is False
+    assert record["agents"]["resume_ids"]["claude"] == Y, (
+        "an unproven reference fills an empty slot but never replaces one"
+    )
