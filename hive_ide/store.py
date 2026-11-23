@@ -510,6 +510,12 @@ class StateStore:
             "last_active": now,
             "archived_at": None,
             "host": host or {},
+            # Written out explicitly so a new session is never mistaken for a
+            # legacy one. "No `agents` block" is how a record from before
+            # per-driver references is recognised, and that conversion seeds the
+            # launch as its claim; a record created here states its claim below
+            # instead, and must not acquire one just by being young.
+            "agents": {"resume_ids": {}, "resume_history": {}},
         }
         if launch_prompt is not None:
             # Passed to the driver as its initial prompt argument at the first
@@ -518,6 +524,16 @@ class StateStore:
         driver_id = driver.get("id") if isinstance(driver, dict) else None
         agents = AgentResumeState(record)
         agents.mark_active(driver_id if isinstance(driver_id, str) else None)
+        # Adoption resolves the launch AGAINST a conversation, so a resolved
+        # reference here means this session is being created on it. That is a
+        # claim, and it is made here rather than left to a side effect of
+        # constructing `AgentResumeState` — which no longer fills an empty slot,
+        # precisely so that nothing else can acquire a conversation by accident.
+        adopted = AgentResumeState.reference_from_driver(
+            driver if isinstance(driver, dict) else {}
+        )
+        if isinstance(driver_id, str) and driver_id and adopted:
+            agents.remember(driver_id, adopted)
         self.write("sessions", record["id"], record)
         return record
 
