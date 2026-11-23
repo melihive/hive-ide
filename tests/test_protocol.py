@@ -64,7 +64,7 @@ def test_terminal_title_appends_local_host_name(tmp_path, monkeypatch):
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE workstation"
+    assert frame._terminal_title() == "workspace workstation"
 
 
 def test_terminal_title_appends_configured_ssh_host_name(tmp_path, monkeypatch):
@@ -75,7 +75,7 @@ def test_terminal_title_appends_configured_ssh_host_name(tmp_path, monkeypatch):
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE workstation"
+    assert frame._terminal_title() == "workspace workstation"
 
 
 def test_terminal_title_appends_local_host_name_for_ssh_session(tmp_path, monkeypatch):
@@ -87,7 +87,7 @@ def test_terminal_title_appends_local_host_name_for_ssh_session(tmp_path, monkey
 
     frame = Frame(StateStore(tmp_path / "state", workspace))
 
-    assert frame._terminal_title() == "workspace IDE workstation"
+    assert frame._terminal_title() == "workspace workstation"
 
 
 def test_pane_titles_use_workspace_session_and_plan_heading(tmp_path):

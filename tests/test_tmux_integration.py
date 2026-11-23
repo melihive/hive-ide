@@ -327,11 +327,11 @@ def test_real_tmux_lifecycle_is_id_targeted_and_three_paned(tmp_path, monkeypatc
             frame.tmux(
                 ["show-option", "-v", "-t", frame.target, "set-titles-string"]
             ).stdout.strip()
-            == "workspace IDE workstation"
+            == "workspace workstation"
         )
         assert (
             frame.tmux(["show-option", "-gv", "set-titles-string"]).stdout.strip()
-            == "workspace IDE workstation"
+            == "workspace workstation"
         )
         keys = frame.tmux(["list-keys", "-T", "prefix"]).stdout
         root_keys = frame.tmux(["list-keys", "-T", "root"]).stdout

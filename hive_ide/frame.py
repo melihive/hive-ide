@@ -3346,8 +3346,8 @@ class Frame:
         workspace = Path(self.store.workspace_key).name or self.store.workspace_hash[:8]
         host = self._host_title_suffix()
         if host:
-            return f"{workspace} IDE {host}"
-        return f"{workspace} IDE"
+            return f"{workspace} {host}"
+        return workspace
 
     @classmethod
     def _host_title_suffix(cls) -> str | None:
