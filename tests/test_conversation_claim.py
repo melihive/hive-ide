@@ -369,3 +369,128 @@ def test_the_first_unproven_event_still_fills_a_slot_that_is_now_genuinely_empty
     assert record["agents"]["resume_ids"]["claude"] == Y, (
         "an unproven reference fills an empty slot but never replaces one"
     )
+
+
+# -- the readers that answer "what is this session on right now" ---------------
+#
+# `session_reference` falls back to the launch when the slot is empty. That was
+# harmless while the slot was never empty — construction filled it. Now that a
+# forgotten conversation stays forgotten, the fallback is reachable, and it
+# answers a question nobody asked it: the argv's conversation, reported as the
+# session's own. Codex finding 2 on the shipped claim fix.
+
+
+def test_a_session_that_forgot_its_conversation_reports_none_not_its_argv(
+    tmp_path, claude_store
+):
+    """The accessor needs the same absent-vs-empty rule the constructor uses.
+
+    An absent `agents` block is a record from before per-driver references, and
+    its launch is the only claim it has. An EMPTY `resume_ids` is a session that
+    had a reference and gave it up — asking its argv hands back exactly what it
+    released.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+
+    record = _session(store, "A", X)
+    AgentResumeState(record).forget("claude")
+    assert AgentResumeState.reference_from_driver(record["driver"]) == X, (
+        "the stored command still names X — that is the whole hazard"
+    )
+    assert AgentResumeState.session_reference(record) is None, (
+        "a session that forgot its conversation is ON nothing; the launch "
+        "speaks for the next command, never for the session"
+    )
+
+    legacy = store.find_session(record["id"])
+    legacy.pop("agents")
+    assert AgentResumeState.session_reference(legacy) == X, (
+        "a record with no agents block at all still falls back to its launch"
+    )
+
+
+def test_a_sleeping_session_does_not_advertise_a_conversation_it_released(
+    tmp_path, claude_store
+):
+    """The sleeping status row is what the sidebar renders.
+
+    It is a report ABOUT the session, so a released conversation showing up here
+    tells the user the sleeping agent is sitting on a chat that another session
+    may now own.
+    """
+    from hive_ide import cli
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+
+    record = _session(store, "A", X)
+    AgentResumeState(record).forget("claude")
+    store.write("sessions", record["id"], record)
+
+    cli._write_sleeping_status(store, record, "2026-11-23T12:00:00+00:00")
+    row = store.read("status", record["id"])
+    assert row["conversation_reference"] is None, (
+        "a sleeping session reports the conversation it is on, and it is on none"
+    )
+
+
+def test_the_sidebar_projection_does_not_put_a_released_conversation_back(
+    tmp_path, claude_store
+):
+    """`StateIO._legacy` projects a thin record for the sidebar and plugins.
+
+    It re-`remember`s whatever the accessor returns, so the launch fallback was
+    being copied straight into the projection's own `resume_ids` — the sidebar
+    naming the conversation the session had just left.
+    """
+    from hive_ide.state_compat import StateIO
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+
+    record = _session(store, "A", X)
+    AgentResumeState(record).forget("claude")
+    store.write("sessions", record["id"], record)
+
+    projected = StateIO._legacy(store.find_session(record["id"]))
+    assert X not in str(projected.get("agents")), (
+        "the projection must not re-acquire the released conversation"
+    )
+    assert record["agents"]["resume_ids"] == {}, "and the real record is untouched"
+
+
+def test_the_stranded_holder_release_declines_a_conversation_no_longer_claimed(
+    tmp_path, claude_store
+):
+    """Repair would otherwise hunt a process on a conversation the session released.
+
+    The release path exists to stop a driver stranded on THIS session's
+    conversation. Once the session claims none, there is nothing of its own to
+    be stranded on, and a process found on the old argv's conversation belongs
+    to whoever owns it now.
+    """
+    from hive_ide.repair import SessionRepair
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = StateStore(tmp_path / "state", workspace)
+
+    record = _session(store, "A", X)
+    AgentResumeState(record).forget("claude")
+    store.write("sessions", record["id"], record)
+
+    repair = SessionRepair(store, Frame(store, socket="sock"))
+    calls = []
+    repair._has_live_shell_agent = lambda rec: calls.append("probed") or False
+
+    repair._release_stranded_holder(
+        store.find_session(record["id"]), [], [], apply=True
+    )
+    assert calls == [], (
+        "the release must decline on the empty claim, before it starts probing "
+        "for a holder of a conversation this session no longer claims"
+    )

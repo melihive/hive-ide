@@ -89,8 +89,15 @@ def test_session_reference_prefers_what_an_event_recorded(store):
     )
 
 
-def test_session_reference_falls_back_to_the_launch_before_any_event(store):
-    """A session that has never had an event has only its launch to go on."""
+def test_session_reference_falls_back_to_the_launch_only_for_a_legacy_record(store):
+    """A record with no `agents` block has only its launch to go on.
+
+    This fixture used to write `record["agents"] = {}` and expect the launch
+    back, which encodes the opposite of the rule the claim phase needs. An
+    empty block is a session that recorded a reference and released it; the
+    ABSENT block is the pre-per-driver record whose launch is its only claim.
+    Both arms are pinned here so the distinction cannot quietly collapse again.
+    """
     workspace = store.workspace_key
     record = store.create_session(
         name="FRESH",
@@ -100,8 +107,12 @@ def test_session_reference_falls_back_to_the_launch_before_any_event(store):
             name="FRESH", working_dir=str(workspace), conversation_reference=LEFT
         ),
     )
-    record["agents"] = {}
-    assert AgentResumeState.session_reference(record) == LEFT
+
+    legacy = {k: v for k, v in record.items() if k != "agents"}
+    assert AgentResumeState.session_reference(legacy) == LEFT
+
+    released = {**record, "agents": {"resume_ids": {}, "resume_history": {}}}
+    assert AgentResumeState.session_reference(released) is None
 
 
 def test_session_reference_does_not_lend_one_drivers_launch_to_another(store):
@@ -110,9 +121,23 @@ def test_session_reference_does_not_lend_one_drivers_launch_to_another(store):
     Asking about `codex` on a record launched as `claude` must not hand back
     the claude conversation — that is how a driver would be resumed into a
     transcript it cannot read.
+
+    Asked of a LEGACY record, because that is now the only shape where the
+    fallback runs at all: once a record has an `agents` block the accessor
+    answers from the block or not at all, so a record with one would pass this
+    for the wrong reason and stop observing the scoping it is here to pin.
     """
     record = _moved(store)
-    assert AgentResumeState.session_reference(record, "codex") is None
+    record.pop("agents")
+    assert AgentResumeState.session_reference(record, "claude") == LEFT, (
+        "its own driver still gets the launch"
+    )
+    assert AgentResumeState.session_reference(record, "codex") is None, (
+        "another driver never does"
+    )
+
+    modern = _moved(store, name="MODERN")
+    assert AgentResumeState.session_reference(modern, "codex") is None
 
 
 def test_session_reference_does_not_write_to_the_record(store):
@@ -390,14 +415,24 @@ def test_the_legacy_projection_does_not_write_through_to_the_record(store):
     state the next writer would save.
     """
     record = _moved(store)
-    record["agents"] = {}
+    record.pop("agents")          # a legacy record: the one shape that still seeds
 
     projected = StateIO._legacy(record)
 
     assert projected["agents"]["resume_ids"]["claude"] == LEFT, (
         "the projection still seeds its own copy from the launch"
     )
-    assert record["agents"] == {}, "and leaves the record exactly as it found it"
+    assert "agents" not in record, "and leaves the record exactly as it found it"
+
+    # The released case is the other half: an EMPTY block projects nothing,
+    # and still must not be written through to.
+    released = _moved(store, name="RELEASED")
+    released["agents"] = {"resume_ids": {}, "resume_history": {}}
+    projected_released = StateIO._legacy(released)
+    assert not projected_released["agents"].get("resume_ids"), (
+        "a released conversation is not re-acquired by rendering the sidebar"
+    )
+    assert released["agents"] == {"resume_ids": {}, "resume_history": {}}
 
 
 # --- repair's duplicate-reference sweep ------------------------------------
@@ -530,7 +565,7 @@ def test_the_legacy_projection_still_answers_for_a_driver_with_no_id(store):
         source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
         driver={"resume": {"reference": LEFT}},
     )
-    record["agents"] = {}
+    record.pop("agents")          # legacy: the shape the fallback still serves
 
     projected = StateIO._legacy(record)
 

@@ -67,9 +67,18 @@ class AgentResumeState:
         sidebar show, which chat does `current_chat` open — is about
         `resume_ids`, never about the argv.
 
-        Falls back to the launched reference, because a session that has never
-        had an event has no `resume_ids` entry and its launch is then the only
-        evidence there is.
+        Falls back to the launched reference ONLY for a record with no `agents`
+        block at all — one written before per-driver references, whose launch is
+        the only claim it has ever been able to make. This is the same
+        absent-versus-empty rule the constructor and `_owns_conversation` use,
+        and it has to be, or the three disagree about one record.
+
+        An empty `resume_ids` is NOT that case. It is a session that recorded a
+        reference and released it, and answering with its argv hands back the
+        conversation it just gave up — to a sleeping session's status row, to
+        the sidebar, and to the repair that goes hunting for a holder of it.
+        Those readers all ask "what is this session on right now", and the
+        honest answer for a session that claims nothing is nothing.
 
         `driver_id` names a driver to ask about; omitting it asks about the
         session's current one. Naming one scopes the fallback — a launch speaks
@@ -93,6 +102,8 @@ class AgentResumeState:
                 if isinstance(remembered, str) and remembered:
                     return remembered
         if driver_id is not None and driver.get("id") != driver_id:
+            return None
+        if isinstance(record.get("agents"), dict):
             return None
         return AgentResumeState.reference_from_driver(driver)
 
