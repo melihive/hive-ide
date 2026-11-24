@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [3.0.0] - 2026-11-24
+
 A session's conversation is now something it RECORDED, not something inferred
 from the command it was last launched with — and a launch's destination is
 decided by the driver that would run it. Both were read off a stored argv
@@ -60,8 +62,8 @@ that cannot be shown to reach a conversation no longer speaks for one.
   answers, and the unprovable one declines to act.
 - A session could be refused its own conversation by ownership it no longer
   held, and a stale argv was protected by ownership it could no longer win.
-- Repair now releases a conversation stranded in a retired frame — found on a
-  fleet machine where a pre-2.0 tmux server had held a session's driver for 31
+- Repair now releases a conversation stranded in a retired frame — found on a machine
+  where a pre-2.0 tmux server had held a session's driver for 31
   days, so every `chat` hit the holder guard and every repair rebuilt a frame
   whose agent could not start. It stops a process only when provably
   unreachable, verified by identity through a pidfd immediately before the
