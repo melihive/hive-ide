@@ -34,7 +34,7 @@ from __future__ import annotations
 import pytest
 
 from hive_ide.agents import AgentResumeState
-from hive_ide.drivers import bundled_drivers
+from hive_ide.drivers import DriverRegistry, bundled_drivers
 from hive_ide.frame import Frame
 from hive_ide.repair import SessionRepair
 from hive_ide.state_compat import StateIO
@@ -884,25 +884,42 @@ def test_the_legitimate_owner_can_still_launch_after_the_mover_is_refused(store)
     frame.refuse_owned_conversation(b)      # must not raise
 
 
-def test_a_command_that_cannot_join_the_conversation_is_not_a_collision(store):
+def test_a_command_that_cannot_join_the_conversation_is_not_a_collision(
+    store, monkeypatch
+):
     """A driver whose `resume_strategy` is `none` keeps the reference in
     metadata while rendering only a fresh launch. Refusing that command blocks
-    one that was never going to join anything — the argv is what runs, so the
-    argv is what decides.
+    one that was never going to join anything.
+
+    The driver is now a REAL `resume_strategy: none` one, where this used to
+    hand-build `claude --name NO_RESUME` with the reference in metadata. Nothing
+    renders that shape — every writer sets `driver` through `resolve()`, which
+    renders the argv and the reference together — and a command this
+    installation cannot reproduce is no longer read as colliding with nothing:
+    Phase 85 found that a wrapper's own continuation word (`["wrapper",
+    "reopen"]`) reaches exactly that reading and loses a guard this package has
+    always had. What the test is about is unchanged, and it now uses a driver
+    that genuinely cannot resume.
     """
     _moved(store, name="OWNER", left=LEFT, joined=LEFT)
     workspace = store.workspace_key
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude", {"command": ["claude", "--fresh-only"], "capabilities": ["launch"]}
+    )
+    monkeypatch.setattr(Frame, "driver_registry", lambda self: registry)
     record = store.create_session(
         name="NO_RESUME",
         working_dir=workspace,
         source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
-        driver={
-            "id": "claude",
-            # The reference rides in metadata; the command does not carry it.
-            "resume": {"reference": LEFT},
-            "launch_argv": ["claude", "--name", "NO_RESUME"],
-        },
+        driver=registry.get("claude").resolve(
+            name="NO_RESUME",
+            working_dir=str(workspace),
+            # The reference rides in metadata; the command cannot carry it.
+            conversation_reference=LEFT,
+        ),
     )
+    assert LEFT not in " ".join(record["driver"]["launch_argv"]), "the premise"
     record["agents"] = {"resume_ids": {}}
 
     Frame(store, socket="sock").refuse_owned_conversation(record)   # must not raise

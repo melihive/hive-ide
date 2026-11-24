@@ -2451,18 +2451,26 @@ class Frame:
         )
 
     @classmethod
-    def _may_land_on_the_records_reference(cls, argv: Any, definition: Any) -> bool:
+    def _may_land_on_the_records_reference(cls, rendered: dict[str, Any]) -> bool:
         """Could this command end up on the conversation the record names?
 
         Not the same question as its destination. A command that selects for
-        itself, or a driver whose whole strategy is to continue a WORKSPACE, may
-        well reopen the conversation the record holds while naming nothing — so a
+        itself, or one whose whole strategy is to continue a WORKSPACE, may well
+        reopen the conversation the record holds while naming nothing — so a
         collision guard is still given that reference, even though nothing can be
         PROMISED through it. A configured wrapper reached this by its own
         continuation word (`["wrapper", "reopen"]`), which no option list knows.
+
+        Both answers come from the RENDERED result, never from an attribute of
+        the definition: a plugin returns `resume.strategy` from `resolve()`
+        without necessarily carrying a `resume_strategy` attribute at all, and
+        reading the attribute lost the reference for exactly the plugin-shaped
+        driver this protects.
         """
-        return cls._selects_for_itself(argv) or (
-            str(getattr(definition, "resume_strategy", "")) == "workspace_continue"
+        resume = rendered.get("resume") if isinstance(rendered, dict) else None
+        strategy = resume.get("strategy") if isinstance(resume, dict) else None
+        return cls._selects_for_itself(rendered.get("launch_argv")) or (
+            strategy == "workspace_continue"
         )
 
     def _stored_destination(
@@ -2507,9 +2515,7 @@ class Frame:
             # `rendered_destination` makes the self-selecting-option call itself,
             # so the guard's adoption path gets it too.
             kind, destination = rendered_destination(ours)
-            return (kind, destination, self._may_land_on_the_records_reference(
-                ours.get("launch_argv"), definition
-            ))
+            return (kind, destination, self._may_land_on_the_records_reference(ours))
         # No branch of ours rendered this command. There is no third case to
         # handle: every writer renders with the reference the record holds, so a
         # stored argv matching the FRESH rendering while the metadata names a

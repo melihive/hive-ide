@@ -114,6 +114,35 @@ class _NamedFresh:
         return None     # no probe of its own: UNKNOWN, never "gone"
 
 
+class _PluginContinuesAWorkspace:
+    """A plugin that declares its strategy in `resolve()` and nowhere else.
+
+    The protocol asks for `resolve()`, not for a `resume_strategy` attribute, so
+    reading the attribute to decide whether a command may land on the record's
+    conversation lost the reference for every plugin-shaped driver.
+    """
+
+    id = "antigravity"
+    label = "Wrapper"
+    launch_flags: list[str] = []
+
+    def resolve(self, *, name, working_dir, conversation_reference):
+        argv = ["wrapper"] + (["reopen"] if conversation_reference else [])
+        return {
+            "id": self.id,
+            "label": self.label,
+            "launch_argv": argv,
+            "resume": {
+                "strategy": "workspace_continue",
+                "reference": conversation_reference,
+            },
+            "capabilities": ["launch", "resume"],
+        }
+
+    def conversation_exists(self, reference, working_dir):
+        return None
+
+
 class _ClaimsResumeRendersNothing:
     """Declares id-resume and renders no id — the destination is unknowable."""
 
@@ -1231,3 +1260,36 @@ def test_an_older_frames_queued_attach_is_not_refused_by_its_own_host(
     assert launch_gate.held_conversation_reason() is None, (
         "its own host is what it is queued to attach to"
     )
+
+
+def test_a_plugin_declares_its_strategy_in_what_it_renders(store, monkeypatch):
+    """`resolve()` is the whole protocol — an attribute is not part of it.
+
+    A plugin returning `resume.strategy = "workspace_continue"` without a
+    `resume_strategy` attribute was classified correctly (unknown) and then lost
+    the reference a guard needs, because the two answers came from two places.
+    Both now come from the rendered result.
+    """
+    registry = DriverRegistry({"antigravity": _PluginContinuesAWorkspace()})
+    record = _session(store, "A", registry.get("antigravity"), REF)
+    frame = _frame(store, monkeypatch, registry)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    assert not hasattr(registry.get("antigravity"), "resume_strategy"), "the premise"
+
+    target = frame.select_launch(record)
+    assert (target.kind, target.reference, target.carried) == (
+        LAUNCH_UNKNOWN, None, REF,
+    )
+    assert target.collides_with() == REF
+
+    monkeypatch.setattr(
+        ConversationHolders, "holders",
+        classmethod(
+            lambda cls, ref, **kw: [
+                {"pid": 9191, "ppid": 1, "command": f"claude --resume {ref}",
+                 "orphaned": True, "background": False}
+            ]
+        ),
+    )
+    with pytest.raises(HeldConversationError):
+        frame.prepare_agent_launch(record)
