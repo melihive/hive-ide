@@ -60,6 +60,58 @@ class AgentDriver(Protocol):
     ) -> dict[str, Any] | None: ...
 
 
+#: Where a launch will land. `resume` names the conversation it joins, `fresh`
+#: starts a new one, and `unknown` is a command whose destination cannot be
+#: established — never folded into either of the other two.
+LAUNCH_RESUME = "resume"
+LAUNCH_FRESH = "fresh"
+LAUNCH_UNKNOWN = "unknown"
+
+
+def rendered_destination(rendered: dict[str, Any]) -> tuple[str, str | None]:
+    """Where a command THIS installation rendered will land.
+
+    The authority is the `resume` block `resolve()` returns, not the shape of the
+    argv, because the argv cannot be read for this:
+
+    - the reference can be in the argv without being resumed. A session NAME
+      equal to the conversation id puts it there (`claude --name <id>`), and a
+      driver whose `resume_strategy` is `none` renders only a fresh launch while
+      still carrying the reference in its metadata.
+    - the reference can be resumed without being in the argv. `agy -c` continues
+      whatever conversation that workspace considers current, which may or may
+      not be the one the record names.
+    - comparing the two renderings cannot separate the cases either. A
+      declarative driver with `command = ["claude", "--resume", X]` and
+      `resume_argv = ["claude", "--resume"]` renders byte-identical argv with and
+      without the reference, and genuinely resumes X in both.
+
+    So the strategy the driver declares decides, and the argv only corroborates:
+    a driver that says it resumes by id and then renders a command without the
+    id is UNKNOWN, not fresh — it may resume through something we cannot see,
+    and claiming a fresh conversation for it would be a guess either way.
+    """
+    resume = rendered.get("resume") if isinstance(rendered, dict) else None
+    strategy = resume.get("strategy") if isinstance(resume, dict) else None
+    reference = resume.get("reference") if isinstance(resume, dict) else None
+    if not isinstance(reference, str) or not reference:
+        # Nothing was rendered to resume, whatever the driver can do.
+        return (LAUNCH_FRESH, None)
+    if strategy == "workspace_continue":
+        # It joins a conversation it cannot name. Bare `agy` (no reference) is a
+        # known fresh launch and took the branch above; only the continuation is
+        # unknowable, so the DRIVER is never classified, only the command.
+        return (LAUNCH_UNKNOWN, None)
+    if strategy != "conversation_id":
+        # `none`, or a strategy this version does not know: the resume branch was
+        # never taken, so the rendered command starts a new conversation.
+        return (LAUNCH_FRESH, None)
+    argv = rendered.get("launch_argv") if isinstance(rendered, dict) else None
+    if not any(reference in str(part) for part in argv or []):
+        return (LAUNCH_UNKNOWN, None)
+    return (LAUNCH_RESUME, reference)
+
+
 class CommandDriver:
     def __init__(
         self,

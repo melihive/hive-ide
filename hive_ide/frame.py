@@ -10,15 +10,22 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import PROTOCOL_VERSION, SCHEMA_VERSION, __version__
 from .config import DEFAULT_KEYS, _editor_argv as resolve_editor_argv
 from .config import configured_registry, load_config
 from .agents import AgentResumeState
 from .conversation import ConversationGuard
-from .drivers import DriverRegistry
+from .drivers import (
+    LAUNCH_FRESH,
+    LAUNCH_RESUME,
+    LAUNCH_UNKNOWN,
+    DriverRegistry,
+    rendered_destination,
+)
 from .errors import HeldConversationError, HiveIdeError, UsageError
 from .holders import ConversationHolders
 from .layout import IdeLayout
@@ -28,6 +35,56 @@ from .python_cmd import PythonCommand
 from .socket_gc import SocketReaper
 from .source import inspect_interpreter
 from .store import StateStore, utc_now
+
+
+#: An attach is its own destination: it joins a conversation already running in
+#: the background, and carries no argv of its own to put a prompt in.
+LAUNCH_ATTACH = "attach"
+
+
+@dataclass(frozen=True)
+class LaunchTarget:
+    """The command a launch will run, and where that command will land.
+
+    Transient by construction — built at the execution boundary and passed down,
+    never written to a record. A persisted copy would be read back after the
+    process table had moved on, which is the staleness this type exists to end.
+    """
+
+    kind: Literal["resume", "attach", "fresh", "unknown"]
+    driver_id: str | None
+    #: The conversation the command joins. Set only for `resume` and `attach`,
+    #: and always the FULL reference — `attach` passes a short form of it on the
+    #: command line, but ownership and holders are asked about the conversation.
+    reference: str | None
+    #: The reference the stored command CARRIES, set only where the destination
+    #: is unknown. A command this installation cannot interpret may still
+    #: plainly contain a conversation id — a record rendered by an older version
+    #: of the same driver definition does — and a command that carries the id can
+    #: reach it. Not a destination, and never a claim.
+    carried: str | None
+    argv: tuple[str, ...]
+    #: A background session host for this conversation was seen in the same
+    #: snapshot the command was chosen from. True with `kind != "attach"` only
+    #: where a pending one-shot prompt kept the launch from attaching.
+    host_present: bool
+
+    def carries_a_prompt(self) -> bool:
+        """Can a one-shot prompt ride on this command? Not on an attach."""
+        return self.kind != LAUNCH_ATTACH
+
+    def collides_with(self) -> str | None:
+        """The conversation a collision guard must ask about.
+
+        The established destination where there is one. Where there is none
+        because the command cannot be interpreted, what it carries — refusing on
+        that is what this package has always done, and for the common case of a
+        record rendered by an older version of the driver definition it is right.
+        A command known to be FRESH carries nothing for a guard to act on, which
+        is the refusal this removes: an ordinary new `claude` was refused because
+        some other process held a reference the launch would not have resumed.
+        """
+        return self.reference or self.carried
 
 
 class Frame:
@@ -1498,7 +1555,12 @@ class Frame:
         )
 
     @classmethod
-    def _attach_argv(cls, driver: dict[str, Any]) -> list[str] | None:
+    def _attach_argv(
+        cls,
+        driver: dict[str, Any],
+        *,
+        rows: list[tuple[int, int, str]] | None = None,
+    ) -> list[str] | None:
         """`attach` argv when this driver's conversation is live in the background.
 
         A backgrounded session already owns its conversation, so the recorded
@@ -1521,7 +1583,7 @@ class Frame:
         reference = (driver.get("resume") or {}).get("reference")
         if not isinstance(reference, str) or not reference:
             return None
-        if not ConversationHolders.background_hosts(reference):
+        if not ConversationHolders.background_hosts(reference, rows=rows):
             return None
         # The configured executable, not a bare `claude`: a declarative driver can
         # replace the bundled command with an absolute path or a wrapper, and
@@ -1582,26 +1644,32 @@ class Frame:
         return cls._argv_with_handoff_prompt(argv, record) if argv else []
 
     @classmethod
-    def _agent_command(cls, record: dict[str, Any]) -> str:
+    def _agent_command(
+        cls, record: dict[str, Any], target: LaunchTarget | None = None
+    ) -> str:
+        # The argv comes from `select_launch`, which made the attach decision and
+        # applied Codex isolation and the handoff prompt once, in one process
+        # snapshot. Re-deciding it here is what let validation and execution
+        # disagree: a background host appearing in between turned the command
+        # into an attach, and the one-shot prompt it was supposed to carry was
+        # dropped while `wake` reported success (round 4).
         driver = record.get("driver") or {}
-        # `agent_launch_argv`, not the raw `launch_argv`: Codex isolation is
-        # enforced at the execution boundary so a stored pre-fix argv is isolated
-        # too, and the handoff prompt rides along. An attach is exempt by
-        # construction — it reconnects to a process that already runs, so there is
-        # no shared daemon for it to inherit, and a handoff prompt is not a thing
-        # you say to a turn already in flight.
-        argv = cls.agent_launch_argv(record) or cls._argv_with_handoff_prompt(
+        if target is None:
+            # No selection was handed down. Make one from the record the only way
+            # a classmethod can, so a direct caller gets the same command the
+            # frame would run rather than a different assembly of it.
+            argv = list(cls.agent_launch_argv(record))
+            attach = cls._attach_argv(driver)
+            if attach and not record.get("launch_prompt"):
+                argv = attach
+        else:
+            argv = list(target.argv)
+        # `agent_launch_argv` is empty for a record with no launch argv at all; a
+        # shell belongs to starting a pane, never to identifying a driver, so the
+        # fallback lives here rather than in that accessor.
+        argv = argv or cls._argv_with_handoff_prompt(
             [os.environ.get("SHELL", "/bin/sh")], record
         )
-        attach = cls._attach_argv(driver)
-        if attach and not record.get("launch_prompt"):
-            # An attach carries no argv, so it cannot deliver a one-shot prompt.
-            # `prepare_agent_launch` refuses such a launch with a clear message,
-            # but it reads the background host SEPARATELY from this line, and a
-            # host appearing in between made the two disagree: validation
-            # passed, the command became an attach, and the prompt was dropped
-            # while `wake` reported success. One decision, made here.
-            argv = attach
         command = shlex.join(argv)
         handoff = record.get("handoff")
         if isinstance(handoff, dict) and handoff:
@@ -2153,7 +2221,7 @@ class Frame:
         # second driver on a conversation another process holds, which is the
         # fault the guard exists for — and a driverless pane is exactly where a
         # user is told to run `chat`.
-        self.prepare_agent_launch(record)
+        selected = self.prepare_agent_launch(record)
         # `prepare_agent_launch` reconciles the record: a conversation confirmed
         # gone is dropped, which rewrites `driver` and its argv. `argv` was read
         # before that, so launching it would run the stale `--resume <deleted-id>`
@@ -2163,10 +2231,19 @@ class Frame:
         # so Codex isolation has to apply to the re-read argv exactly as it did to
         # the first one. Reading the raw value here left the one path a driverless
         # pane invites the user to run as the only un-isolated launch in the frame.
-        argv = list(self._agent_argv(record) or argv)
+        # The SELECTED command. This path assembled its own argv, so it could
+        # validate an attach and then execute a resume — a second driver on a
+        # conversation that is live in the background, which is the blank pane
+        # the holder guard exempts that host FOR. It is also the path a
+        # driverless pane tells the user to run.
+        argv = list(selected.argv) or argv
         result = subprocess.run(argv, cwd=record["working_dir"])
         if result.returncode != 0:
-            if driver.get("id") == "claude":
+            # A failed ATTACH never falls back to a fresh conversation: the
+            # conversation is running in the background, and starting a new one
+            # under this session's name would hide it behind a chat that looks
+            # like it.
+            if driver.get("id") == "claude" and selected.kind != LAUNCH_ATTACH:
                 fallback_argv = ["claude"]
                 name = " ".join(str(record.get("name") or "").split())
                 if name:
@@ -2247,9 +2324,102 @@ class Frame:
         except (HiveIdeError, OSError, ValueError):
             return DriverRegistry()
 
+    def select_launch(
+        self,
+        record: dict[str, Any],
+        *,
+        rows: list[tuple[int, int, str]] | None = None,
+    ) -> LaunchTarget:
+        """Choose the command this frame will run for `record`, ONCE.
+
+        Every launch decision downstream reads this value instead of deriving
+        its own: validation, the two collision guards, the command tmux is
+        given, and the cleanup that runs once the panes exist. Deriving it twice
+        is the defect this closes. `prepare_agent_launch` read the background
+        host and `_agent_command` read it again, so a host appearing in between
+        made validation and execution disagree: validation passed, the command
+        became an `attach`, and the one-shot prompt it carried went nowhere while
+        the command reported success (review round 4). That was fixed by adding a
+        second check beside the first; one decision is the fix.
+
+        Call it AFTER `ConversationGuard` has reconciled the record — it reports
+        the destination of the command as it now stands, not of a candidate.
+        """
+        driver = record.get("driver") or {}
+        driver_id = driver.get("id")
+        driver_id = driver_id if isinstance(driver_id, str) and driver_id else None
+        # Only a launch that names a conversation can attach to one or collide
+        # over one, and reading the process table costs a `ps` — which the window
+        # build did not pay before this selection existed. Both the attach
+        # decision and the holder check used to return before reading it.
+        named = (driver.get("resume") or {}).get("reference")
+        named = isinstance(named, str) and bool(named)
+        if named and rows is None:
+            rows = ConversationHolders.snapshot()
+        attach = self._attach_argv(driver, rows=rows) if named else None
+        if attach and not record.get("launch_prompt"):
+            reference = (driver.get("resume") or {}).get("reference")
+            return LaunchTarget(
+                LAUNCH_ATTACH,
+                driver_id,
+                reference if isinstance(reference, str) and reference else None,
+                None,
+                tuple(attach),
+                True,
+            )
+        # A pending one-shot prompt cannot ride on an attach, so the launch keeps
+        # the command it has and the host is REPORTED instead. Whether that
+        # refuses is the caller's decision: `wake` cannot deliver a prompt into a
+        # second driver, while an ordinary open has always proceeded.
+        kind, destination = self._stored_destination(record, driver_id)
+        stored = AgentResumeState.reference_from_driver(driver)
+        carried = (
+            stored
+            if kind == LAUNCH_UNKNOWN
+            and stored
+            and any(stored in str(part) for part in driver.get("launch_argv") or [])
+            else None
+        )
+        return LaunchTarget(
+            kind,
+            driver_id,
+            destination,
+            carried,
+            tuple(self.agent_launch_argv(record)),
+            bool(attach),
+        )
+
+    def _stored_destination(
+        self, record: dict[str, Any], driver_id: str | None
+    ) -> tuple[str, str | None]:
+        """Where the record's STORED command lands, per the renderer that made it.
+
+        UNKNOWN for a command this installation did not generate — a configured
+        wrapper, a plugin not loaded here, a record from another version. Reading
+        such a command through our own rendering is the reading half of the
+        mistake `ConversationGuard.launch_is_ours` guards on the writing half: it
+        would take a wrapper's own executable, flags and store selection to be
+        the ones we would have produced, and report a destination from them.
+        """
+        driver = record.get("driver") or {}
+        if driver_id is None:
+            return (LAUNCH_UNKNOWN, None)
+        try:
+            definition = self.driver_registry().get(driver_id)
+        except HiveIdeError:
+            return (LAUNCH_UNKNOWN, None)
+        ours = definition.resolve(
+            name=str(record.get("name") or ""),
+            working_dir=str(record.get("working_dir") or self.store.workspace_key),
+            conversation_reference=AgentResumeState.reference_from_driver(driver),
+        )
+        if list(ours.get("launch_argv") or []) != list(driver.get("launch_argv") or []):
+            return (LAUNCH_UNKNOWN, None)
+        return rendered_destination(ours)
+
     def prepare_agent_launch(
         self, record: dict[str, Any], *, expect_reference: str | None = None
-    ) -> None:
+    ) -> LaunchTarget:
         """Drop confirmed-gone conversation refs, and refuse a held conversation.
 
         Every driver launch goes through here — `respawn_agent` and the window
@@ -2264,6 +2434,16 @@ class Frame:
         except (HiveIdeError, OSError):
             # A failed reconcile must never stop a window from opening.
             pass
+        # One snapshot for the whole launch: the attach decision and the holder
+        # check below must not read the process table twice, or they can disagree
+        # about the same instant. Taken here only when there is a conversation to
+        # read it for; `select_launch` takes its own when called on its own.
+        rows = (
+            ConversationHolders.snapshot()
+            if AgentResumeState.reference_from_driver(record.get("driver") or {})
+            else None
+        )
+        target = self.select_launch(record, rows=rows)
         if expect_reference is not None and AgentResumeState.reference_from_driver(
             record.get("driver") or {}
         ) != expect_reference:
@@ -2278,10 +2458,30 @@ class Frame:
                 "The conversation this launch promised is no longer available; "
                 "nothing was started."
             )
+        if expect_reference is not None and (
+            target.kind != LAUNCH_RESUME or target.reference != expect_reference
+        ):
+            # The promised conversation is still the one the record names, but
+            # the command would not go there: a `resume_strategy: none` driver
+            # carries a reference it cannot resume, and an opaque wrapper's
+            # destination cannot be established at all. Both used to pass this
+            # gate, because it compared the record's metadata and a metadata
+            # reference is not a destination. Checked AFTER the comparison above
+            # so a conversation that simply went away still says so.
+            raise HiveIdeError(
+                "This session's launch would "
+                + (
+                    "start a new conversation rather than resume the one promised"
+                    if target.kind == LAUNCH_FRESH
+                    else "run a command this installation did not generate, so "
+                    "where it would land cannot be established"
+                )
+                + "; nothing was started."
+            )
         if (
             expect_reference is not None
             and record.get("launch_prompt")
-            and self._attach_argv(record.get("driver") or {})
+            and target.host_present
         ):
             # A background host for this conversation appeared after the caller
             # validated it. The launch would `attach`, and an attach carries no
@@ -2291,11 +2491,14 @@ class Frame:
                 "The conversation is now running in the background, and an "
                 "attach carries no prompt; nothing was started."
             )
-        self.refuse_owned_conversation(record)
-        self.refuse_held_conversation(record)
+        self.refuse_owned_conversation(record, target)
+        self.refuse_held_conversation(record, target, rows=rows)
+        return target
 
-    def refuse_owned_conversation(self, record: dict[str, Any]) -> None:
-        """Raise when the launch would resume a conversation another session is ON.
+    def refuse_owned_conversation(
+        self, record: dict[str, Any], target: LaunchTarget | None = None
+    ) -> None:
+        """Raise when the launch would join a conversation another session is ON.
 
         The holder guard below asks the PROCESS TABLE, and a sleeping session has
         no process — so it cannot answer for one. That gap is reachable now that
@@ -2307,17 +2510,18 @@ class Frame:
         — and it resumes the other session's conversation. On the `wake` path
         that delivers a one-shot prompt into someone else's chat.
         """
-        driver = record.get("driver") or {}
-        driver_id = driver.get("id")
-        reference = AgentResumeState.reference_from_driver(driver)
-        if not reference or not isinstance(driver_id, str) or not driver_id:
-            return
-        if not any(reference in str(part) for part in driver.get("launch_argv") or []):
-            # The command does not carry the conversation, so running it cannot
-            # join it. A declarative driver whose `resume_strategy` is `none`
-            # keeps the reference in its metadata while rendering only a fresh
-            # launch, and refusing there blocks a command that was never a
-            # collision. The argv is what actually runs, so the argv is asked.
+        # The selected command's destination, not the record's metadata: a
+        # `resume_strategy: none` driver keeps a reference it cannot resume, and
+        # refusing on it blocks a command that was never a collision. Searching
+        # the argv for the reference was the first fix for that and was too
+        # coarse in both directions — a session NAMED after a conversation put
+        # the id in a fresh launch's argv, and `agy -c` joins a conversation its
+        # argv never names. An `attach` IS a destination and is checked here too:
+        # joining a background session another session is on is the same
+        # collision as resuming it.
+        target = self.select_launch(record) if target is None else target
+        reference, driver_id = target.collides_with(), target.driver_id
+        if not reference or not driver_id:
             return
         owner = self.store.find_conversation_owner(
             driver_id=driver_id,
@@ -2341,9 +2545,15 @@ class Frame:
             "stored conversation."
         )
 
-    def refuse_held_conversation(self, record: dict[str, Any]) -> None:
-        """Raise when a process outside this session's own agent pane holds its
-        conversation.
+    def refuse_held_conversation(
+        self,
+        record: dict[str, Any],
+        target: LaunchTarget | None = None,
+        *,
+        rows: list[tuple[int, int, str]] | None = None,
+    ) -> None:
+        """Raise when a process outside this session's own agent pane holds the
+        conversation this launch would join.
 
         Starting a second driver on one conversation is what produced a session that
         looked frozen: the orphan went on holding it, the fresh `--resume` never
@@ -2374,14 +2584,24 @@ class Frame:
         and it is not the same as `AgentResumeState.session_reference`, which
         answers what the session is on right now.
         """
-        reference = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        # Keyed on the SELECTED command's destination, from the same snapshot
+        # the command was chosen in. Reading the record's metadata instead
+        # refused an ordinary fresh `claude` because some other process held a
+        # reference the stored command would not have resumed, and left the
+        # attach exemption deciding from a second read of the process table.
+        # A destination this installation cannot establish declines to refuse,
+        # for the reason the unreadable process table does: refusing on a guess
+        # makes a session unopenable, and repair and `verify` still report the
+        # holder.
+        target = self.select_launch(record, rows=rows) if target is None else target
+        reference = target.collides_with()
         if not reference:
             return
         agent_pane = (self.role_panes(record["id"]) or {}).get("agent")
         exclude = self.pane_pid(agent_pane) if agent_pane else None
         if agent_pane and exclude is None:
             return      # cannot establish ownership; do not refuse on a guess
-        rows = ConversationHolders.snapshot()
+        rows = ConversationHolders.snapshot() if rows is None else rows
         held = ConversationHolders.holders(reference, exclude_tree=exclude, rows=rows)
         # A background session is attachable, so it is not a conflict. The exemption
         # covers the host AND its children, because the host's child is usually the
@@ -2428,7 +2648,7 @@ class Frame:
         """
         if self.pane_is_caller(pane_id) is not False:
             return False
-        self.prepare_agent_launch(record, expect_reference=expect_reference)
+        selected = self.prepare_agent_launch(record, expect_reference=expect_reference)
         result = self.tmux(
             [
                 "respawn-pane",
@@ -2438,7 +2658,7 @@ class Frame:
                 "-c",
                 self.safe_working_dir(record),
                 *self._environment(record, role="agent"),
-                *self._driver_argv(self._agent_command(record)),
+                *self._driver_argv(self._agent_command(record, selected)),
             ]
         )
         if result.returncode != 0:
@@ -3055,8 +3275,12 @@ class Frame:
         # conversation to collide with — refusing its window was pure loss, and it
         # is the same mistake as refusing the frame: a check placed where it does
         # not apply. `wake` runs the launch paths, and prepares there.
+        # `selected`, not `target`: in this method `target` is the tmux window.
+        selected: LaunchTarget | None = None
         if not no_driver and not self._is_sleeping(record):
-            self.prepare_agent_launch(record, expect_reference=expect_reference)
+            selected = self.prepare_agent_launch(
+                record, expect_reference=expect_reference
+            )
         if no_driver:
             agent_command = (
                 self._blocked_agent_command(no_driver)
@@ -3066,7 +3290,7 @@ class Frame:
         elif self._is_sleeping(record):
             agent_command = self._sleeping_agent_command()
         else:
-            agent_command = self._agent_command(record)
+            agent_command = self._agent_command(record, selected)
         for role, command in (
             ("agent", agent_command),
             ("plan", self._plan_command(record)),
@@ -3101,15 +3325,15 @@ class Frame:
         self._tag(target, record)
         self._apply_columns(target)
         self.tmux(["select-pane", "-t", f"{target}.0"])
-        if (
-            not no_driver
-            and not self._is_sleeping(record)
-            and not self._attach_argv(record.get("driver") or {})
-        ):
-            # An attach carries no handoff prompt, and a sleeping window launches no
-            # driver at all, so clearing the record in either case would drop a
-            # prompt that was never delivered. Left pending, it reaches the next
-            # real launch instead.
+        if selected is not None and selected.carries_a_prompt():
+            # Keyed on the command that was actually launched, not on a fresh
+            # probe: a background host appearing between the launch and here
+            # would make this read "attach" and leave a prompt the driver has
+            # already been given pending for the next launch, which delivers it
+            # twice. `selected is None` covers the two cases that launch no driver
+            # — no driver, and a sleeping window — where clearing the record
+            # would drop a prompt that was never delivered at all. Left pending,
+            # it reaches the next real launch instead.
             self._clear_consumed_handoff(record)
         return target
 

@@ -166,6 +166,10 @@ def test_chat_isolates_the_argv_that_reconciliation_rewrote(tmp_path, monkeypatc
         # What the guard does to a reference it confirms gone: the resume argument
         # comes off, so the stored argv is no longer the one read on entry.
         rec["driver"] = {"id": "codex", "launch_argv": ["codex"]}
+        # And then it returns the selection made from the reconciled record,
+        # which is what the launch runs. Isolation is applied there, so a double
+        # that returns nothing would test a path production never takes.
+        return frame.select_launch(rec)
 
     monkeypatch.setattr(frame, "prepare_agent_launch", reconcile)
     calls = []

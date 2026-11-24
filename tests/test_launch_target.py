@@ -1,0 +1,529 @@
+"""Where a launch is going is decided ONCE, by the driver that would run it.
+
+Four call sites used to answer "what conversation will this launch land on?"
+and each answered differently: two by searching an argv for the reference, one
+by reading the reference and the attach decision separately, and one —
+`_agent_command` — by actually deciding. Searching the argv cannot answer it:
+
+- a session NAMED after a conversation puts the id in the argv of a launch that
+  cannot resume it, and a `resume_strategy: none` driver carries a reference it
+  never renders;
+- `agy -c` joins a conversation its argv never names;
+- a declarative driver can render byte-identical argv with and without its
+  reference and genuinely resume in both, so comparing the two renderings is no
+  better than searching one of them;
+- and a command this installation did not generate cannot be read by rendering
+  our own, which is the reading half of the mistake `launch_is_ours` guards.
+
+So `select_launch` makes one `LaunchTarget` per launch, from the strategy the
+driver declares and one process snapshot, and validation, the collision guards,
+the command tmux is given and the cleanup afterwards all read that one value.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from hive_ide.agents import AgentResumeState
+from hive_ide.conversation import ConversationGuard
+from hive_ide.drivers import (
+    LAUNCH_FRESH,
+    LAUNCH_RESUME,
+    LAUNCH_UNKNOWN,
+    DriverRegistry,
+    bundled_drivers,
+)
+from hive_ide.errors import HeldConversationError
+from hive_ide.frame import LAUNCH_ATTACH, Frame
+from hive_ide.holders import ConversationHolders
+from hive_ide.store import StateStore
+
+REF = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+OTHER = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+
+
+@pytest.fixture
+def claude_store(tmp_path, monkeypatch) -> Path:
+    projects = tmp_path / "claude-config" / "projects"
+    projects.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    return projects
+
+
+def _transcript(projects: Path, reference: str) -> Path:
+    path = projects / "-some-project" / f"{reference}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def store(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return StateStore(tmp_path / "state", workspace)
+
+
+def _session(store, name, driver, reference=None):
+    return store.create_session(
+        name=name,
+        working_dir=store.workspace_key,
+        source={"kind": "stable", "interpreter": sys.executable, "version": "test"},
+        driver=driver.resolve(
+            name=name,
+            working_dir=str(store.workspace_key),
+            conversation_reference=reference,
+        ),
+    )
+
+
+def _frame(store, monkeypatch, registry: DriverRegistry | None = None) -> Frame:
+    frame = Frame(store, socket="sock")
+    if registry is not None:
+        monkeypatch.setattr(Frame, "driver_registry", lambda self: registry)
+    return frame
+
+
+class _NamedFresh:
+    """A plugin-shaped driver that renders the session NAME and cannot resume.
+
+    `add_declarative` does not propagate `name_argv`, so a driver that emits the
+    name while declaring `resume_strategy: none` can only come from a plugin —
+    and that is the shape where searching the argv for the reference reports a
+    resume that cannot happen.
+    """
+
+    id = "claude"
+    label = "Named"
+    launch_flags: list[str] = []
+
+    def resolve(self, *, name, working_dir, conversation_reference):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "launch_argv": ["claude", "--name", name],
+            "resume": {"strategy": "none", "reference": conversation_reference},
+            "capabilities": ["launch"],
+        }
+
+    def conversation_exists(self, reference, working_dir):
+        return None     # no probe of its own: UNKNOWN, never "gone"
+
+
+class _ClaimsResumeRendersNothing:
+    """Declares id-resume and renders no id — the destination is unknowable."""
+
+    id = "claude"
+    label = "Opaque"
+    launch_flags: list[str] = []
+
+    def resolve(self, *, name, working_dir, conversation_reference):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "launch_argv": ["claude"],
+            "resume": {"strategy": "conversation_id", "reference": conversation_reference},
+            "capabilities": ["launch", "resume"],
+        }
+
+    def conversation_exists(self, reference, working_dir):
+        return None     # no probe of its own: UNKNOWN, never "gone"
+
+
+class _NamedExists(_NamedFresh):
+    """Renders the NAME, cannot resume — and can prove a conversation exists.
+
+    The combination the adoption rule turns on: a candidate the driver vouches
+    for, in a command that would not go there.
+    """
+
+    def conversation_exists(self, reference, working_dir):
+        return reference == OTHER
+
+
+def test_an_exact_resume_is_the_conversation_it_names(store, monkeypatch):
+    """The compatibility control: the ordinary case keeps its answer.
+
+    It stays green on the implementation this replaces, so it is evidence of no
+    regression and of nothing else — every other test here is the discriminating
+    one.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    target = _frame(store, monkeypatch).select_launch(record)
+
+    assert (target.kind, target.reference) == (LAUNCH_RESUME, REF)
+    assert list(target.argv) == record["driver"]["launch_argv"]
+
+
+def test_a_session_named_after_a_conversation_does_not_resume_it(store, monkeypatch):
+    """The reference is in the argv, as the session's NAME. Nothing resumes it.
+
+    Searching the argv said `resume`, so the owner check refused a launch that
+    was never a collision — and on the `wake` path a promise was accepted from a
+    command that would have started a fresh chat.
+    """
+    registry = DriverRegistry({"claude": _NamedFresh()})
+    record = _session(store, REF, registry.get("claude"), REF)
+    frame = _frame(store, monkeypatch, registry)
+
+    target = frame.select_launch(record)
+    assert REF in " ".join(record["driver"]["launch_argv"]), "the id IS in the argv"
+    assert (target.kind, target.reference) == (LAUNCH_FRESH, None)
+
+    # And the owner guard declines, even though another session owns REF.
+    _session(store, "B", bundled_drivers()["claude"], REF)
+    frame.refuse_owned_conversation(record)
+
+
+def test_a_driver_that_renders_the_same_command_either_way_still_resumes(
+    store, monkeypatch
+):
+    """The counterexample that rules out comparing the two renderings.
+
+    `command` already carries `--resume <id>`, so the with-reference and
+    without-reference renderings are byte-identical — and both resume. A diff
+    sees no difference and would call a real resume `fresh`, which loses the
+    owner check entirely.
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "command": ["claude", "--resume", REF],
+            "resume_argv": ["claude", "--resume"],
+            "resume_strategy": "conversation_id",
+            "capabilities": ["launch", "resume"],
+        },
+    )
+    definition = registry.get("claude")
+    assert definition.resolve(
+        name="A", working_dir=str(store.workspace_key), conversation_reference=None
+    )["launch_argv"] == definition.resolve(
+        name="A", working_dir=str(store.workspace_key), conversation_reference=REF
+    )["launch_argv"], "the premise: one command, both ways"
+
+    record = _session(store, "A", definition, REF)
+    target = _frame(store, monkeypatch, registry).select_launch(record)
+    assert (target.kind, target.reference) == (LAUNCH_RESUME, REF)
+
+
+def test_a_command_this_installation_did_not_generate_has_no_known_destination(
+    store, monkeypatch
+):
+    """A wrapper's own command is read by nobody, and refuses nothing.
+
+    `resolve()` is the only renderer there is, so interpreting a foreign command
+    through it would take the wrapper's flags and store selection to be ours.
+    Unknown routes to the inert outcome for an interactive launch: the user's
+    intact command still runs, and repair and `verify` still report the holder.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["driver"]["launch_argv"] = [
+        "/opt/custom/claude", "--profile", "work", "--resume", REF,
+    ]
+    frame = _frame(store, monkeypatch)
+
+    target = frame.select_launch(record)
+    assert (target.kind, target.reference) == (LAUNCH_UNKNOWN, None)
+
+    # It still refuses a collision, on what the command CARRIES: this one
+    # plainly contains the id, and a command that carries the id can reach it.
+    # That is what this package has always done, and for the common case — a
+    # record rendered by an older version of the same driver definition — it is
+    # right. What is gone is refusing on metadata alone.
+    _session(store, "B", bundled_drivers()["claude"], REF)
+    assert target.carried == REF
+    with pytest.raises(HeldConversationError):
+        frame.refuse_owned_conversation(record)
+
+    # A wrapper that does NOT carry the id has nothing for a guard to act on.
+    record["driver"]["launch_argv"] = ["/opt/custom/claude", "--profile", "work"]
+    quiet = frame.select_launch(record)
+    assert (quiet.kind, quiet.reference, quiet.carried) == (LAUNCH_UNKNOWN, None, None)
+    frame.refuse_owned_conversation(record)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    frame.refuse_held_conversation(record)
+
+
+def test_a_driver_that_claims_id_resume_and_renders_no_id_is_unknown(store, monkeypatch):
+    """Declared strategy and rendered command disagree, so neither answer holds.
+
+    Calling it `fresh` would be a guess — it may resume through something we
+    cannot see — and calling it `resume` would be a claim with no evidence.
+    """
+    registry = DriverRegistry({"claude": _ClaimsResumeRendersNothing()})
+    record = _session(store, "A", registry.get("claude"), REF)
+    target = _frame(store, monkeypatch, registry).select_launch(record)
+    assert (target.kind, target.reference) == (LAUNCH_UNKNOWN, None)
+
+
+def test_bare_agy_is_fresh_and_a_continuation_is_unknown(store, monkeypatch):
+    """Classify the COMMAND, not the driver.
+
+    `agy` with nothing to resume starts a new conversation and is known to; only
+    `agy -c` is unknowable, because it joins whatever that workspace considers
+    current. Marking the whole driver unknown loses the first half.
+    """
+    frame = _frame(store, monkeypatch)
+    antigravity = bundled_drivers()["antigravity"]
+
+    fresh = _session(store, "A", antigravity, None)
+    assert list(fresh["driver"]["launch_argv"]) == ["agy"]
+    assert frame.select_launch(fresh).kind == LAUNCH_FRESH
+
+    continued = _session(store, "B", antigravity, REF)
+    assert list(continued["driver"]["launch_argv"]) == ["agy", "-c"]
+    target = frame.select_launch(continued)
+    assert (target.kind, target.reference) == (LAUNCH_UNKNOWN, None)
+
+
+def test_the_command_is_selected_once_and_never_re_derived(store, monkeypatch):
+    """One process snapshot per launch, and no second look when the command is built.
+
+    Round 4: `prepare_agent_launch` read the background host and `_agent_command`
+    read it again, so a host appearing in between turned the command into an
+    attach and dropped the one-shot prompt it was supposed to carry, while the
+    command reported success. That was fixed by adding another check beside the
+    first; this pins that there is only one read to disagree with.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    frame = _frame(store, monkeypatch)
+    snapshots: list[int] = []
+    monkeypatch.setattr(
+        ConversationHolders, "snapshot",
+        classmethod(lambda cls: snapshots.append(1) or []),
+    )
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+
+    target = frame.prepare_agent_launch(record)
+    assert len(snapshots) == 1, snapshots
+
+    looks: list[int] = []
+    monkeypatch.setattr(
+        Frame, "_attach_argv",
+        staticmethod(lambda driver, **kw: looks.append(1) or None),
+    )
+    Frame._agent_command(record, target)
+    assert looks == [], "the command is the one already selected"
+
+
+def test_an_attach_keeps_the_full_reference_its_argv_abbreviates(store, monkeypatch):
+    """`claude attach` takes a short id; ownership is asked about the conversation.
+
+    Carrying the short form as the destination would ask the owner and holder
+    questions about a string no record holds.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts",
+        classmethod(lambda cls, ref, **kw: [{"pid": 4242, "background": True}]),
+    )
+    target = _frame(store, monkeypatch).select_launch(record)
+
+    assert target.kind == LAUNCH_ATTACH
+    assert target.reference == REF, "the full id, not the attach form"
+    assert list(target.argv) == ["claude", "attach", ConversationHolders.attach_id(REF)]
+    assert target.carries_a_prompt() is False
+
+
+def test_a_pending_prompt_keeps_the_resume_command_and_reports_the_host(
+    store, monkeypatch
+):
+    """An attach carries no prompt, so a prompt-carrying launch is not an attach —
+    and the host is reported rather than swallowed, because whether that refuses
+    is the caller's decision: `wake` cannot deliver a prompt into a second
+    driver, while an ordinary open has always proceeded.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["launch_prompt"] = "carry on"
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts",
+        classmethod(lambda cls, ref, **kw: [{"pid": 4242, "background": True}]),
+    )
+    target = _frame(store, monkeypatch).select_launch(record)
+
+    assert target.kind == LAUNCH_RESUME and target.host_present is True
+    # The prompt rides ON the argv, which is why an attach cannot deliver one.
+    assert list(target.argv) == [*record["driver"]["launch_argv"], "carry on"]
+
+
+def test_the_direct_chat_path_attaches_instead_of_starting_a_second_driver(
+    store, monkeypatch, claude_store
+):
+    """`chat` assembled its own argv, so it validated an attach and ran a resume.
+
+    That is a second driver on a conversation whose host is live — the blank pane
+    the holder guard exempts that host FOR — and `chat` is the command a
+    driverless pane tells the user to run.
+    """
+    _transcript(claude_store, REF)
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    frame = _frame(store, monkeypatch)
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts",
+        classmethod(lambda cls, ref, **kw: [{"pid": 4242, "background": True}]),
+    )
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(Frame, "clear_sleep", lambda self, rec: None)
+    monkeypatch.setattr(Frame, "_clear_open_error", lambda self, rec: None)
+    launched: list[list[str]] = []
+
+    def run(argv, **kw):
+        # `ps` comes through the same patched module; the launch is what matters.
+        if list(argv)[:1] != ["ps"]:
+            launched.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", run)
+
+    frame.current_chat(record)
+    assert launched == [
+        ["claude", "attach", ConversationHolders.attach_id(REF)]
+    ], launched
+
+
+def test_cleanup_follows_the_command_that_launched_not_a_later_probe(
+    store, monkeypatch, claude_store
+):
+    """A host appearing after the panes exist must not un-deliver a prompt.
+
+    The handoff is cleared because the command that ran carried it. Re-probing
+    the process table here instead reads "attach", leaves the prompt pending,
+    and the next launch delivers it a second time.
+    """
+    _transcript(claude_store, REF)
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["handoff"] = {"target_driver_prompt": "carry on"}
+    frame = _frame(store, monkeypatch)
+    reads: list[int] = []
+
+    def hosts(cls, ref, **kw):
+        reads.append(1)
+        # Nothing at selection; a host from the next read on.
+        return [] if len(reads) <= 1 else [{"pid": 4242, "background": True}]
+
+    monkeypatch.setattr(ConversationHolders, "background_hosts", classmethod(hosts))
+    monkeypatch.setattr(Frame, "_plan_command", lambda self, rec: "true")
+    monkeypatch.setattr(Frame, "_tag", lambda self, t, rec: None)
+    monkeypatch.setattr(Frame, "_apply_columns", lambda self, t: None)
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role: [])
+    monkeypatch.setattr(Frame, "_is_sleeping", lambda self, rec: False)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(
+        Frame, "tmux",
+        lambda self, argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    cleared: list[dict] = []
+    monkeypatch.setattr(
+        Frame, "_clear_consumed_handoff", lambda self, rec: cleared.append(rec)
+    )
+
+    frame._finish_build(record, "@7", str(store.workspace_key))
+    assert len(cleared) == 1, "the launched command carried the prompt"
+
+
+def test_a_holder_does_not_refuse_a_launch_that_would_not_join_it(
+    store, monkeypatch, claude_store
+):
+    """A process on REF must not refuse a command that starts a fresh chat.
+
+    `refuse_held_conversation` read the record's metadata reference — the same
+    one the owner check already skipped for this shape — so an ordinary
+    `claude --resume REF` process refused a launch that would have run a plain
+    `claude`. Exercised through `prepare_agent_launch`, because each predicate
+    alone was green while the pair was not.
+    """
+    _transcript(claude_store, REF)      # a live conversation, not a dropped one
+    registry = DriverRegistry({"claude": _NamedFresh()})
+    record = _session(store, "A", registry.get("claude"), REF)
+    frame = _frame(store, monkeypatch, registry)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(
+        ConversationHolders, "holders",
+        classmethod(
+            lambda cls, ref, **kw: [
+                {"pid": 9191, "ppid": 1, "command": f"claude --resume {ref}",
+                 "orphaned": True, "background": False}
+            ]
+        ),
+    )
+
+    frame.prepare_agent_launch(record)          # must not raise
+
+    # The inverse, so this cannot become a guard that never refuses: the same
+    # holder against a launch that WOULD join the conversation. A bundled
+    # registry, because the driver above is the one that cannot resume.
+    bundled = DriverRegistry()
+    monkeypatch.setattr(Frame, "driver_registry", lambda self: bundled)
+    resuming = _session(store, "B", bundled.get("claude"), REF)
+    with pytest.raises(HeldConversationError):
+        Frame(store, socket="sock").prepare_agent_launch(resuming)
+
+
+def test_a_promise_is_refused_when_the_launch_would_not_keep_it(
+    store, monkeypatch, claude_store
+):
+    """`wake` PROMISES a conversation, and a metadata reference is not a promise.
+
+    The check compared the record's reference and nothing else, so two commands
+    passed it that cannot keep it: a driver whose `resume_strategy` is `none`,
+    which carries a reference it never renders, and a command this installation
+    did not generate, whose destination cannot be established at all. In both
+    cases the prompt went to a conversation nobody had established, and `wake`
+    reported success.
+
+    Checked here rather than through the CLI because this is the last place that
+    can still refuse — another reconcile follows every earlier check.
+    """
+    _transcript(claude_store, REF)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+
+    registry = DriverRegistry({"claude": _NamedFresh()})
+    fresh = _session(store, "A", registry.get("claude"), REF)
+    with pytest.raises(Exception) as fresh_refusal:
+        _frame(store, monkeypatch, registry).prepare_agent_launch(
+            fresh, expect_reference=REF
+        )
+    assert "start a new conversation" in str(fresh_refusal.value)
+
+    bundled = DriverRegistry()
+    monkeypatch.setattr(Frame, "driver_registry", lambda self: bundled)
+    opaque = _session(store, "B", bundled.get("claude"), REF)
+    opaque["driver"]["launch_argv"] = ["/opt/custom/claude", "--resume", REF]
+    with pytest.raises(Exception) as opaque_refusal:
+        Frame(store, socket="sock").prepare_agent_launch(opaque, expect_reference=REF)
+    assert "did not generate" in str(opaque_refusal.value)
+
+
+def test_the_guard_does_not_adopt_a_survivor_the_driver_cannot_resume(
+    store, monkeypatch
+):
+    """Adoption writes a CLAIM, so it needs the command to actually go there.
+
+    The fallback walks displaced references and adopts the newest that still
+    exists. It asked whether the candidate rendering CONTAINED the reference,
+    and a session named after a conversation contains it in its `--name` — so a
+    driver that cannot resume at all adopted a conversation it would never open,
+    and the claim then said the session was on it. The session name here is the
+    candidate's id, which is the coincidence that made the old test pass.
+    """
+    registry = DriverRegistry({"claude": _NamedExists()})
+    record = _session(store, OTHER, registry.get("claude"), REF)
+    record.setdefault("agents", {}).setdefault("resume_history", {})["claude"] = [OTHER]
+    store.write("sessions", record["id"], record)
+    assert OTHER in " ".join(record["driver"]["launch_argv"]), "the premise"
+
+    guard = ConversationGuard(store, registry=registry)
+    guard.check(record, working_dir=str(store.workspace_key), apply=True)
+
+    reloaded = store.read("sessions", record["id"]) or {}
+    assert AgentResumeState(reloaded).reference_for("claude") is None, (
+        "a conversation this launch cannot resume is not adopted"
+    )
+    assert OTHER not in " ".join(
+        (reloaded.get("driver") or {}).get("resume", {}).get("reference") or ""
+    )
