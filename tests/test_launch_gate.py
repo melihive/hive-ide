@@ -420,20 +420,30 @@ def test_a_holder_appearing_during_the_wait_stops_the_launch(monkeypatch):
     conversation, is the duplicate-driver fault the guard exists for.
     """
     monkeypatch.setattr(IdeLaunchGate, "wait", lambda self, delay: "queued")
+    asked: list[str | None] = []
     monkeypatch.setattr(
         launch_gate, "held_conversation_reason",
-        lambda: "its conversation is held by pid 4242",
+        lambda reference=None: asked.append(reference)
+        or "its conversation is held by pid 4242",
     )
     execs = []
     monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
-    assert gate_main(["--delay=4", "--", "claude", "--resume", "x"]) == 1
+    assert gate_main(
+        ["--delay=4", "--reference=x", "--", "claude", "--resume", "x"]
+    ) == 1
     assert execs and execs[0][0] == "sh", "the driver was started on a held conversation"
     assert "claude" not in " ".join(execs[0][1])
+    # The conversation the FROZEN command goes to, carried in from the frame that
+    # built it. Re-deriving it here would ask about a record that may have moved
+    # on during the wait, while the command about to be exec'ed has not.
+    assert asked == ["x"]
 
 
 def test_an_unheld_conversation_launches_as_normal(monkeypatch):
     monkeypatch.setattr(IdeLaunchGate, "wait", lambda self, delay: "queued")
-    monkeypatch.setattr(launch_gate, "held_conversation_reason", lambda: None)
+    monkeypatch.setattr(
+        launch_gate, "held_conversation_reason", lambda reference=None: None
+    )
     execs = []
     monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
     assert gate_main(["--delay=4", "--", "claude", "--resume", "x"]) == 1
@@ -446,7 +456,16 @@ def test_the_ownership_recheck_fails_open(monkeypatch, tmp_path):
     monkeypatch.delenv("HIVE_IDE_STATE_HOME", raising=False)
     monkeypatch.delenv("HIVE_IDE_WORKSPACE_KEY", raising=False)
     monkeypatch.delenv("HIVE_IDE_SESSION_ID", raising=False)
-    assert launch_gate.held_conversation_reason() is None
+    assert launch_gate.held_conversation_reason("some-reference") is None
+
+
+def test_a_queued_launch_that_joins_no_conversation_is_never_rechecked():
+    """No reference means no question: a command that joins no conversation
+    cannot put a second driver on one, and the record is not asked instead —
+    after the session moved on, the record names a conversation this frozen
+    command does not."""
+    assert launch_gate.held_conversation_reason(None) is None
+    assert launch_gate.held_conversation_reason("") is None
 
 
 def test_a_queued_pane_refuses_typed_input_even_with_force(monkeypatch, tmp_path):

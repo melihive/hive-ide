@@ -140,7 +140,7 @@ class IdeLaunchGate:
             self._sleep(min(self.POLL_SECONDS, remaining))
 
 
-def held_conversation_reason() -> str | None:
+def held_conversation_reason(reference: str | None = None) -> str | None:
     """Why this launch must NOT start after all, re-checked at release.
 
     `prepare_agent_launch` cleared this pane's conversation before the window was
@@ -152,14 +152,23 @@ def held_conversation_reason() -> str | None:
     window from an instant to seconds, so the check is made again at the end of
     it.
 
+    `reference` is the conversation the FROZEN command goes to, passed in by
+    the frame that built it. Without one there is nothing to check: a launch that
+    joins no conversation cannot duplicate a driver on one. Re-deriving it from
+    the record here asks about a session that may have moved on during the wait,
+    while the command about to be `exec`ed has not — and after a move the record
+    would answer about a conversation this command never names.
+
     Fails OPEN in every direction except a definite refusal. No environment, no
     record, an unreadable process table or any error at all means launch: a
     missed collision costs one confusing pane, and a false refusal costs the user
     an agent for no reason.
     """
     try:
+        if not reference:
+            return None
         from .errors import HeldConversationError
-        from .frame import Frame
+        from .frame import LAUNCH_RESUME, Frame, LaunchTarget
         from .store import StateStore
 
         store = StateStore(
@@ -170,7 +179,17 @@ def held_conversation_reason() -> str | None:
             return None
         frame = Frame(store, socket=os.environ.get("HIVE_IDE_TMUX_SOCKET") or "")
         try:
-            frame.refuse_held_conversation(record)
+            # The command this pane will become, stated rather than re-derived.
+            frame.refuse_held_conversation(
+                record,
+                LaunchTarget(
+                    LAUNCH_RESUME,
+                    (record.get("driver") or {}).get("id"),
+                    reference,
+                    None,
+                    (),
+                ),
+            )
         except HeldConversationError as exc:
             return str(exc) or "its conversation is held by another process"
     except Exception:
@@ -188,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--delay", default="0")
     parser.add_argument("--label", default=os.environ.get("HIVE_IDE_SESSION") or "")
+    parser.add_argument("--reference", default="")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     command = list(args.command)
@@ -209,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         gate.wait(args.delay)
-        held = held_conversation_reason()
+        held = held_conversation_reason(args.reference)
         if held:
             # Starting the driver now would duplicate it on a conversation
             # something else took during the wait. The pane carries the reason,

@@ -71,8 +71,9 @@ LAUNCH_UNKNOWN = "unknown"
 def rendered_destination(rendered: dict[str, Any]) -> tuple[str, str | None]:
     """Where a command THIS installation rendered will land.
 
-    The authority is the `resume` block `resolve()` returns, not the shape of the
-    argv, because the argv cannot be read for this:
+    The authority is the `resume` block `resolve()` returns plus WHICH BRANCH
+    produced the command, never the shape of the argv, because the argv cannot
+    be read for this:
 
     - the reference can be in the argv without being resumed. A session NAME
       equal to the conversation id puts it there (`claude --name <id>`), and a
@@ -81,15 +82,24 @@ def rendered_destination(rendered: dict[str, Any]) -> tuple[str, str | None]:
     - the reference can be resumed without being in the argv. `agy -c` continues
       whatever conversation that workspace considers current, which may or may
       not be the one the record names.
-    - comparing the two renderings cannot separate the cases either. A
+    - and the difference between the two renderings cannot be read either. A
       declarative driver with `command = ["claude", "--resume", X]` and
       `resume_argv = ["claude", "--resume"]` renders byte-identical argv with and
-      without the reference, and genuinely resumes X in both.
+      without the reference, and genuinely resumes X in both. Comparing them was
+      tried and dropped: only the two strategies below render differently when
+      given a reference, so which branch produced a command is exactly what the
+      strategy already says.
 
-    So the strategy the driver declares decides, and the argv only corroborates:
-    a driver that says it resumes by id and then renders a command without the
-    id is UNKNOWN, not fresh — it may resume through something we cannot see,
-    and claiming a fresh conversation for it would be a guess either way.
+    So the strategy decides, and the argv only corroborates. A command carrying
+    the reference under a strategy that cannot resume it is UNKNOWN rather than
+    fresh: a configured `command` of `["claude", "--resume", X]` with the default
+    `resume_strategy: none` resumes X while declaring nothing, and calling that
+    fresh told both collision guards there was nothing to collide over.
+
+    A session named exactly after a conversation reaches the same UNKNOWN by the
+    same route, and is refused where it used to launch. That direction is
+    deliberate: the cost is one pathological name, and the cost of the other
+    direction is a second driver on a live conversation.
     """
     resume = rendered.get("resume") if isinstance(rendered, dict) else None
     strategy = resume.get("strategy") if isinstance(resume, dict) else None
@@ -102,14 +112,20 @@ def rendered_destination(rendered: dict[str, Any]) -> tuple[str, str | None]:
         # known fresh launch and took the branch above; only the continuation is
         # unknowable, so the DRIVER is never classified, only the command.
         return (LAUNCH_UNKNOWN, None)
-    if strategy != "conversation_id":
-        # `none`, or a strategy this version does not know: the resume branch was
-        # never taken, so the rendered command starts a new conversation.
-        return (LAUNCH_FRESH, None)
     argv = rendered.get("launch_argv") if isinstance(rendered, dict) else None
-    if not any(reference in str(part) for part in argv or []):
-        return (LAUNCH_UNKNOWN, None)
-    return (LAUNCH_RESUME, reference)
+    carries = any(reference in str(part) for part in argv or [])
+    if strategy == "conversation_id":
+        # Declared resume-by-id. The argv still has to carry the id: a driver
+        # that says it resumes by id and renders a command without one may be
+        # resuming through something we cannot see, so neither answer is
+        # evidence.
+        return (LAUNCH_RESUME, reference) if carries else (LAUNCH_UNKNOWN, None)
+    # `none`, or a strategy this version does not know. Fresh only if the command
+    # does not carry the reference at all — a session NAMED after a conversation
+    # and a configured command with the id baked in are the same two facts, and
+    # no rule separates them, so both take the UNKNOWN that makes a collision
+    # guard ask rather than assume.
+    return (LAUNCH_UNKNOWN, None) if carries else (LAUNCH_FRESH, None)
 
 
 class CommandDriver:
