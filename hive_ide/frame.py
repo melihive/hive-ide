@@ -2245,15 +2245,14 @@ class Frame:
         # second driver on a conversation another process holds, which is the
         # fault the guard exists for — and a driverless pane is exactly where a
         # user is told to run `chat`.
-        # No one-shot input rides on THIS path, and it is taken out of the record
-        # before the command is built rather than cleared after. Two overlapping
-        # `chat` calls both run in the foreground for as long as the agent lives,
-        # so a prompt cleared only on exit is delivered twice — and this launch
-        # is not the one that claims it. They stay pending in the store for the
-        # window build, which is where a one-shot input is delivered and spent.
-        for key in ("handoff", "launch_prompt"):
-            record.pop(key, None)
-        selected = self.prepare_agent_launch(record)
+        # No one-shot input rides on THIS path: two overlapping `chat` calls both
+        # run in the foreground for as long as the agent lives, so a prompt
+        # cleared only on exit is delivered twice. They stay pending in the store
+        # for the window build, which is where one is delivered and spent. Asked
+        # of the SELECTION rather than removed from the record — the reconcile
+        # inside persists this record, so popping them here erased them for good
+        # without either reaching a driver.
+        selected = self.prepare_agent_launch(record, deliver_inputs=False)
         # `prepare_agent_launch` reconciles the record: a conversation confirmed
         # gone is dropped, which rewrites `driver` and its argv. `argv` was read
         # before that, so launching it would run the stale `--resume <deleted-id>`
@@ -2361,6 +2360,7 @@ class Frame:
         record: dict[str, Any],
         *,
         rows: list[tuple[int, int, str]] | None = None,
+        deliver_inputs: bool = True,
     ) -> LaunchTarget:
         """Choose the command this frame will run for `record`, ONCE.
 
@@ -2405,7 +2405,7 @@ class Frame:
                 None,
                 tuple(attach),
             )
-        kind, destination = self._stored_destination(record, driver_id)
+        kind, destination, may_land = self._stored_destination(record, driver_id)
         stored = AgentResumeState.reference_from_driver(driver)
         carried = (
             stored
@@ -2417,13 +2417,24 @@ class Frame:
                 # conversation the record holds — on main the guards asked about
                 # that reference, and reading the command as fresh dropped the
                 # protection for a launch that can genuinely collide.
-                or self._selects_for_itself(driver.get("launch_argv"))
+                or may_land
             )
             else None
         )
-        return LaunchTarget(
-            kind, driver_id, destination, carried, tuple(self.agent_launch_argv(record))
+        # `deliver_inputs=False` renders the same command WITHOUT the one-shot
+        # prompt. It is for a caller that must not spend one — the foreground
+        # `chat`, where two overlapping calls would each carry it. Asked for by
+        # the caller rather than taken off the record: this record is the one
+        # `ConversationGuard` has just reconciled and PERSISTED, so stripping it
+        # here wrote the stripped copy back and erased a pending handoff and
+        # launch prompt for good, with neither reaching a driver (review round 7,
+        # a P1 in the fix for round 6).
+        argv = (
+            self.agent_launch_argv(record)
+            if deliver_inputs
+            else self._agent_argv(record)
         )
+        return LaunchTarget(kind, driver_id, destination, carried, tuple(argv))
 
     @staticmethod
     def _selects_for_itself(argv: Any) -> bool:
@@ -2439,9 +2450,24 @@ class Frame:
             for part in (argv or [])
         )
 
+    @classmethod
+    def _may_land_on_the_records_reference(cls, argv: Any, definition: Any) -> bool:
+        """Could this command end up on the conversation the record names?
+
+        Not the same question as its destination. A command that selects for
+        itself, or a driver whose whole strategy is to continue a WORKSPACE, may
+        well reopen the conversation the record holds while naming nothing — so a
+        collision guard is still given that reference, even though nothing can be
+        PROMISED through it. A configured wrapper reached this by its own
+        continuation word (`["wrapper", "reopen"]`), which no option list knows.
+        """
+        return cls._selects_for_itself(argv) or (
+            str(getattr(definition, "resume_strategy", "")) == "workspace_continue"
+        )
+
     def _stored_destination(
         self, record: dict[str, Any], driver_id: str | None
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, bool]:
         """Where the record's STORED command lands, per the renderer that made it.
 
         UNKNOWN for a command this installation did not generate — a configured
@@ -2453,11 +2479,11 @@ class Frame:
         """
         driver = record.get("driver") or {}
         if driver_id is None:
-            return (LAUNCH_UNKNOWN, None)
+            return (LAUNCH_UNKNOWN, None, True)
         try:
             definition = self.driver_registry().get(driver_id)
         except HiveIdeError:
-            return (LAUNCH_UNKNOWN, None)
+            return (LAUNCH_UNKNOWN, None, True)
         name = str(record.get("name") or "")
         working_dir = str(record.get("working_dir") or self.store.workspace_key)
         ours = definition.resolve(
@@ -2478,28 +2504,25 @@ class Frame:
 
         stored = comparable(driver.get("launch_argv"))
         if stored == comparable(ours.get("launch_argv")):
-            if self._selects_for_itself(ours.get("launch_argv")):
-                # The command carries an option that names a conversation BY
-                # ITSELF — `--continue`, `-c`, `--last`, `--fork-session` — so
-                # whatever id sits beside it is a prompt, a source or nothing,
-                # and the conversation it lands on is not the one the record
-                # names. The bundled drivers generate none of these, but
-                # `resume_argv` and `command` are configuration: `["claude",
-                # "--fork-session", "--resume"]` renders a command that resumes
-                # the SOURCE of a fork, and `wake` promised delivery into it.
-                # The same list already refuses on the holder path, which is
-                # where this knowledge lives; it can only ever refuse.
-                return (LAUNCH_UNKNOWN, None)
-            return rendered_destination(ours)
+            # `rendered_destination` makes the self-selecting-option call itself,
+            # so the guard's adoption path gets it too.
+            kind, destination = rendered_destination(ours)
+            return (kind, destination, self._may_land_on_the_records_reference(
+                ours.get("launch_argv"), definition
+            ))
         # No branch of ours rendered this command. There is no third case to
         # handle: every writer renders with the reference the record holds, so a
         # stored argv matching the FRESH rendering while the metadata names a
         # conversation is not a state this package can reach — and a guard for a
         # path nothing reaches is a guard no test can observe.
-        return (LAUNCH_UNKNOWN, None)
+        return (LAUNCH_UNKNOWN, None, True)
 
     def prepare_agent_launch(
-        self, record: dict[str, Any], *, expect_reference: str | None = None
+        self,
+        record: dict[str, Any],
+        *,
+        expect_reference: str | None = None,
+        deliver_inputs: bool = True,
     ) -> LaunchTarget:
         """Drop confirmed-gone conversation refs, and refuse a held conversation.
 
@@ -2524,7 +2547,9 @@ class Frame:
             if AgentResumeState.reference_from_driver(record.get("driver") or {})
             else None
         )
-        target = self.select_launch(record, rows=rows)
+        target = self.select_launch(
+            record, rows=rows, deliver_inputs=deliver_inputs
+        )
         if expect_reference is not None and AgentResumeState.reference_from_driver(
             record.get("driver") or {}
         ) != expect_reference:
@@ -2539,7 +2564,11 @@ class Frame:
                 "The conversation this launch promised is no longer available; "
                 "nothing was started."
             )
-        if record.get("launch_prompt") and target.kind == LAUNCH_ATTACH:
+        if (
+            deliver_inputs
+            and record.get("launch_prompt")
+            and target.kind == LAUNCH_ATTACH
+        ):
             # A background host for this conversation appeared, so the launch is
             # an attach — and an attach carries no argv, so this prompt cannot
             # ride on it. Refused for EVERY caller, not only one that promised a

@@ -178,7 +178,6 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
     an agent for no reason.
     """
     try:
-        from .agents import AgentResumeState
         from .errors import HeldConversationError
         from .frame import LAUNCH_RESUME, Frame, LaunchTarget
         from .store import StateStore
@@ -197,13 +196,21 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
         record = store.find_session(os.environ["HIVE_IDE_SESSION_ID"])
         if record is None:
             return None
-        if declared is None:
-            # An older frame: no destination was carried, so ask the record the
-            # way that frame's own gate did.
-            declared = AgentResumeState.reference_from_driver(record.get("driver") or {})
-        if not declared:
+        if not declared and declared is not None:
             return None
         frame = Frame(store, socket=os.environ.get("HIVE_IDE_TMUX_SOCKET") or "")
+        if declared is None:
+            # An older frame carried no answer. Ask the record the way that
+            # frame's own gate did — by handing the check no target at all, so it
+            # makes its own selection and keeps the background-host exemption
+            # that goes with it. Labelling the command a RESUME here instead
+            # refused a queued `claude attach` against the very host it was
+            # queued to join (review round 7).
+            try:
+                frame.refuse_held_conversation(record)
+            except HeldConversationError as exc:
+                return str(exc) or "its conversation is held by another process"
+            return None
         try:
             # The command this pane will become, stated rather than re-derived.
             frame.refuse_held_conversation(

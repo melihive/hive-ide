@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import UsageError
+from .holders import ConversationHolders
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,21 @@ def rendered_destination(rendered: dict[str, Any]) -> tuple[str, str | None]:
         # unknowable, so the DRIVER is never classified, only the command.
         return (LAUNCH_UNKNOWN, None)
     argv = rendered.get("launch_argv") if isinstance(rendered, dict) else None
+    if any(
+        str(part) in ConversationHolders.OVERRIDING_SELECTION_OPTIONS
+        for part in argv or []
+    ):
+        # The command chooses a conversation on its own terms — `--continue`,
+        # `-c`, `--last`, `--fork-session` — so no id in it is a destination:
+        # beside a continuation it is a prompt, beside a fork it is the SOURCE.
+        # The list is the holder path's, shared so this driver-CLI knowledge has
+        # ONE home, and as there it can only ever refuse an answer.
+        #
+        # Checked here rather than in the frame, where it started: the frame is
+        # not the only caller. `ConversationGuard` asks the same question when it
+        # decides whether a displaced conversation may be ADOPTED, and with the
+        # check one level up it adopted — and claimed — the source of a fork.
+        return (LAUNCH_UNKNOWN, None)
     carries = any(reference in str(part) for part in argv or [])
     if strategy == "conversation_id":
         # Declared resume-by-id. The argv still has to carry the id: a driver

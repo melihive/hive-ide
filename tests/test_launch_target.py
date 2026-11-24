@@ -297,13 +297,18 @@ def test_a_command_this_installation_did_not_generate_has_no_known_destination(
     with pytest.raises(HeldConversationError):
         frame.refuse_owned_conversation(record)
 
-    # A wrapper that does NOT carry the id has nothing for a guard to act on.
+    # And a wrapper that does not carry the id is still asked about, because a
+    # command this installation cannot interpret may land anywhere — it is a
+    # wrapper around the same driver, reading its own configuration. That is what
+    # main did for every record, and narrowing it to "the argv contains the id"
+    # lost the guard for a wrapper whose own continuation word no option list
+    # knows (`["wrapper", "reopen"]`). What is gone is promising through it.
     record["driver"]["launch_argv"] = ["/opt/custom/claude", "--profile", "work"]
     quiet = frame.select_launch(record)
-    assert (quiet.kind, quiet.reference, quiet.carried) == (LAUNCH_UNKNOWN, None, None)
-    frame.refuse_owned_conversation(record)
-    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
-    frame.refuse_held_conversation(record)
+    assert (quiet.kind, quiet.reference) == (LAUNCH_UNKNOWN, None)
+    assert quiet.carried == REF and quiet.collides_with() == REF
+    with pytest.raises(HeldConversationError):
+        frame.refuse_owned_conversation(record)
 
 
 def test_a_driver_that_claims_id_resume_and_renders_no_id_is_unknown(store, monkeypatch):
@@ -1073,3 +1078,156 @@ def test_a_configured_workspace_continuation_names_no_conversation(store, monkey
 
     target = frame.select_launch(record)
     assert (target.kind, target.reference) == (LAUNCH_UNKNOWN, None)
+
+
+def test_a_foreground_chat_never_erases_the_inputs_it_does_not_deliver(
+    store, monkeypatch, claude_store
+):
+    """The reconcile inside the launch PERSISTS the record it is given.
+
+    So taking the one-shot inputs off that record to keep them off the command
+    wrote the stripped copy back, and a pending handoff and launch prompt were
+    gone for good with neither reaching a driver. Here the reference has no
+    transcript, so the guard really drops it and really writes — which is what
+    the first version of this test never reached, and why it passed over the bug.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["handoff"] = {"target_driver_prompt": "pick up the plan"}
+    record["launch_prompt"] = "and start here"
+    store.write("sessions", record["id"], record)
+    frame = _frame(store, monkeypatch)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(Frame, "clear_sleep", lambda self, rec: None)
+    monkeypatch.setattr(Frame, "_clear_open_error", lambda self, rec: None)
+    launched: list[str] = []
+
+    def run(argv, **kw):
+        if list(argv)[:1] != ["ps"]:
+            launched.append(" ".join(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("hive_ide.frame.subprocess.run", run)
+
+    frame.current_chat(store.read("sessions", record["id"]))
+
+    after = store.read("sessions", record["id"]) or {}
+    assert (after.get("driver") or {}).get("resume", {}).get("reference") is None, (
+        "the premise: the guard dropped the gone conversation and WROTE"
+    )
+    assert after.get("handoff") == {"target_driver_prompt": "pick up the plan"}
+    assert after.get("launch_prompt") == "and start here"
+    assert launched and not any(
+        "pick up the plan" in call or "and start here" in call for call in launched
+    ), "and neither rode on the command"
+
+
+def test_a_wrappers_own_continuation_word_still_guards_the_conversation(
+    store, monkeypatch, claude_store
+):
+    """No option list knows `["wrapper", "reopen"]`.
+
+    A driver whose whole strategy is to continue a WORKSPACE may reopen the
+    conversation the record names while naming nothing, so the guards are given
+    that reference even though nothing can be promised through it. Checking only
+    the recognized continuation flags left this shape unguarded, and the test
+    that came with it checked the destination kind and never the guard.
+    """
+    _transcript(claude_store, REF)
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "antigravity",
+        {
+            "command": ["wrapper"],
+            "resume_argv": ["wrapper", "reopen"],
+            "resume_strategy": "workspace_continue",
+            "capabilities": ["launch", "resume"],
+        },
+    )
+    record = _session(store, "A", registry.get("antigravity"), REF)
+    frame = _frame(store, monkeypatch, registry)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    argv = " ".join(record["driver"]["launch_argv"])
+    assert "reopen" in argv and REF not in argv, "the premise"
+
+    target = frame.select_launch(record)
+    assert (target.kind, target.reference, target.carried) == (
+        LAUNCH_UNKNOWN, None, REF,
+    )
+    monkeypatch.setattr(
+        ConversationHolders, "holders",
+        classmethod(
+            lambda cls, ref, **kw: [
+                {"pid": 9191, "ppid": 1, "command": f"claude --resume {ref}",
+                 "orphaned": True, "background": False}
+            ]
+        ),
+    )
+    with pytest.raises(HeldConversationError):
+        frame.prepare_agent_launch(record)
+
+
+def test_reconciliation_does_not_claim_the_source_of_a_fork(store, monkeypatch):
+    """Adoption asks the same question a launch does, so it needs the same rule.
+
+    With the self-selecting check in the frame only, the guard's history recovery
+    reached `rendered_destination` directly and adopted a survivor whose rendered
+    command FORKS it — writing a claim on a conversation this session never
+    joins, which can then stop another session attaching to it.
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "command": ["claude"],
+            "resume_argv": ["claude", "--fork-session", "--resume"],
+            "resume_strategy": "conversation_id",
+            "capabilities": ["launch", "resume", "conversation_check"],
+            "conversation_probe": "claude",
+        },
+    )
+    record = _session(store, "A", registry.get("claude"), REF)
+    record.setdefault("agents", {}).setdefault("resume_history", {})["claude"] = [OTHER]
+    store.write("sessions", record["id"], record)
+
+    guard = ConversationGuard(store, registry=registry)
+    assert guard.launch_would_resume(record, "claude", OTHER) is False, (
+        "a command that forks the candidate cannot adopt it"
+    )
+
+
+def test_an_older_frames_queued_attach_is_not_refused_by_its_own_host(
+    store, monkeypatch, claude_store
+):
+    """The compatibility path must keep the exemption that goes with its answer.
+
+    An older frame carries no destination, and labelling its command a RESUME
+    made the gate report that session's own background host as a conflicting
+    holder — so a queued `claude attach` opened a shell instead of joining the
+    session it was queued for. Handing the check no target lets it select for
+    itself, exactly as that frame's own gate did.
+    """
+    from hive_ide import launch_gate
+
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", str(store.workspace_key))
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.delenv("HIVE_IDE_LAUNCH_REFERENCE", raising=False)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    host = {
+        "pid": 4242, "ppid": 1, "command": f"claude bg-pty-host --session-id {REF}",
+        "orphaned": False, "background": True,
+    }
+    monkeypatch.setattr(
+        ConversationHolders, "holders", classmethod(lambda cls, ref, **kw: [host])
+    )
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts", classmethod(lambda cls, ref, **kw: [host])
+    )
+    monkeypatch.setattr(
+        ConversationHolders, "background_tree", classmethod(lambda cls, ref, **kw: {4242})
+    )
+
+    assert launch_gate.held_conversation_reason() is None, (
+        "its own host is what it is queued to attach to"
+    )
