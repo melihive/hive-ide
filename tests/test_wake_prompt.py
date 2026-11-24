@@ -430,7 +430,7 @@ def test_wake_does_not_report_success_after_the_conversation_vanishes(
     _sleep(tmp_path, record)
     live_guard.calls.clear()
 
-    def vanish(driver):
+    def vanish(driver, **kw):   # `rows`: one snapshot per launch
         for path in live_guard.projects.rglob(f"{REFERENCE}.jsonl"):
             path.unlink()
         return None
@@ -457,6 +457,14 @@ def test_wake_refuses_when_the_conversation_went_to_the_background(
     If a background host for the SAME conversation appears after `wake`
     validated it, the launch resolves to `attach` — and an attach carries no
     argv, so the one-shot prompt is dropped while the command reports success.
+
+    The host appears from the SECOND read on. Since the launch command is now
+    selected once per launch, that read is `wake`'s own backgrounded check
+    rather than a later one inside the launch, so the refusal carries the named
+    reason instead of a generic launch failure. What is pinned is unchanged:
+    exit 1, nothing dispatched, the session still asleep with its prompt
+    unspent. The refusal that fires when the host appears at the FINAL
+    selection is pinned by the test below.
     """
     store, record = _session(tmp_path, "claude")
     _transcript(live_guard.projects, REFERENCE)
@@ -466,7 +474,7 @@ def test_wake_refuses_when_the_conversation_went_to_the_background(
 
     original = Frame._attach_argv  # bound classmethod, captured before the patch
 
-    def appears(driver):
+    def appears(driver, **kw):   # `rows`: one snapshot per launch
         # Empty until wake has had its say, then the host exists.
         if not attach:
             attach.append("now")
@@ -477,11 +485,11 @@ def test_wake_refuses_when_the_conversation_went_to_the_background(
 
     code, out = _wake(tmp_path, capsys, record["id"])
 
-    assert code == 1 and out["reason"] == "launch_failed"
-    assert "carries no prompt" in out["detail"]
+    assert code == 1 and out["reason"] == "conversation_backgrounded"
     asleep = store.find_session(record["id"])
     assert Frame._is_sleeping(asleep)
     assert "launch_prompt" not in asleep
+    assert not live_guard.launches(), "nothing is started for a refused wake"
 
 
 def test_a_background_host_appearing_late_cannot_eat_the_prompt(
@@ -492,8 +500,14 @@ def test_a_background_host_appearing_late_cannot_eat_the_prompt(
     disagree — validation passed, the command became an attach, and the prompt
     went nowhere while `wake` reported success.
 
-    One decision now: a launch carrying a one-shot prompt never attaches. Here
-    the host appears only for the SECOND read, which used to be the losing case.
+    The host appears only for the LAST read — the selection the launch itself
+    makes, which is the read the earlier fixes could not see. The answer used to
+    be "never attach with a prompt", so the launch resumed instead: a SECOND
+    driver on a conversation whose host is live, which is the blank pane the
+    holder guard exists for, with the prompt delivered into it. It now REFUSES
+    there, which is what the plan's own task for this asked for, and the session
+    keeps both its sleep and its prompt. One selection per launch is what makes
+    the final read the deciding one.
     """
     store, record = _session(tmp_path, "claude")
     _transcript(live_guard.projects, REFERENCE)
@@ -502,7 +516,7 @@ def test_a_background_host_appearing_late_cannot_eat_the_prompt(
     reads: list[int] = []
     original = Frame._attach_argv
 
-    def late(driver):
+    def late(driver, **kw):   # `rows`: one snapshot per launch
         # Three reads on this path: `wake`'s own backgrounded check, the
         # validation inside `prepare_agent_launch`, and finally the one that
         # BUILDS the command. The host appears only for the last, which is the
@@ -520,10 +534,14 @@ def test_a_background_host_appearing_late_cannot_eat_the_prompt(
         call if isinstance(call, str) else " ".join(call)
         for call in live_guard.launches()
     )
-    # Strictly: the launch that ran carries the prompt, and is not an attach.
-    # Accepting "either a resume or a refusal" let the guard be removed with the
-    # test still green (found by mutation).
-    assert (code, out.get("reason")) == (0, None), out
-    assert "attach" not in launched
-    assert PROMPT in launched
-    assert len(reads) >= 3, reads  # the build-time read is the one that used to win
+    # Strictly one outcome, named. Accepting "either a resume or a refusal" let
+    # the guard be removed with the test still green (found by mutation).
+    assert (code, out["reason"]) == (1, "launch_failed"), out
+    assert "carries no prompt" in out["detail"]
+    # Neither half of the old failure: no attach (which would drop the prompt),
+    # and no resume (which would start a second driver on a live conversation).
+    assert "attach" not in launched and "--resume" not in launched
+    assert PROMPT not in launched
+    asleep = store.find_session(record["id"])
+    assert Frame._is_sleeping(asleep)
+    assert "launch_prompt" not in asleep, "the prompt is unspent, not delivered"

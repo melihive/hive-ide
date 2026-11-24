@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from .agents import AgentResumeState
-from .drivers import ConversationState, ConversationStatus, DriverRegistry
+from .drivers import (
+    LAUNCH_RESUME,
+    ConversationState,
+    ConversationStatus,
+    DriverRegistry,
+    rendered_destination,
+)
 from .errors import HiveIdeError
 from .store import StateStore
 from .turns import TurnSequence
@@ -210,6 +216,14 @@ class ConversationGuard:
         way to resume (`resume_strategy` defaults to `none`), so the guard could
         adopt a surviving conversation whose launch was just the executable and
         the prompt — a fresh chat wearing a resumed conversation's name.
+
+        Asks `rendered_destination` rather than searching the argv for the
+        reference: a session NAMED after a conversation put the id in the argv of
+        a launch that cannot resume it, and this predicate is what authorizes
+        writing a claim. It stays PURE — no process table, no background host —
+        because the question is what a CANDIDATE rendering would do, not what the
+        command about to run will do. A host for either conversation must not get
+        a say in which reference is persisted.
         """
         try:
             definition = self.registry.get(driver_id)
@@ -220,9 +234,8 @@ class ConversationGuard:
             working_dir=str(record.get("working_dir") or self.store.workspace_key),
             conversation_reference=reference,
         )
-        return any(
-            reference in str(part) for part in ours.get("launch_argv") or []
-        )
+        kind, destination = rendered_destination(ours)
+        return kind == LAUNCH_RESUME and destination == reference
 
     def had_a_turn(
         self,

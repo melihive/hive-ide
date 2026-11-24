@@ -134,7 +134,7 @@ def _session(store, reference: str | None):
 
 
 def test_prepare_agent_launch_refuses_when_another_process_holds_the_conversation(
-    store, monkeypatch
+    store, monkeypatch, tmp_path
 ):
     """The guard lives in `prepare_agent_launch`, which is the ONE thing every driver
     launch goes through.
@@ -142,8 +142,28 @@ def test_prepare_agent_launch_refuses_when_another_process_holds_the_conversatio
     Review finding: it was in `respawn_agent` only, and the window `build` launches
     drivers too — so `open`, the path the original fault actually came through, was
     still unguarded. Putting it at the shared choke point covers both.
+
+    The record is a real resuming launch, where it used to be a `term` session
+    with a leftover reference in its metadata: a shell cannot join a
+    conversation, so a holder of one no longer refuses to open it. What this test
+    is about — the guard firing from the shared choke point — is unchanged.
     """
-    record = _session(store, REF)
+    projects = tmp_path / "claude-config" / "projects"
+    (projects / "-p").mkdir(parents=True)
+    (projects / "-p" / f"{REF}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    from hive_ide.drivers import bundled_drivers
+
+    record = store.create_session(
+        name="ALPHA",
+        working_dir=store.workspace_key,
+        source={"kind": "stable", "interpreter": "/usr/bin/python3", "version": "0"},
+        driver=bundled_drivers()["claude"].resolve(
+            name="ALPHA",
+            working_dir=str(store.workspace_key),
+            conversation_reference=REF,
+        ),
+    )
     frame = Frame(store, socket="sock")
     monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
     monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
@@ -259,10 +279,16 @@ def test_respawn_agent_proceeds_when_nothing_holds_the_conversation(store, monke
     monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
     monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
     monkeypatch.setattr(ConversationHolders, "holders", classmethod(lambda cls, ref, **kw: []))
-    monkeypatch.setattr(Frame, "prepare_agent_launch", lambda self, rec, **kwargs: None)
+    monkeypatch.setattr(
+        Frame,
+        "prepare_agent_launch",
+        # Returns the selection, as the real one does: the respawn consumes
+        # whatever the command it launched carried.
+        lambda self, rec, **kwargs: self.select_launch(rec),
+    )
     monkeypatch.setattr(Frame, "safe_working_dir", lambda self, rec: "/tmp")
-    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None: [])
-    monkeypatch.setattr(Frame, "_agent_command", lambda self, rec: "true")
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None, **kw: [])
+    monkeypatch.setattr(Frame, "_agent_command", lambda self, rec, *a: "true")
 
     class _Ok:
         returncode = 0
@@ -283,10 +309,16 @@ def test_respawn_agent_proceeds_when_the_session_has_no_conversation(store, monk
     monkeypatch.setattr(
         ConversationHolders, "holders", classmethod(lambda cls, ref, **kw: probed.append(ref) or [])
     )
-    monkeypatch.setattr(Frame, "prepare_agent_launch", lambda self, rec, **kwargs: None)
+    monkeypatch.setattr(
+        Frame,
+        "prepare_agent_launch",
+        # Returns the selection, as the real one does: the respawn consumes
+        # whatever the command it launched carried.
+        lambda self, rec, **kwargs: self.select_launch(rec),
+    )
     monkeypatch.setattr(Frame, "safe_working_dir", lambda self, rec: "/tmp")
-    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None: [])
-    monkeypatch.setattr(Frame, "_agent_command", lambda self, rec: "true")
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None, **kw: [])
+    monkeypatch.setattr(Frame, "_agent_command", lambda self, rec, *a: "true")
 
     class _Ok:
         returncode = 0

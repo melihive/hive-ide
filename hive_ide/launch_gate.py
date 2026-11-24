@@ -140,7 +140,7 @@ class IdeLaunchGate:
             self._sleep(min(self.POLL_SECONDS, remaining))
 
 
-def held_conversation_reason() -> str | None:
+def held_conversation_reason(reference: str | None = None) -> str | None:
     """Why this launch must NOT start after all, re-checked at release.
 
     `prepare_agent_launch` cleared this pane's conversation before the window was
@@ -152,6 +152,26 @@ def held_conversation_reason() -> str | None:
     window from an instant to seconds, so the check is made again at the end of
     it.
 
+    `reference` is the conversation the FROZEN command goes to, put in the pane's
+    environment by the frame that built the command. Without one there is nothing
+    to check: a launch that joins no conversation cannot duplicate a driver on
+    one, and an attach is given none because it joins its host on purpose.
+    Re-deriving it from the record here asks about a session that may have moved
+    on during the wait, while the command about to be `exec`ed has not.
+
+    It arrives in the ENVIRONMENT rather than as an argument because the frame
+    and the gate can be different versions: a session pinned to an older package
+    source runs an older gate, whose parser would exit 2 on an argument it has
+    never seen — after the shell has already `exec`ed it, so the pane would close
+    with no agent. An unknown environment variable is ignored instead.
+
+    The variable being ABSENT and being EMPTY mean different things, which is why
+    a frame that speaks this protocol always sets it: absent means an older frame
+    built the command and said nothing, so the record is asked exactly as that
+    frame's own gate would have asked it — dropping the check there would lose a
+    guard for the mixed pairing. Empty means this frame considered the question
+    and there is none: a fresh launch, or an attach joining its host on purpose.
+
     Fails OPEN in every direction except a definite refusal. No environment, no
     record, an unreadable process table or any error at all means launch: a
     missed collision costs one confusing pane, and a false refusal costs the user
@@ -159,8 +179,16 @@ def held_conversation_reason() -> str | None:
     """
     try:
         from .errors import HeldConversationError
-        from .frame import Frame
+        from .frame import LAUNCH_RESUME, Frame, LaunchTarget
         from .store import StateStore
+
+        declared = (
+            reference
+            if reference is not None
+            else os.environ.get("HIVE_IDE_LAUNCH_REFERENCE")
+        )
+        if declared == "":
+            return None     # asked and answered: this launch joins nothing
 
         store = StateStore(
             os.environ["HIVE_IDE_STATE_HOME"], os.environ["HIVE_IDE_WORKSPACE_KEY"]
@@ -168,9 +196,33 @@ def held_conversation_reason() -> str | None:
         record = store.find_session(os.environ["HIVE_IDE_SESSION_ID"])
         if record is None:
             return None
+        if not declared and declared is not None:
+            return None
         frame = Frame(store, socket=os.environ.get("HIVE_IDE_TMUX_SOCKET") or "")
+        if declared is None:
+            # An older frame carried no answer. Ask the record the way that
+            # frame's own gate did — by handing the check no target at all, so it
+            # makes its own selection and keeps the background-host exemption
+            # that goes with it. Labelling the command a RESUME here instead
+            # refused a queued `claude attach` against the very host it was
+            # queued to join (review round 7).
+            try:
+                frame.refuse_held_conversation(record)
+            except HeldConversationError as exc:
+                return str(exc) or "its conversation is held by another process"
+            return None
         try:
-            frame.refuse_held_conversation(record)
+            # The command this pane will become, stated rather than re-derived.
+            frame.refuse_held_conversation(
+                record,
+                LaunchTarget(
+                    LAUNCH_RESUME,
+                    (record.get("driver") or {}).get("id"),
+                    declared,
+                    None,
+                    (),
+                ),
+            )
         except HeldConversationError as exc:
             return str(exc) or "its conversation is held by another process"
     except Exception:

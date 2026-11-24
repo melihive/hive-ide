@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import UsageError
+from .holders import ConversationHolders
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,89 @@ class AgentDriver(Protocol):
     def translate_status(
         self, payload: dict[str, Any], requested_state: str
     ) -> dict[str, Any] | None: ...
+
+
+#: Where a launch will land. `resume` names the conversation it joins, `fresh`
+#: starts a new one, and `unknown` is a command whose destination cannot be
+#: established — never folded into either of the other two.
+LAUNCH_RESUME = "resume"
+LAUNCH_FRESH = "fresh"
+LAUNCH_UNKNOWN = "unknown"
+
+
+def rendered_destination(rendered: dict[str, Any]) -> tuple[str, str | None]:
+    """Where a command THIS installation rendered will land.
+
+    The authority is the `resume` block `resolve()` returns plus WHICH BRANCH
+    produced the command, never the shape of the argv, because the argv cannot
+    be read for this:
+
+    - the reference can be in the argv without being resumed. A session NAME
+      equal to the conversation id puts it there (`claude --name <id>`), and a
+      driver whose `resume_strategy` is `none` renders only a fresh launch while
+      still carrying the reference in its metadata.
+    - the reference can be resumed without being in the argv. `agy -c` continues
+      whatever conversation that workspace considers current, which may or may
+      not be the one the record names.
+    - and the difference between the two renderings cannot be read either. A
+      declarative driver with `command = ["claude", "--resume", X]` and
+      `resume_argv = ["claude", "--resume"]` renders byte-identical argv with and
+      without the reference, and genuinely resumes X in both. Comparing them was
+      tried and dropped: only the two strategies below render differently when
+      given a reference, so which branch produced a command is exactly what the
+      strategy already says.
+
+    So the strategy decides, and the argv only corroborates. A command carrying
+    the reference under a strategy that cannot resume it is UNKNOWN rather than
+    fresh: a configured `command` of `["claude", "--resume", X]` with the default
+    `resume_strategy: none` resumes X while declaring nothing, and calling that
+    fresh told both collision guards there was nothing to collide over.
+
+    A session named exactly after a conversation reaches the same UNKNOWN by the
+    same route, and is refused where it used to launch. That direction is
+    deliberate: the cost is one pathological name, and the cost of the other
+    direction is a second driver on a live conversation.
+    """
+    resume = rendered.get("resume") if isinstance(rendered, dict) else None
+    strategy = resume.get("strategy") if isinstance(resume, dict) else None
+    reference = resume.get("reference") if isinstance(resume, dict) else None
+    if not isinstance(reference, str) or not reference:
+        # Nothing was rendered to resume, whatever the driver can do.
+        return (LAUNCH_FRESH, None)
+    if strategy == "workspace_continue":
+        # It joins a conversation it cannot name. Bare `agy` (no reference) is a
+        # known fresh launch and took the branch above; only the continuation is
+        # unknowable, so the DRIVER is never classified, only the command.
+        return (LAUNCH_UNKNOWN, None)
+    argv = rendered.get("launch_argv") if isinstance(rendered, dict) else None
+    if any(
+        str(part) in ConversationHolders.OVERRIDING_SELECTION_OPTIONS
+        for part in argv or []
+    ):
+        # The command chooses a conversation on its own terms — `--continue`,
+        # `-c`, `--last`, `--fork-session` — so no id in it is a destination:
+        # beside a continuation it is a prompt, beside a fork it is the SOURCE.
+        # The list is the holder path's, shared so this driver-CLI knowledge has
+        # ONE home, and as there it can only ever refuse an answer.
+        #
+        # Checked here rather than in the frame, where it started: the frame is
+        # not the only caller. `ConversationGuard` asks the same question when it
+        # decides whether a displaced conversation may be ADOPTED, and with the
+        # check one level up it adopted — and claimed — the source of a fork.
+        return (LAUNCH_UNKNOWN, None)
+    carries = any(reference in str(part) for part in argv or [])
+    if strategy == "conversation_id":
+        # Declared resume-by-id. The argv still has to carry the id: a driver
+        # that says it resumes by id and renders a command without one may be
+        # resuming through something we cannot see, so neither answer is
+        # evidence.
+        return (LAUNCH_RESUME, reference) if carries else (LAUNCH_UNKNOWN, None)
+    # `none`, or a strategy this version does not know. Fresh only if the command
+    # does not carry the reference at all — a session NAMED after a conversation
+    # and a configured command with the id baked in are the same two facts, and
+    # no rule separates them, so both take the UNKNOWN that makes a collision
+    # guard ask rather than assume.
+    return (LAUNCH_UNKNOWN, None) if carries else (LAUNCH_FRESH, None)
 
 
 class CommandDriver:

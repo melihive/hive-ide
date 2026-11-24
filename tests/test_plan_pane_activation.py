@@ -201,7 +201,7 @@ class Pane(Frame):
         monkeypatch.setattr(Frame, "_pane_has_micro", lambda self, pane: True)
         monkeypatch.setattr(Frame, "_plan_viewer_is_stale", lambda self, pane: stale)
         monkeypatch.setattr(Frame, "safe_working_dir", lambda self, record: "/tmp")
-        monkeypatch.setattr(Frame, "_environment", lambda self, record, role: [])
+        monkeypatch.setattr(Frame, "_environment", lambda self, record, role, **kw: [])
         monkeypatch.setattr(Frame, "_plan_command", lambda self, record, line=None: ":")
         monkeypatch.setattr(Frame, "_plan_title", lambda self, record: "plan")
         monkeypatch.setattr(Frame, "ensure_key_bindings", lambda self: self._bind())

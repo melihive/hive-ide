@@ -51,7 +51,14 @@ def _hold(monkeypatch, *, orphaned: bool = True) -> None:
         "holders",
         classmethod(
             lambda cls, reference, *, exclude_tree=None, rows=None: [
-                {"pid": HELD_PID, "ppid": 1 if orphaned else 99, "orphaned": orphaned}
+                {
+                    "pid": HELD_PID,
+                    "ppid": 1 if orphaned else 99,
+                    "orphaned": orphaned,
+                    # A real row always carries it, and the attach decision
+                    # that the launch selection makes reads it.
+                    "background": False,
+                }
             ]
         ),
     )
@@ -208,7 +215,13 @@ def test_a_relaunched_driver_clears_the_recorded_error(store, monkeypatch):
     assert store.read("errors", record["id"]) is not None
 
     monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
-    monkeypatch.setattr(Frame, "prepare_agent_launch", lambda self, rec, **kwargs: None)
+    monkeypatch.setattr(
+        Frame,
+        "prepare_agent_launch",
+        # A selection, as the real one returns: the respawn consumes the
+        # one-shot inputs the command it launched carried.
+        lambda self, rec, **kwargs: self.select_launch(rec),
+    )
     monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Reply())
 
     assert frame.respawn_agent(record, "%1") is True
@@ -343,6 +356,10 @@ def test_chat_launches_the_reconciled_argv_not_the_stale_one(store, monkeypatch)
             "launch_argv": ["claude", "--name", "HELD"],
             "resume": {},
         }
+        # The real one returns the selection it made from the reconciled record,
+        # and `current_chat` launches that. Returning None here would have the
+        # test pass on a path production never takes.
+        return self.select_launch(rec)
 
     monkeypatch.setattr(Frame, "prepare_agent_launch", reconcile)
     monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
