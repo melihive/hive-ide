@@ -1259,7 +1259,13 @@ class Frame:
             module, args, python=interpreter or self.python
         )
 
-    def _environment(self, record: dict[str, Any], *, role: str | None = None) -> list[str]:
+    def _environment(
+        self,
+        record: dict[str, Any],
+        *,
+        role: str | None = None,
+        gate_reference: str | None = None,
+    ) -> list[str]:
         source = record.get("source") or {}
         env = [
             "-e",
@@ -1279,6 +1285,14 @@ class Frame:
             "-e",
             f"HIVE_IDE_SOURCE={source.get('kind') or 'stable'}",
         ]
+        if gate_reference:
+            # The conversation the FROZEN command goes to, for the holder
+            # re-check the launch gate makes at the end of its wait. Asking the
+            # record there asks about a session that may have moved on during
+            # the wait, while the command about to be `exec`ed has not. An older
+            # gate ignores this; a newer gate under an older frame sees nothing
+            # and checks nothing, which is the direction that fails open.
+            env.extend(["-e", f"HIVE_IDE_LAUNCH_REFERENCE={gate_reference}"])
         hive = (record.get("host") or {}).get("hive") or {}
         repo = hive.get("repo")
         if isinstance(repo, str) and repo:
@@ -1301,7 +1315,6 @@ class Frame:
         delay: float = 0.0,
         label: str = "",
         python: str | None = None,
-        reference: str | None = None,
     ) -> list[str]:
         """The pane argv for a driver launch: `command` run with a PATH that can
         find the driver (see `_launch_path`).
@@ -1322,20 +1335,10 @@ class Frame:
         prefix = [env, f"PATH={self._launch_path()}"]
         if delay <= 0:
             return [*prefix, "sh", "-c", command]
-        return [
-            *prefix,
-            "sh",
-            "-c",
-            self._gated_pane_command(command, delay, label, python, reference),
-        ]
+        return [*prefix, "sh", "-c", self._gated_pane_command(command, delay, label, python)]
 
     def _gated_pane_command(
-        self,
-        command: str,
-        delay: float,
-        label: str,
-        python: str | None,
-        reference: str | None = None,
+        self, command: str, delay: float, label: str, python: str | None
     ) -> str:
         """`command`, behind the launch gate — and still `command` if the gate
         cannot start.
@@ -1357,11 +1360,14 @@ class Frame:
             # `--work`, and as a separate word that name parses as another flag.
             # argparse exits 2, and by then the shell has already `exec`ed the
             # gate, so the fallback below is gone and the agent never starts.
-            # The conversation the FROZEN command goes to. The gate re-checks
-            # for a holder at the end of its wait, and asking the record again
-            # there asks about a session that may have moved on in the meantime
-            # — while the command it is about to exec has not.
-            [f"--delay={delay:g}", f"--label={label}", f"--reference={reference or ''}"],
+            # No new FLAGS here, ever: the probe above only establishes that the
+            # pane's interpreter can IMPORT a gate, and a session pinned to an
+            # older package source imports one whose parser rejects an argument
+            # it has never seen. argparse exits 2 — after the shell has already
+            # `exec`ed the gate, so the fallback is gone and the agent never
+            # starts. What the gate needs to know travels in the pane's
+            # environment, where an older gate simply ignores it.
+            [f"--delay={delay:g}", f"--label={label}"],
             python=interpreter,
         )
         driver = shlex.join(["sh", "-c", command])
@@ -2215,7 +2221,10 @@ class Frame:
                         "inside it; run `hive-ide chat` from another pane or a "
                         "plain terminal to relaunch the agent."
                     )
-                self._clear_consumed_handoff(record)
+                # The handoff is consumed by `respawn_agent`, which knows what
+                # the command it launched carried. Clearing it here cleared it
+                # for an ATTACH too, and an attach carries no prompt — so a
+                # pending handoff was dropped without ever being delivered.
                 self.clear_sleep(record)
                 self.tmux(["select-pane", "-t", pane_id])
                 return {
@@ -2644,8 +2653,14 @@ class Frame:
         # covers the host AND its children, because the host's child is usually the
         # real driver and carries no marker of its own. Only holders that would
         # genuinely collide with a fresh driver can refuse a launch.
-        backgrounded = ConversationHolders.background_tree(reference, rows=rows)
-        held = [h for h in held if h["pid"] not in backgrounded]
+        if target.kind == LAUNCH_ATTACH:
+            # Exempt only for a launch that is actually attaching. The exemption
+            # exists because an attach JOINS that host deliberately — but a
+            # queued `--resume` released after a host appeared is the collision
+            # this guard is for, and exempting it there let a second driver
+            # start on a live conversation.
+            backgrounded = ConversationHolders.background_tree(reference, rows=rows)
+            held = [h for h in held if h["pid"] not in backgrounded]
         if not held:
             return
         who = ", ".join(
@@ -2700,6 +2715,10 @@ class Frame:
         )
         if result.returncode != 0:
             raise HiveIdeError(result.stderr.strip() or "Could not reopen the agent pane.")
+        if selected.carries_a_prompt():
+            # What the launched command carried is spent; an attach carried
+            # nothing, and its prompt stays pending for the next real launch.
+            self._clear_consumed_handoff(record)
         # The driver this session could not start is now running, so the recorded
         # open error is spent. `hive-ide chat` is what the held-conversation refusal
         # tells the user to run; leaving the error behind would mark the session
@@ -3030,15 +3049,28 @@ class Frame:
     def _clear_consumed_handoff(self, record: dict[str, Any]) -> None:
         """Drop the launch inputs a driver launch just delivered: the handoff and
         the session's one-shot launch prompt, so a later relaunch never repeats it."""
-        keys = ("handoff", "launch_prompt")
-        if not any(key in record for key in keys):
+        delivered = {
+            key: record[key]
+            for key in ("handoff", "launch_prompt")
+            if key in record
+        }
+        if not delivered:
             return
-        fresh = self.store.read("sessions", record["id"]) or record
-        if any(key in fresh for key in keys):
-            for key in keys:
-                fresh.pop(key, None)
-            self.store.write("sessions", record["id"], fresh)
-        for key in keys:
+        with self.store.mutation_lock():
+            fresh = self.store.read("sessions", record["id"])
+            if fresh is not None:
+                # Only the inputs THIS launch carried. The read used to fall back
+                # to the in-memory record and write that back, which on the
+                # `chat` path runs after an interactive driver exits — minutes or
+                # hours later — and so could resurrect a session archived in the
+                # meantime, or delete a handoff queued after this one was
+                # delivered. A value that no longer matches was not ours to spend.
+                spent = [k for k, v in delivered.items() if fresh.get(k) == v]
+                if spent:
+                    for key in spent:
+                        fresh.pop(key, None)
+                    self.store.write("sessions", record["id"], fresh)
+        for key in delivered:
             record.pop(key, None)
 
     def _tag(
@@ -3328,6 +3360,14 @@ class Frame:
             agent_command = self._sleeping_agent_command()
         else:
             agent_command = self._agent_command(record, selected)
+        # Only a launch that will still be waiting needs the gate's re-check, and
+        # only one that is not an ATTACH: an attach joins the background host on
+        # purpose, so the host is not a collision for it.
+        gate_reference = (
+            selected.collides_with()
+            if selected is not None and selected.kind != LAUNCH_ATTACH
+            else None
+        )
         for role, command in (
             ("agent", agent_command),
             ("plan", self._plan_command(record)),
@@ -3340,16 +3380,17 @@ class Frame:
                     target,
                     "-c",
                     working_dir,
-                    *self._environment(record, role=role),
+                    *self._environment(
+                        record,
+                        role=role,
+                        gate_reference=gate_reference if role == "agent" else None,
+                    ),
                     *(
                         self._driver_argv(
                             command,
                             delay=launch_delay,
                             label=str(record.get("name") or ""),
                             python=self._record_python(record),
-                            reference=(
-                                selected.collides_with() if selected else None
-                            ),
                         )
                         if role == "agent"
                         and not no_driver

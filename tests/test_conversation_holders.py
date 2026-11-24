@@ -279,9 +279,15 @@ def test_respawn_agent_proceeds_when_nothing_holds_the_conversation(store, monke
     monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
     monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
     monkeypatch.setattr(ConversationHolders, "holders", classmethod(lambda cls, ref, **kw: []))
-    monkeypatch.setattr(Frame, "prepare_agent_launch", lambda self, rec, **kwargs: None)
+    monkeypatch.setattr(
+        Frame,
+        "prepare_agent_launch",
+        # Returns the selection, as the real one does: the respawn consumes
+        # whatever the command it launched carried.
+        lambda self, rec, **kwargs: self.select_launch(rec),
+    )
     monkeypatch.setattr(Frame, "safe_working_dir", lambda self, rec: "/tmp")
-    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None: [])
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None, **kw: [])
     monkeypatch.setattr(Frame, "_agent_command", lambda self, rec, *a: "true")
 
     class _Ok:
@@ -303,9 +309,15 @@ def test_respawn_agent_proceeds_when_the_session_has_no_conversation(store, monk
     monkeypatch.setattr(
         ConversationHolders, "holders", classmethod(lambda cls, ref, **kw: probed.append(ref) or [])
     )
-    monkeypatch.setattr(Frame, "prepare_agent_launch", lambda self, rec, **kwargs: None)
+    monkeypatch.setattr(
+        Frame,
+        "prepare_agent_launch",
+        # Returns the selection, as the real one does: the respawn consumes
+        # whatever the command it launched carried.
+        lambda self, rec, **kwargs: self.select_launch(rec),
+    )
     monkeypatch.setattr(Frame, "safe_working_dir", lambda self, rec: "/tmp")
-    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None: [])
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role=None, **kw: [])
     monkeypatch.setattr(Frame, "_agent_command", lambda self, rec, *a: "true")
 
     class _Ok:

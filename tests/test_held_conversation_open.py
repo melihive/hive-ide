@@ -215,7 +215,13 @@ def test_a_relaunched_driver_clears_the_recorded_error(store, monkeypatch):
     assert store.read("errors", record["id"]) is not None
 
     monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
-    monkeypatch.setattr(Frame, "prepare_agent_launch", lambda self, rec, **kwargs: None)
+    monkeypatch.setattr(
+        Frame,
+        "prepare_agent_launch",
+        # A selection, as the real one returns: the respawn consumes the
+        # one-shot inputs the command it launched carried.
+        lambda self, rec, **kwargs: self.select_launch(rec),
+    )
     monkeypatch.setattr(Frame, "tmux", lambda self, args, **kw: _Reply())
 
     assert frame.respawn_agent(record, "%1") is True

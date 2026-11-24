@@ -38,7 +38,7 @@ from hive_ide.drivers import (
     bundled_drivers,
 )
 from hive_ide.errors import HeldConversationError
-from hive_ide.frame import LAUNCH_ATTACH, Frame
+from hive_ide.frame import LAUNCH_ATTACH, Frame, LaunchTarget
 from hive_ide.holders import ConversationHolders
 from hive_ide.store import StateStore
 
@@ -476,7 +476,7 @@ def test_cleanup_follows_the_command_that_launched_not_a_later_probe(
     monkeypatch.setattr(Frame, "_plan_command", lambda self, rec: "true")
     monkeypatch.setattr(Frame, "_tag", lambda self, t, rec: None)
     monkeypatch.setattr(Frame, "_apply_columns", lambda self, t: None)
-    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role: [])
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role, **kw: [])
     monkeypatch.setattr(Frame, "_is_sleeping", lambda self, rec: False)
     monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
     monkeypatch.setattr(
@@ -676,27 +676,31 @@ def test_a_malformed_resume_block_does_not_escape_the_launch(store, monkeypatch)
 def test_a_queued_launch_carries_its_own_destination_to_the_gate(store, monkeypatch):
     """The gate re-checks for a holder at the end of its wait, in another process.
 
-    It read the RECORD there, so a session that moved on during the wait had the
+    It read the RECORD there, so a session that moved on during the wait had its
     frozen command released against a conversation that command does not name.
-    The destination selected for this launch is passed to it instead.
+    The destination selected for this launch goes into the pane's ENVIRONMENT
+    instead — never a new flag: the pane's interpreter may be pinned to an older
+    package whose gate parser exits 2 on an argument it has never seen, after the
+    shell has already `exec`ed it, so the pane would close with no agent.
     """
     record = _session(store, "A", bundled_drivers()["claude"], REF)
     frame = _frame(store, monkeypatch)
-    monkeypatch.setattr(Frame, "_launch_path", lambda self: "/usr/bin")
     selected = frame.select_launch(record)
 
-    gated = " ".join(
-        frame._driver_argv(
-            "claude --resume " + REF, delay=4.0, reference=selected.collides_with()
-        )
+    env = " ".join(
+        frame._environment(record, role="agent", gate_reference=selected.collides_with())
     )
-    assert f"--reference={REF}" in gated
+    assert f"HIVE_IDE_LAUNCH_REFERENCE={REF}" in env
+    monkeypatch.setattr(Frame, "_launch_path", lambda self: "/usr/bin")
+    gated = " ".join(frame._driver_argv("claude --resume " + REF, delay=4.0))
+    assert "--delay" in gated and "--reference" not in gated
 
-    # A launch that joins no conversation carries no reference to check, so the
-    # gate asks nothing rather than asking about a stale id.
+    # A launch that joins no conversation carries no question to the gate.
     fresh = _session(store, "B", bundled_drivers()["claude"], None)
     assert frame.select_launch(fresh).collides_with() is None
-    assert REF not in " ".join(frame._driver_argv("claude", delay=4.0, reference=None))
+    assert "HIVE_IDE_LAUNCH_REFERENCE" not in " ".join(
+        frame._environment(fresh, role="agent", gate_reference=None)
+    )
 
 
 def test_the_build_hands_the_queued_launch_its_own_destination(
@@ -720,7 +724,7 @@ def test_the_build_hands_the_queued_launch_its_own_destination(
     monkeypatch.setattr(Frame, "_plan_command", lambda self, rec: "true")
     monkeypatch.setattr(Frame, "_tag", lambda self, t, rec: None)
     monkeypatch.setattr(Frame, "_apply_columns", lambda self, t: None)
-    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role: [])
+    # `_environment` is NOT faked here: it is what carries the question.
     monkeypatch.setattr(Frame, "_is_sleeping", lambda self, rec: False)
     monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
     monkeypatch.setattr(Frame, "_launch_path", lambda self: "/usr/bin")
@@ -729,4 +733,143 @@ def test_the_build_hands_the_queued_launch_its_own_destination(
 
     agent = [c for c in calls if any("launch_gate" in str(part) for part in c)]
     assert agent, "the agent pane was not queued behind the gate"
-    assert f"--reference={REF}" in " ".join(agent[0])
+    assert f"HIVE_IDE_LAUNCH_REFERENCE={REF}" in " ".join(agent[0])
+    plan = [c for c in calls if "true" in [str(part) for part in c]]
+    assert plan and "HIVE_IDE_LAUNCH_REFERENCE" not in " ".join(plan[0]), (
+        "only the pane that waits behind the gate is asked the question"
+    )
+
+    # And an ATTACH is asked nothing: it joins that host on purpose, so the host
+    # is not a collision for it, and the gate would refuse its own command.
+    calls.clear()
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts",
+        classmethod(lambda cls, ref, **kw: [{"pid": 4242, "background": True}]),
+    )
+    frame._finish_build(record, "@7", str(store.workspace_key), launch_delay=4.0)
+    attaching = [c for c in calls if any("launch_gate" in str(part) for part in c)]
+    assert attaching, "the attach was not queued behind the gate"
+    assert "HIVE_IDE_LAUNCH_REFERENCE" not in " ".join(attaching[0])
+
+
+def test_consuming_a_prompt_never_writes_back_a_session_that_is_gone(
+    store, monkeypatch, claude_store
+):
+    """On the `chat` path this runs after an interactive driver EXITS.
+
+    That can be hours, and the read used to fall back to the in-memory record
+    and write it back — so a session archived or deleted while the driver was
+    open came back from the dead, with whatever else the record held at launch
+    time.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["handoff"] = {"target_driver_prompt": "pick up the plan"}
+    store.write("sessions", record["id"], record)
+    frame = _frame(store, monkeypatch)
+
+    store.delete("sessions", record["id"])      # archived while the driver ran
+    frame._clear_consumed_handoff(record)
+
+    assert store.read("sessions", record["id"]) is None, "it stayed gone"
+    assert "handoff" not in record, "and the in-memory copy is still consumed"
+
+
+def test_a_prompt_queued_after_delivery_is_not_consumed_by_the_old_launch(
+    store, monkeypatch, claude_store
+):
+    """Only the inputs THIS launch carried are spent.
+
+    The cleanup popped the keys by name, so a handoff queued while the driver was
+    running was deleted by the launch that never delivered it — and the next
+    launch had nothing to deliver.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["handoff"] = {"target_driver_prompt": "the first one"}
+    store.write("sessions", record["id"], record)
+    frame = _frame(store, monkeypatch)
+
+    queued = store.read("sessions", record["id"])
+    queued["handoff"] = {"target_driver_prompt": "queued while it ran"}
+    store.write("sessions", record["id"], queued)
+
+    frame._clear_consumed_handoff(record)
+
+    after = store.read("sessions", record["id"]) or {}
+    assert after.get("handoff") == {"target_driver_prompt": "queued while it ran"}
+
+
+def test_a_background_host_only_exempts_a_launch_that_is_attaching(
+    store, monkeypatch, claude_store
+):
+    """The exemption exists because an attach JOINS that host on purpose.
+
+    Applied to every launch kind, it also exempted a queued `--resume` released
+    after the conversation moved into the background — which is a second driver
+    on a live conversation, the exact fault this guard exists for. The launch
+    gate reaches that state by construction: it freezes a command and re-checks
+    seconds later.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    frame = _frame(store, monkeypatch)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    host = {
+        "pid": 4242, "ppid": 1, "command": f"claude bg-pty-host --session-id {REF}",
+        "orphaned": False, "background": True,
+    }
+    monkeypatch.setattr(
+        ConversationHolders, "holders", classmethod(lambda cls, ref, **kw: [host])
+    )
+    monkeypatch.setattr(
+        ConversationHolders, "background_tree", classmethod(lambda cls, ref, **kw: {4242})
+    )
+
+    resuming = LaunchTarget(LAUNCH_RESUME, "claude", REF, None, ())
+    with pytest.raises(HeldConversationError):
+        frame.refuse_held_conversation(record, resuming)
+
+    attaching = LaunchTarget(LAUNCH_ATTACH, "claude", REF, None, ())
+    frame.refuse_held_conversation(record, attaching)      # must not raise
+
+
+def test_the_respawn_path_keeps_a_handoff_an_attach_could_not_deliver(
+    store, monkeypatch, claude_store
+):
+    """`chat` into an idle agent pane cleared the handoff whatever it launched.
+
+    With a background host the respawn attaches, an attach carries no argv, and
+    the prompt was dropped without ever being delivered. The respawn now
+    consumes what the command it launched carried, which is the same rule the
+    window build uses.
+    """
+    _transcript(claude_store, REF)
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["handoff"] = {"target_driver_prompt": "pick up the plan"}
+    store.write("sessions", record["id"], record)
+    frame = _frame(store, monkeypatch)
+    monkeypatch.setattr(Frame, "pane_is_caller", lambda self, pane: False)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {"agent": "%2"})
+    monkeypatch.setattr(Frame, "pane_pid", lambda self, pane: 100)
+    monkeypatch.setattr(Frame, "safe_working_dir", lambda self, rec: "/tmp")
+    monkeypatch.setattr(Frame, "_environment", lambda self, rec, role, **kw: [])
+    monkeypatch.setattr(Frame, "_clear_open_error", lambda self, rec: None)
+    monkeypatch.setattr(
+        Frame, "tmux",
+        lambda self, argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts",
+        classmethod(lambda cls, ref, **kw: [{"pid": 4242, "background": True}]),
+    )
+
+    assert frame.respawn_agent(store.read("sessions", record["id"]), "%2") is True
+
+    after = store.read("sessions", record["id"]) or {}
+    assert after.get("handoff"), "an attach delivered nothing, so nothing is spent"
+
+    # The inverse, so this cannot become a respawn that never consumes: with no
+    # host the command is a resume, the prompt rides on its argv, and it is spent.
+    monkeypatch.setattr(
+        ConversationHolders, "background_hosts", classmethod(lambda cls, ref, **kw: [])
+    )
+    assert frame.respawn_agent(store.read("sessions", record["id"]), "%2") is True
+    assert not (store.read("sessions", record["id"]) or {}).get("handoff")

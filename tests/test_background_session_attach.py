@@ -293,7 +293,7 @@ def _build_fakes(monkeypatch, frame_cls):
     monkeypatch.setattr(frame_cls, "_plan_command", lambda self, rec: "true")
     monkeypatch.setattr(frame_cls, "_tag", lambda self, target, rec: None)
     monkeypatch.setattr(frame_cls, "_apply_columns", lambda self, target: None)
-    monkeypatch.setattr(frame_cls, "_environment", lambda self, rec, role: [])
+    monkeypatch.setattr(frame_cls, "_environment", lambda self, rec, role, **kw: [])
     # Returns a selection, as the real one does: it is the ONE place a launch's
     # command and destination are chosen, and `_finish_build` now decides from
     # that value instead of probing the process table a second time.

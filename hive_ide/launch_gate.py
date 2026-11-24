@@ -152,12 +152,19 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
     window from an instant to seconds, so the check is made again at the end of
     it.
 
-    `reference` is the conversation the FROZEN command goes to, passed in by
-    the frame that built it. Without one there is nothing to check: a launch that
-    joins no conversation cannot duplicate a driver on one. Re-deriving it from
-    the record here asks about a session that may have moved on during the wait,
-    while the command about to be `exec`ed has not — and after a move the record
-    would answer about a conversation this command never names.
+    `reference` is the conversation the FROZEN command goes to, put in the pane's
+    environment by the frame that built the command. Without one there is nothing
+    to check: a launch that joins no conversation cannot duplicate a driver on
+    one, and an attach is given none because it joins its host on purpose.
+    Re-deriving it from the record here asks about a session that may have moved
+    on during the wait, while the command about to be `exec`ed has not.
+
+    It arrives in the ENVIRONMENT rather than as an argument because the frame
+    and the gate can be different versions: a session pinned to an older package
+    source runs an older gate, whose parser would exit 2 on an argument it has
+    never seen — after the shell has already `exec`ed it, so the pane would close
+    with no agent. An unknown environment variable is ignored instead, and a
+    newer gate under an older frame finds nothing and checks nothing.
 
     Fails OPEN in every direction except a definite refusal. No environment, no
     record, an unreadable process table or any error at all means launch: a
@@ -165,6 +172,11 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
     an agent for no reason.
     """
     try:
+        reference = (
+            reference
+            if reference is not None
+            else os.environ.get("HIVE_IDE_LAUNCH_REFERENCE")
+        )
         if not reference:
             return None
         from .errors import HeldConversationError
@@ -207,7 +219,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--delay", default="0")
     parser.add_argument("--label", default=os.environ.get("HIVE_IDE_SESSION") or "")
-    parser.add_argument("--reference", default="")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     command = list(args.command)
@@ -229,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         gate.wait(args.delay)
-        held = held_conversation_reason(args.reference)
+        held = held_conversation_reason()
         if held:
             # Starting the driver now would duplicate it on a conversation
             # something else took during the wait. The pane carries the reason,

@@ -428,15 +428,13 @@ def test_a_holder_appearing_during_the_wait_stops_the_launch(monkeypatch):
     )
     execs = []
     monkeypatch.setattr(os, "execvp", lambda f, a: execs.append((f, a)))
-    assert gate_main(
-        ["--delay=4", "--reference=x", "--", "claude", "--resume", "x"]
-    ) == 1
+    assert gate_main(["--delay=4", "--", "claude", "--resume", "x"]) == 1
     assert execs and execs[0][0] == "sh", "the driver was started on a held conversation"
     assert "claude" not in " ".join(execs[0][1])
-    # The conversation the FROZEN command goes to, carried in from the frame that
-    # built it. Re-deriving it here would ask about a record that may have moved
-    # on during the wait, while the command about to be exec'ed has not.
-    assert asked == ["x"]
+    # Asked with no argument: the reference comes from the pane environment the
+    # frame set, so a gate from an older package ignores it instead of exiting 2
+    # on an argument it has never seen.
+    assert asked == [None]
 
 
 def test_an_unheld_conversation_launches_as_normal(monkeypatch):
@@ -457,6 +455,18 @@ def test_the_ownership_recheck_fails_open(monkeypatch, tmp_path):
     monkeypatch.delenv("HIVE_IDE_WORKSPACE_KEY", raising=False)
     monkeypatch.delenv("HIVE_IDE_SESSION_ID", raising=False)
     assert launch_gate.held_conversation_reason("some-reference") is None
+
+
+def test_the_frozen_commands_destination_comes_from_the_pane_environment(monkeypatch):
+    """Set by the frame that built the command, and read here rather than
+    re-derived from a record the session may have moved on from."""
+    monkeypatch.setenv("HIVE_IDE_LAUNCH_REFERENCE", "x")
+    monkeypatch.delenv("HIVE_IDE_STATE_HOME", raising=False)
+    # Fails open on everything else, but it DID read the reference: without one
+    # it returns before touching the environment at all.
+    assert launch_gate.held_conversation_reason() is None
+    monkeypatch.delenv("HIVE_IDE_LAUNCH_REFERENCE")
+    assert launch_gate.held_conversation_reason() is None
 
 
 def test_a_queued_launch_that_joins_no_conversation_is_never_rechecked():
