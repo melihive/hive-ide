@@ -595,15 +595,18 @@ def test_the_guard_does_not_adopt_a_survivor_the_driver_cannot_resume(
     )
 
 
-def test_the_direct_chat_path_does_not_replay_a_delivered_prompt(
+def test_the_direct_chat_path_delivers_no_one_shot_input(
     store, monkeypatch, claude_store
 ):
-    """It launches `agent_launch_argv`, so the one-shot prompt rides on it.
+    """It runs in the FOREGROUND for as long as the agent lives.
 
-    The path cleared only sleep and the recorded open error, so the handoff stayed
-    on the record and the next `chat` delivered the same prompt again. The window
-    build has always consumed it; this path now does the same, for the same reason
-    and with the same rule — only a command that carried it.
+    A prompt cleared only when that exits is delivered twice by two overlapping
+    `chat` calls — both build their argv while the record still holds it. So this
+    path carries none: the input is taken off the record before the command is
+    built and stays pending in the store for the window build, which is where a
+    one-shot input is delivered and spent. That is also what this path did before
+    the selection was threaded through it, and restoring a prompt to it is a
+    feature, not a fix.
     """
     _transcript(claude_store, REF)
     record = _session(store, "A", bundled_drivers()["claude"], REF)
@@ -626,8 +629,34 @@ def test_the_direct_chat_path_does_not_replay_a_delivered_prompt(
     frame.current_chat(store.read("sessions", record["id"]))
 
     assert len(launched) == 2, launched
-    assert "pick up the plan" in launched[0]
-    assert "pick up the plan" not in launched[1], "delivered once, not every chat"
+    assert not any("pick up the plan" in call for call in launched)
+    after = store.read("sessions", record["id"]) or {}
+    assert after.get("handoff"), "it is still owed, not thrown away"
+
+
+def test_a_launch_consumes_the_input_that_rode_and_not_the_other(
+    store, monkeypatch, claude_store
+):
+    """A session can hold both a `create --prompt` and a handoff prompt.
+
+    Exactly one rides — the handoff's — and clearing both discarded a prompt the
+    driver never saw, with nothing left to deliver it later.
+    """
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    record["handoff"] = {"target_driver_prompt": "from the handoff"}
+    record["launch_prompt"] = "from create --prompt"
+    store.write("sessions", record["id"], record)
+    frame = _frame(store, monkeypatch)
+
+    assert Frame._delivered_inputs(record) == ("handoff",)
+    assert "from the handoff" in " ".join(Frame.agent_launch_argv(record))
+    assert "from create --prompt" not in " ".join(Frame.agent_launch_argv(record))
+
+    frame._clear_consumed_handoff(record)
+
+    after = store.read("sessions", record["id"]) or {}
+    assert "handoff" not in after
+    assert after.get("launch_prompt") == "from create --prompt", "still owed"
 
 
 def test_a_record_saved_before_a_launch_flag_existed_still_resumes(
@@ -749,7 +778,12 @@ def test_the_build_hands_the_queued_launch_its_own_destination(
     frame._finish_build(record, "@7", str(store.workspace_key), launch_delay=4.0)
     attaching = [c for c in calls if any("launch_gate" in str(part) for part in c)]
     assert attaching, "the attach was not queued behind the gate"
-    assert "HIVE_IDE_LAUNCH_REFERENCE" not in " ".join(attaching[0])
+    joined = " ".join(attaching[0])
+    # Set, and EMPTY: a frame that speaks this protocol always answers, so the
+    # gate can tell a considered "nothing to check" from an older frame that
+    # carried no answer and must fall back to the record.
+    assert "HIVE_IDE_LAUNCH_REFERENCE=" in joined
+    assert f"HIVE_IDE_LAUNCH_REFERENCE={REF}" not in joined
 
 
 def test_consuming_a_prompt_never_writes_back_a_session_that_is_gone(
@@ -875,16 +909,19 @@ def test_the_respawn_path_keeps_a_handoff_an_attach_could_not_deliver(
     assert not (store.read("sessions", record["id"]) or {}).get("handoff")
 
 
-def test_the_gate_refuses_from_the_destination_in_its_environment(
+def test_the_gate_asks_about_the_frozen_command_not_the_current_record(
     store, monkeypatch, claude_store
 ):
     """The whole round trip, in the shape the gate really runs in.
 
-    The gate is a separate process with no record in hand, so the frame puts the
-    frozen command's destination in the pane environment and the gate reads it
-    there. An earlier version of this test asserted the refusal was None with the
-    store environment removed — which is None whether the environment is read or
-    not, so it observed nothing and a mutant that stopped reading it survived.
+    The gate is a separate process with no record in hand. Two earlier versions
+    of this test observed nothing: one asserted None with the store environment
+    removed, which is None whether the environment is read or not; the other gave
+    the environment and the record the SAME reference and returned a holder for
+    anything, so an implementation that merely checked the variable EXISTED and
+    then read the record still passed. Here the record has moved on — which is
+    the whole point of freezing the destination — and only the frozen one is
+    held.
     """
     from hive_ide import launch_gate
 
@@ -892,8 +929,108 @@ def test_the_gate_refuses_from_the_destination_in_its_environment(
     monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
     monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", str(store.workspace_key))
     monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
-    monkeypatch.setenv("HIVE_IDE_LAUNCH_REFERENCE", REF)
     monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    # The session moved to OTHER while the command for REF waited.
+    moved = store.read("sessions", record["id"])
+    moved["driver"] = bundled_drivers()["claude"].resolve(
+        name="A", working_dir=str(store.workspace_key), conversation_reference=OTHER
+    )
+    store.write("sessions", record["id"], moved)
+    monkeypatch.setattr(
+        ConversationHolders, "holders",
+        classmethod(
+            lambda cls, ref, **kw: [
+                {"pid": 9191, "ppid": 1, "command": f"claude --resume {ref}",
+                 "orphaned": True, "background": False}
+            ]
+            if ref == REF      # only the FROZEN conversation is held
+            else []
+        ),
+    )
+
+    monkeypatch.setenv("HIVE_IDE_LAUNCH_REFERENCE", REF)
+    reason = launch_gate.held_conversation_reason()
+    assert reason and "9191" in reason, reason
+
+    # EMPTY: this frame considered the question and there is none to ask, even
+    # though the record names a conversation.
+    monkeypatch.setenv("HIVE_IDE_LAUNCH_REFERENCE", "")
+    assert launch_gate.held_conversation_reason() is None
+
+    # ABSENT: an older frame built this command and carried no answer, so the
+    # record is asked exactly as that frame's own gate asked it — which here
+    # names OTHER, and nothing holds OTHER.
+    monkeypatch.delenv("HIVE_IDE_LAUNCH_REFERENCE")
+    assert launch_gate.held_conversation_reason() is None
+
+    # ...and the same absent case DOES refuse when the record's own conversation
+    # is the held one, which is the guard the mixed pairing would otherwise lose.
+    back = store.read("sessions", record["id"])
+    back["driver"] = bundled_drivers()["claude"].resolve(
+        name="A", working_dir=str(store.workspace_key), conversation_reference=REF
+    )
+    store.write("sessions", record["id"], back)
+    legacy = launch_gate.held_conversation_reason()
+    assert legacy and "9191" in legacy, legacy
+
+
+def test_a_command_that_forks_is_not_the_conversation_it_names(store, monkeypatch):
+    """`--fork-session` starts a NEW conversation from the one it resumes.
+
+    The id beside it is the SOURCE, so a command carrying it lands somewhere the
+    record cannot name — and `wake` promised delivery into the source while the
+    prompt went to the fork. The option list is the one the holder path already
+    keeps for this exact reason, and like there it can only ever refuse.
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude",
+        {
+            "command": ["claude"],
+            "resume_argv": ["claude", "--fork-session", "--resume"],
+            "resume_strategy": "conversation_id",
+            "capabilities": ["launch", "resume"],
+        },
+    )
+    record = _session(store, "A", registry.get("claude"), REF)
+    frame = _frame(store, monkeypatch, registry)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    assert REF in " ".join(record["driver"]["launch_argv"]), "the id IS in the argv"
+
+    target = frame.select_launch(record)
+    assert (target.kind, target.reference) == (LAUNCH_UNKNOWN, None)
+    assert target.carried == REF, "a guard still asks about what it carries"
+
+    with pytest.raises(Exception) as refusal:
+        frame.prepare_agent_launch(record, expect_reference=REF)
+    assert "did not generate" in str(refusal.value) or "new conversation" in str(
+        refusal.value
+    )
+
+
+def test_a_configured_continuation_still_guards_the_conversation_it_may_rejoin(
+    store, monkeypatch, claude_store
+):
+    """`claude --continue` names no id and rejoins the latest conversation.
+
+    With the record naming X and a `claude --resume X` process alive, reading the
+    command as fresh dropped the guard for a launch that can genuinely collide —
+    main asked about that reference. It carries no destination, so it cannot be
+    promised; it carries a possible one, so it is still asked about.
+    """
+    _transcript(claude_store, REF)
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "claude", {"command": ["claude", "--continue"], "capabilities": ["launch"]}
+    )
+    record = _session(store, "A", registry.get("claude"), REF)
+    frame = _frame(store, monkeypatch, registry)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    assert REF not in " ".join(record["driver"]["launch_argv"]), "and names no id"
+
+    target = frame.select_launch(record)
+    assert (target.kind, target.carried) == (LAUNCH_UNKNOWN, REF)
+
     monkeypatch.setattr(
         ConversationHolders, "holders",
         classmethod(
@@ -903,12 +1040,5 @@ def test_the_gate_refuses_from_the_destination_in_its_environment(
             ]
         ),
     )
-
-    reason = launch_gate.held_conversation_reason()
-    assert reason and "9191" in reason, reason
-
-    # And with no destination in the environment there is no question to ask: the
-    # record is NOT consulted instead, because by now it may name a conversation
-    # this frozen command does not.
-    monkeypatch.delenv("HIVE_IDE_LAUNCH_REFERENCE")
-    assert launch_gate.held_conversation_reason() is None
+    with pytest.raises(HeldConversationError):
+        frame.prepare_agent_launch(record)

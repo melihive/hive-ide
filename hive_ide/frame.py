@@ -1285,13 +1285,13 @@ class Frame:
             "-e",
             f"HIVE_IDE_SOURCE={source.get('kind') or 'stable'}",
         ]
-        if gate_reference:
+        if gate_reference is not None:
             # The conversation the FROZEN command goes to, for the holder
             # re-check the launch gate makes at the end of its wait. Asking the
             # record there asks about a session that may have moved on during
-            # the wait, while the command about to be `exec`ed has not. An older
-            # gate ignores this; a newer gate under an older frame sees nothing
-            # and checks nothing, which is the direction that fails open.
+            # the wait, while the command about to be `exec`ed has not. Set even
+            # when EMPTY, so the gate can tell a considered "nothing to check"
+            # from an older frame that carried no answer at all.
             env.extend(["-e", f"HIVE_IDE_LAUNCH_REFERENCE={gate_reference}"])
         hive = (record.get("host") or {}).get("hive") or {}
         repo = hive.get("repo")
@@ -2245,6 +2245,14 @@ class Frame:
         # second driver on a conversation another process holds, which is the
         # fault the guard exists for — and a driverless pane is exactly where a
         # user is told to run `chat`.
+        # No one-shot input rides on THIS path, and it is taken out of the record
+        # before the command is built rather than cleared after. Two overlapping
+        # `chat` calls both run in the foreground for as long as the agent lives,
+        # so a prompt cleared only on exit is delivered twice — and this launch
+        # is not the one that claims it. They stay pending in the store for the
+        # window build, which is where a one-shot input is delivered and spent.
+        for key in ("handoff", "launch_prompt"):
+            record.pop(key, None)
         selected = self.prepare_agent_launch(record)
         # `prepare_agent_launch` reconciles the record: a conversation confirmed
         # gone is dropped, which rewrites `driver` and its argv. `argv` was read
@@ -2284,14 +2292,6 @@ class Frame:
             raise HiveIdeError(f"The agent exited with status {result.returncode}.")
         self.clear_sleep(record)
         self._clear_open_error(record)
-        if selected.carries_a_prompt():
-            # The command that just ran CARRIED the one-shot prompt — this path
-            # launches `agent_launch_argv`, prompt included — so the prompt is
-            # spent. Leaving it on the record replayed it on the next `chat`,
-            # which is the same double delivery the window build clears for.
-            # The fresh-conversation retry above deliberately does not: its
-            # command is a bare `claude`, which carried nothing.
-            self._clear_consumed_handoff(record)
         return {
             "session_id": record["id"],
             "driver": driver.get("id"),
@@ -2411,11 +2411,32 @@ class Frame:
             stored
             if kind != LAUNCH_RESUME
             and stored
-            and any(stored in str(part) for part in driver.get("launch_argv") or [])
+            and (
+                any(stored in str(part) for part in driver.get("launch_argv") or [])
+                # `claude --continue` names no id and may still rejoin the
+                # conversation the record holds — on main the guards asked about
+                # that reference, and reading the command as fresh dropped the
+                # protection for a launch that can genuinely collide.
+                or self._selects_for_itself(driver.get("launch_argv"))
+            )
             else None
         )
         return LaunchTarget(
             kind, driver_id, destination, carried, tuple(self.agent_launch_argv(record))
+        )
+
+    @staticmethod
+    def _selects_for_itself(argv: Any) -> bool:
+        """Does this command choose a conversation on its own terms?
+
+        Then no id in it is a destination. The option list is
+        `ConversationHolders.OVERRIDING_SELECTION_OPTIONS`, shared with the
+        holder path so there is one place this driver-CLI knowledge lives — and,
+        as there, it can only ever REFUSE an answer, never authorize one.
+        """
+        return any(
+            str(part) in ConversationHolders.OVERRIDING_SELECTION_OPTIONS
+            for part in (argv or [])
         )
 
     def _stored_destination(
@@ -2457,6 +2478,18 @@ class Frame:
 
         stored = comparable(driver.get("launch_argv"))
         if stored == comparable(ours.get("launch_argv")):
+            if self._selects_for_itself(ours.get("launch_argv")):
+                # The command carries an option that names a conversation BY
+                # ITSELF — `--continue`, `-c`, `--last`, `--fork-session` — so
+                # whatever id sits beside it is a prompt, a source or nothing,
+                # and the conversation it lands on is not the one the record
+                # names. The bundled drivers generate none of these, but
+                # `resume_argv` and `command` are configuration: `["claude",
+                # "--fork-session", "--resume"]` renders a command that resumes
+                # the SOURCE of a fork, and `wake` promised delivery into it.
+                # The same list already refuses on the holder path, which is
+                # where this knowledge lives; it can only ever refuse.
+                return (LAUNCH_UNKNOWN, None)
             return rendered_destination(ours)
         # No branch of ours rendered this command. There is no third case to
         # handle: every writer renders with the reference the record holds, so a
@@ -3046,12 +3079,36 @@ class Frame:
             "sent": "/rename",
         }
 
+    @classmethod
+    def _delivered_inputs(cls, record: dict[str, Any]) -> tuple[str, ...]:
+        """Which one-shot inputs a launch of this record actually carries.
+
+        `_agent_command` renders the handoff BLOCK for any handoff, and
+        `_argv_with_handoff_prompt` appends exactly ONE prompt: the handoff's if
+        it has one, else the session's `create --prompt`. So a session holding
+        both delivers the handoff's and still owes the other — and clearing both
+        threw away a prompt the driver never saw. A driver that takes no prompt
+        at all carries only the block.
+        """
+        driver_id = (record.get("driver") or {}).get("id")
+        handoff = record.get("handoff")
+        keys = ["handoff"] if isinstance(handoff, dict) and handoff else []
+        if driver_id not in cls.PROMPT_DRIVERS:
+            return tuple(keys)
+        rode = handoff.get("target_driver_prompt") if isinstance(handoff, dict) else None
+        if isinstance(rode, str) and rode.strip():
+            return tuple(keys)
+        prompt = record.get("launch_prompt")
+        if prompt and not cls.launch_prompt_problem(prompt, driver_id):
+            keys.append("launch_prompt")
+        return tuple(keys)
+
     def _clear_consumed_handoff(self, record: dict[str, Any]) -> None:
-        """Drop the launch inputs a driver launch just delivered: the handoff and
-        the session's one-shot launch prompt, so a later relaunch never repeats it."""
+        """Drop the launch inputs a driver launch just delivered, so a later
+        relaunch never repeats one — and only those it delivered."""
         delivered = {
             key: record[key]
-            for key in ("handoff", "launch_prompt")
+            for key in self._delivered_inputs(record)
             if key in record
         }
         if not delivered:
@@ -3360,14 +3417,18 @@ class Frame:
             agent_command = self._sleeping_agent_command()
         else:
             agent_command = self._agent_command(record, selected)
-        # Only a launch that will still be waiting needs the gate's re-check, and
-        # only one that is not an ATTACH: an attach joins the background host on
-        # purpose, so the host is not a collision for it.
-        gate_reference = (
-            selected.collides_with()
-            if selected is not None and selected.kind != LAUNCH_ATTACH
-            else None
-        )
+        # What the launch gate will be asked, when there IS a gate. An EMPTY
+        # value is not the same as none at all: a frame that speaks this protocol
+        # always sets the variable, so a newer gate can tell "this frame
+        # considered the question and there is none" from "an older frame said
+        # nothing", where it must fall back to the record as that frame's own
+        # gate did. An attach is asked nothing — it joins its host on purpose.
+        if selected is None or launch_delay <= 0:
+            gate_reference = None
+        elif selected.kind == LAUNCH_ATTACH:
+            gate_reference = ""
+        else:
+            gate_reference = selected.collides_with() or ""
         for role, command in (
             ("agent", agent_command),
             ("plan", self._plan_command(record)),

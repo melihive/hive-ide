@@ -163,8 +163,14 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
     and the gate can be different versions: a session pinned to an older package
     source runs an older gate, whose parser would exit 2 on an argument it has
     never seen — after the shell has already `exec`ed it, so the pane would close
-    with no agent. An unknown environment variable is ignored instead, and a
-    newer gate under an older frame finds nothing and checks nothing.
+    with no agent. An unknown environment variable is ignored instead.
+
+    The variable being ABSENT and being EMPTY mean different things, which is why
+    a frame that speaks this protocol always sets it: absent means an older frame
+    built the command and said nothing, so the record is asked exactly as that
+    frame's own gate would have asked it — dropping the check there would lose a
+    guard for the mixed pairing. Empty means this frame considered the question
+    and there is none: a fresh launch, or an attach joining its host on purpose.
 
     Fails OPEN in every direction except a definite refusal. No environment, no
     record, an unreadable process table or any error at all means launch: a
@@ -172,22 +178,30 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
     an agent for no reason.
     """
     try:
-        reference = (
+        from .agents import AgentResumeState
+        from .errors import HeldConversationError
+        from .frame import LAUNCH_RESUME, Frame, LaunchTarget
+        from .store import StateStore
+
+        declared = (
             reference
             if reference is not None
             else os.environ.get("HIVE_IDE_LAUNCH_REFERENCE")
         )
-        if not reference:
-            return None
-        from .errors import HeldConversationError
-        from .frame import LAUNCH_RESUME, Frame, LaunchTarget
-        from .store import StateStore
+        if declared == "":
+            return None     # asked and answered: this launch joins nothing
 
         store = StateStore(
             os.environ["HIVE_IDE_STATE_HOME"], os.environ["HIVE_IDE_WORKSPACE_KEY"]
         )
         record = store.find_session(os.environ["HIVE_IDE_SESSION_ID"])
         if record is None:
+            return None
+        if declared is None:
+            # An older frame: no destination was carried, so ask the record the
+            # way that frame's own gate did.
+            declared = AgentResumeState.reference_from_driver(record.get("driver") or {})
+        if not declared:
             return None
         frame = Frame(store, socket=os.environ.get("HIVE_IDE_TMUX_SOCKET") or "")
         try:
@@ -197,7 +211,7 @@ def held_conversation_reason(reference: str | None = None) -> str | None:
                 LaunchTarget(
                     LAUNCH_RESUME,
                     (record.get("driver") or {}).get("id"),
-                    reference,
+                    declared,
                     None,
                     (),
                 ),
