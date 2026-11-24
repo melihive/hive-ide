@@ -324,6 +324,10 @@ def test_bare_agy_is_fresh_and_a_continuation_is_unknown(store, monkeypatch):
     `agy` with nothing to resume starts a new conversation and is known to; only
     `agy -c` is unknowable, because it joins whatever that workspace considers
     current. Marking the whole driver unknown loses the first half.
+
+    The bundled continuation is caught twice over — `-c` is also in the
+    self-selecting option list — so the strategy rule that covers a CONFIGURED
+    workspace continuation is pinned by the test below, not by this one.
     """
     frame = _frame(store, monkeypatch)
     antigravity = bundled_drivers()["antigravity"]
@@ -1042,3 +1046,30 @@ def test_a_configured_continuation_still_guards_the_conversation_it_may_rejoin(
     )
     with pytest.raises(HeldConversationError):
         frame.prepare_agent_launch(record)
+
+
+def test_a_configured_workspace_continuation_names_no_conversation(store, monkeypatch):
+    """A driver can continue a workspace under a flag of its own.
+
+    The bundled `agy -c` is caught by the self-selecting option list as well, so
+    only a configured continuation reaches the strategy rule — and without this
+    the rule could be removed with every other test still green (found by a
+    surviving mutant, not by reading).
+    """
+    registry = DriverRegistry()
+    registry.add_declarative(
+        "antigravity",
+        {
+            "command": ["agy"],
+            "resume_argv": ["agy", "--pick-up-where-i-left-off"],
+            "resume_strategy": "workspace_continue",
+            "capabilities": ["launch", "resume"],
+        },
+    )
+    record = _session(store, "A", registry.get("antigravity"), REF)
+    frame = _frame(store, monkeypatch, registry)
+    argv = " ".join(record["driver"]["launch_argv"])
+    assert "--pick-up" in argv and REF not in argv, "the premise"
+
+    target = frame.select_launch(record)
+    assert (target.kind, target.reference) == (LAUNCH_UNKNOWN, None)
