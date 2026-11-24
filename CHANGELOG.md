@@ -4,6 +4,103 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+A session's conversation is now something it RECORDED, not something inferred
+from the command it was last launched with — and a launch's destination is
+decided by the driver that would run it. Both were read off a stored argv
+before, and both are breaking: a session that moved conversations and left a
+stale `--resume` behind no longer owns the conversation it left, and a launch
+that cannot be shown to reach a conversation no longer speaks for one.
+
+### Changed
+
+- **A conversation claim is MADE, never inferred.** `agents.resume_ids[<driver>]`
+  is the conversation a session is on, written at exactly two moments —
+  creation or adoption, and the conversion of a pre-claim record — and nowhere
+  else. Constructing the state object no longer acquires one. An ABSENT `agents`
+  block is a record from before per-driver references, whose launch is its only
+  claim; an EMPTY one is a session that had a claim and released it, and
+  releasing is not an invitation to re-infer. A session that released a
+  conversation is reported as being on nothing, not on its argv.
+- **A launch's destination is selected once, by the driver.** The command's
+  conversation comes from the resume strategy the driver declares, with the
+  rendered argv only corroborating it — never from searching the argv for an id,
+  which both over- and under-reported: a session NAMED after a conversation put
+  the id in a command that could not resume it, while `agy -c` joins a
+  conversation its argv never names. That one selection is then carried into
+  validation, both collision guards, the command tmux is given, the cleanup
+  afterwards and the launch gate's deferred re-check, so validation and
+  execution can no longer disagree about the same instant.
+- **A command whose destination cannot be established promises nothing.** A
+  configured wrapper, a command carrying `--continue`, `-c`, `--last` or
+  `--fork-session`, and a driver that declares id-resume while rendering no id
+  are all UNKNOWN: no `wake` delivery, no history adoption. They are still
+  GUARDED — a command that carries a conversation id, or that selects one on its
+  own terms, is asked about by the collision guards exactly as before.
+- **`chat` attaches to a backgrounded conversation instead of resuming it.** The
+  direct path assembled its own command, so it could validate an attach and then
+  run a resume: a second driver on a live conversation, which is the blank pane
+  the holder guard exists to prevent.
+- **A launch carrying a one-shot prompt refuses when its conversation is live in
+  the background**, instead of resuming into it. An attach carries no argv, so it
+  cannot deliver a prompt; the prompt stays unspent for the next real launch
+  rather than being spent on a second driver. The foreground `chat` delivers no
+  one-shot prompt at all — two overlapping calls would each carry it.
+- **Only a launch this package itself defines may be re-rendered or vouched
+  for.** A configured wrapper keeps its own executable and flags, and its
+  conversations read UNKNOWN rather than being probed through this package's
+  environment — a probe that would have reported a wrapper's LIVE conversations
+  gone and deleted their references.
+- The tmux window title is `<workspace> <host>`, without `IDE`.
+
+### Fixed
+
+- A conversation with 69 MB of history was one repair away from being replaced
+  by a bare `claude --name`, because a reference the driver could not prove was
+  treated as a reference that was gone. Unprovable and absent are now different
+  answers, and the unprovable one declines to act.
+- A session could be refused its own conversation by ownership it no longer
+  held, and a stale argv was protected by ownership it could no longer win.
+- Repair now releases a conversation stranded in a retired frame — found on a
+  fleet machine where a pre-2.0 tmux server had held a session's driver for 31
+  days, so every `chat` hit the holder guard and every repair rebuilt a frame
+  whose agent could not start. It stops a process only when provably
+  unreachable, verified by identity through a pidfd immediately before the
+  signal, and never a backgrounded session.
+- `ps` truncated argv to `$COLUMNS` inside a tmux pane, which made the launch
+  holder guard fail OPEN — the direction that lets a second driver start.
+- Holder detection: an npm install runs an interpreter with the entrypoint as
+  its first argument; a fork holds its own conversation, not the one it forked
+  from; `--continue`, `-c`, `--last` and `--fork-session` name no conversation,
+  so an id beside one of them is a prompt or a source; and a boolean flag before
+  the session must not promote the prompt to a conversation.
+- A malformed `resume` block (`"resume": "bad"`) raised out of every launch path,
+  past the per-session handler that keeps one unreadable record from stopping a
+  whole frame from opening.
+- A Codex record saved before `--no-daemon` existed was read as a command this
+  installation did not generate, which refused `wake` on every legacy session.
+- A pending handoff and launch prompt could be erased without either reaching a
+  driver, and a handoff could be delivered twice. Each launch now consumes only
+  the input it actually carried, and never writes back a record that has been
+  archived in the meantime.
+- A screen too small for both the footer and the selection now spends its key
+  hints on the selected row.
+
+### Known limits
+
+- A **configured** driver can describe a destination its command does not
+  reach: a `resume_argv` with a conversation id baked in, Claude's
+  `--fork-session` or Codex's `fork`, where the id names the conversation forked
+  FROM. Such a command is classified UNKNOWN wherever the option is recognised,
+  and is guarded conservatively either way — but a `wake` through a configured
+  driver that forks can still report the conversation it was asked for. The
+  bundled `claude`, `codex`, `antigravity` and `term` drivers are unaffected.
+- `-c` is `--continue` to Claude and `--config` to Codex. It is read as a
+  conversation selector for every driver, so a configured Codex command using
+  `-c` for configuration is treated as unknowable rather than as the explicit
+  resume it is. Refusing is the safe direction; the cost is a configured driver
+  that loses `wake` and history adoption.
+
+
 ## [2.0.2] - 2026-11-17
 
 ### Removed
