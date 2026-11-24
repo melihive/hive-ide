@@ -873,3 +873,42 @@ def test_the_respawn_path_keeps_a_handoff_an_attach_could_not_deliver(
     )
     assert frame.respawn_agent(store.read("sessions", record["id"]), "%2") is True
     assert not (store.read("sessions", record["id"]) or {}).get("handoff")
+
+
+def test_the_gate_refuses_from_the_destination_in_its_environment(
+    store, monkeypatch, claude_store
+):
+    """The whole round trip, in the shape the gate really runs in.
+
+    The gate is a separate process with no record in hand, so the frame puts the
+    frozen command's destination in the pane environment and the gate reads it
+    there. An earlier version of this test asserted the refusal was None with the
+    store environment removed — which is None whether the environment is read or
+    not, so it observed nothing and a mutant that stopped reading it survived.
+    """
+    from hive_ide import launch_gate
+
+    record = _session(store, "A", bundled_drivers()["claude"], REF)
+    monkeypatch.setenv("HIVE_IDE_STATE_HOME", str(store.home))
+    monkeypatch.setenv("HIVE_IDE_WORKSPACE_KEY", str(store.workspace_key))
+    monkeypatch.setenv("HIVE_IDE_SESSION_ID", record["id"])
+    monkeypatch.setenv("HIVE_IDE_LAUNCH_REFERENCE", REF)
+    monkeypatch.setattr(Frame, "role_panes", lambda self, sid: {})
+    monkeypatch.setattr(
+        ConversationHolders, "holders",
+        classmethod(
+            lambda cls, ref, **kw: [
+                {"pid": 9191, "ppid": 1, "command": f"claude --resume {ref}",
+                 "orphaned": True, "background": False}
+            ]
+        ),
+    )
+
+    reason = launch_gate.held_conversation_reason()
+    assert reason and "9191" in reason, reason
+
+    # And with no destination in the environment there is no question to ask: the
+    # record is NOT consulted instead, because by now it may name a conversation
+    # this frozen command does not.
+    monkeypatch.delenv("HIVE_IDE_LAUNCH_REFERENCE")
+    assert launch_gate.held_conversation_reason() is None

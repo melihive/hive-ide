@@ -457,18 +457,6 @@ def test_the_ownership_recheck_fails_open(monkeypatch, tmp_path):
     assert launch_gate.held_conversation_reason("some-reference") is None
 
 
-def test_the_frozen_commands_destination_comes_from_the_pane_environment(monkeypatch):
-    """Set by the frame that built the command, and read here rather than
-    re-derived from a record the session may have moved on from."""
-    monkeypatch.setenv("HIVE_IDE_LAUNCH_REFERENCE", "x")
-    monkeypatch.delenv("HIVE_IDE_STATE_HOME", raising=False)
-    # Fails open on everything else, but it DID read the reference: without one
-    # it returns before touching the environment at all.
-    assert launch_gate.held_conversation_reason() is None
-    monkeypatch.delenv("HIVE_IDE_LAUNCH_REFERENCE")
-    assert launch_gate.held_conversation_reason() is None
-
-
 def test_a_queued_launch_that_joins_no_conversation_is_never_rechecked():
     """No reference means no question: a command that joins no conversation
     cannot put a second driver on one, and the record is not asked instead —
