@@ -15,8 +15,12 @@ These tests pin the two halves of the fix and the semantics that make it safe:
 * **A miss is not an observation.** Nothing is drawn rather than falling through to
   a session record's `worktree_ahead`, which would paint `shipped` over a checkout
   that has since gained unmerged work.
-* **Inside the reuse age the observation is drawn as it stands**, `shipped`
+* **Inside the draw age the observation is drawn as it stands**, `shipped`
   included — the user's decision, against a blinking empty column.
+* **The draw age is not the refresh cadence.** They were 5 s and 3 s, which left
+  2 s of slack; a live frame reached 4.26 s of it and one busy moment blanked a
+  healthy column for three frames. How stale a drawn icon may be (60 s) is now a
+  separate number from how often one is re-probed (3 s).
 """
 from __future__ import annotations
 
@@ -115,7 +119,7 @@ class TestAMissIsNotAnObservation:
         assert CheckoutProvider().value(state_home, session) is None
 
     def test_an_expired_observation_is_a_miss_and_not_reused(self, state_home, workspace):
-        _observe(state_home, workspace, workspace, "live", age=CheckoutCache.MAX_REUSE_SECONDS + 1)
+        _observe(state_home, workspace, workspace, "live", age=CheckoutCache.MAX_DRAW_SECONDS + 1)
         session = _session(workspace, workspace, worktree_ahead=False)
         assert CheckoutProvider().value(state_home, session) is None
 
@@ -559,8 +563,8 @@ class TestTheSecondReviewRound:
             state_home, workspace, probe=lambda _d: GitCheckoutStatus("shipped")
         )
         refresher.note_directories([workspace])
-        assert refresher.run_once()                 # due BEFORE the 5 s cutoff
-        assert CheckoutRefresher.REFRESH_AFTER_SECONDS < CheckoutCache.MAX_REUSE_SECONDS
+        assert refresher.run_once()                 # due LONG before the cutoff
+        assert CheckoutRefresher.REFRESH_AFTER_SECONDS < CheckoutCache.MAX_DRAW_SECONDS
         observed = CheckoutCache.fresh(
             CheckoutCache.read(state_home, workspace), workspace
         )
@@ -772,3 +776,112 @@ class TestTheThirdReviewRound:
         published = refresher.run_once(now=future)
         assert len(probed) == 1
         assert published[CheckoutCache.key(workspace)].at == future
+
+
+class TestTheDrawHorizonIsNotTheRefreshCadence:
+    """The fourth round, and the only one a real frame could have found.
+
+    Ten live switches on the landed code drew no blank column at all, but the
+    cache's oldest entry reached 4.26 s against a 5 s cutoff -- 0.74 s of slack --
+    and one switch taken while the machine was busy pushed a healthy checkout past
+    it and blanked the column for three frames. Nothing was wrong with the logic:
+    one constant was answering two questions at once.
+    """
+
+    def test_an_observation_the_refresher_is_merely_late_to_renew_is_still_drawn(
+        self, state_home, workspace
+    ):
+        """The user's decision, made concrete: late is not unknown.
+
+        Fails against the old single constant, where 5 s was both the re-probe age
+        and the draw cutoff -- which is the whole point of separating them.
+        """
+        late = CheckoutRefresher.REFRESH_AFTER_SECONDS * 3
+        assert late > 5.0, "the old cutoff has to be inside this age for it to bite"
+        _observe(state_home, workspace, workspace, "shipped", age=late)
+        session = _session(workspace, workspace)
+        assert CheckoutProvider().value(state_home, session) == "shipped"
+
+    def test_an_observation_past_the_draw_horizon_is_still_a_miss(
+        self, state_home, workspace
+    ):
+        """Widened, not removed. A genuine unknown still empties the slot."""
+        _observe(
+            state_home,
+            workspace,
+            workspace,
+            "shipped",
+            age=CheckoutCache.MAX_DRAW_SECONDS + 1,
+        )
+        session = _session(workspace, workspace, worktree_ahead=False)
+        assert CheckoutProvider().value(state_home, session) is None
+
+    def test_several_missed_passes_running_cannot_empty_the_column(self):
+        """The margin stated as an invariant rather than left to two literals.
+
+        A loaded machine misses passes; the column may not go blank because of it.
+        Anyone retuning either number has to keep the horizon an order of magnitude
+        above the cadence or this fails.
+        """
+        assert (
+            CheckoutCache.MAX_DRAW_SECONDS
+            >= CheckoutRefresher.REFRESH_AFTER_SECONDS * 10
+        )
+
+    def test_the_refresher_still_renews_on_its_own_cadence_not_the_horizon(
+        self, state_home, workspace
+    ):
+        """The other half: widening the horizon must not slow the probing down.
+
+        An entry just past the cadence is due even though it is nowhere near the
+        draw horizon -- otherwise a stale icon would stay stale for a minute.
+        """
+        _observe(
+            state_home,
+            workspace,
+            workspace,
+            "live",
+            age=CheckoutRefresher.REFRESH_AFTER_SECONDS + 0.5,
+        )
+        probed: list[Path] = []
+
+        def probe(directory):
+            probed.append(Path(directory))
+            return GitCheckoutStatus("shipped")
+
+        refresher = CheckoutRefresher(state_home, workspace, probe=probe)
+        refresher.note_directories([workspace])
+        assert refresher.run_once()
+        assert probed == [Path(workspace)]
+        observed = CheckoutCache.fresh(
+            CheckoutCache.read(state_home, workspace), workspace
+        )
+        assert observed is not None and observed.state == "shipped"
+
+
+class TestTheFourthReviewRound:
+    """Codex on the horizon change. Two findings, both taken."""
+
+    def test_the_horizon_is_sixty_seconds_and_not_merely_more_than_five(self):
+        """A test that derives its input from the constant it guards observes
+        nothing about that constant's VALUE -- it would pass just as happily at
+        600 s. Pinned on an injected clock, either side of the boundary.
+        """
+        observations = {
+            CheckoutCache.key("/w"): CheckoutObservation(state="shipped", at=1_000.0)
+        }
+        drawn = CheckoutCache.fresh(observations, "/w", now=1_060.0)
+        assert drawn is not None and drawn.state == "shipped"
+        assert CheckoutCache.fresh(observations, "/w", now=1_060.01) is None
+
+    def test_the_provider_still_publishes_a_reuse_window_through_the_registry(self):
+        """3.0.0 exposed `cache_seconds`; deleting it raised `AttributeError` for
+        any outside reader. It is back -- and it must NOT be the draw horizon, or
+        anything memoizing on it would hide a fresh observation for a minute.
+        """
+        from hive_ide.sidebar_plugins import SidebarProviderRegistry
+
+        provider = SidebarProviderRegistry().get("checkout")
+        assert provider is not None
+        assert provider.cache_seconds == CheckoutRefresher.REFRESH_AFTER_SECONDS
+        assert provider.cache_seconds < CheckoutCache.MAX_DRAW_SECONDS

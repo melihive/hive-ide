@@ -5,6 +5,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -51,12 +52,45 @@ def test_darwin_children_are_direct_and_failed_observations_are_unknown(monkeypa
     assert Frame._child_pids(10) == []
 
 
-def test_actual_child_environment_is_not_argv():
+def test_actual_child_environment_is_not_argv(tmp_path):
+    """`_process_env` reads the real environment, not the argv that imitates it.
+
+    ONE read, taken only once the child has told us it is running. `Popen` returns
+    when the fork has happened; until the exec completes `/proc/<pid>/environ`
+    still holds the PARENT's copy, which does not carry an environment passed only
+    to the child, so a read inside that window answers about the wrong process.
+    Measured here by spawning 300 children and reading at once: the child-only key
+    was absent in 68 of 300 on an idle machine and 264 of 300 on a busy one. The
+    only thing that used to keep this test out of that window was the few
+    milliseconds its `ps` call happens to take, and a loaded machine is enough to
+    lose it -- it went red in a pre-ship verify.
+
+    Readiness is a file the child writes AFTER it is running, not a retry on
+    `_process_env` itself. Retrying that call until it answered agreeably would
+    have made the test tolerate exactly what it exists to forbid: a first read
+    that reports `HIVE_IDE_SESSION_ID=wrong` out of the child's argv would simply
+    be discarded and the next one would pass it. Production accepts the first
+    non-empty environment it gets, so the FIRST read is what has to be right.
+    """
+    ready = tmp_path / "ready"
     child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)", "HIVE_IDE_SESSION_ID=wrong"],
+        [
+            sys.executable,
+            "-c",
+            "import pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text('ready'); "
+            "time.sleep(30)",
+            str(ready),
+            "HIVE_IDE_SESSION_ID=wrong",
+        ],
         env=dict(os.environ, HIVE_IDE_SESSION_ID="fixture-owned", HIVE_IDE_TEST_VALUE="a b=c"),
     )
     try:
+        deadline = time.monotonic() + 10.0
+        while not ready.exists() and time.monotonic() < deadline:
+            assert child.poll() is None, "the child exited before it was ready"
+            time.sleep(0.01)
+        assert ready.exists(), "the child never reported itself running"
         assert child.pid in Frame._child_pids(os.getpid())
         observed = Frame._process_env(child.pid)
         assert observed["HIVE_IDE_SESSION_ID"] == "fixture-owned"

@@ -62,12 +62,26 @@ class CheckoutCache:
     #: In the NAME, so a package that does not know this shape never reads it.
     FILENAME = "checkout-cache-v1.json"
     VERSION = 1
-    #: Maximum age at which an observation may still be reused. Taken from the
+    #: Maximum age at which an observation may still be DRAWN. Taken from the
     #: observation itself and never extended on read, nor by a later batch publish
     #: that happens to rewrite the file.
-    MAX_REUSE_SECONDS = 5.0
+    #:
+    #: This is deliberately far above `CheckoutRefresher.REFRESH_AFTER_SECONDS`,
+    #: and the two numbers answer different questions: how often an observation is
+    #: re-probed, and how stale one may be and still be worth drawing. They were
+    #: one number at 3 s and 5 s, which left 2 s of nominal slack -- and a real
+    #: frame spent most of it: across ten live switches the oldest entry reached
+    #: 4.26 s, so 0.74 s remained, and a single busy moment pushed a healthy
+    #: checkout past the cutoff and blanked its column for three frames. The blank
+    #: slot belongs to a genuine unknown, not to a probe that is merely late, so a
+    #: late probe now costs a slightly stale glyph instead. Simon's call, 2026-11-25.
+    #:
+    #: Staleness is affordable here precisely because the icon is evidence of what
+    #: was observed and never a licence to skip `git status`: a worktree dirtied a
+    #: moment ago already showed `shipped` under the old cutoff too.
+    MAX_DRAW_SECONDS = 60.0
     #: A clock that jumped forward is not evidence. Anything claiming to be from
-    #: the future by more than this is dropped rather than trusted for 5 s.
+    #: the future by more than this is dropped rather than trusted at all.
     FUTURE_SKEW_SECONDS = 2.0
     #: Bound on the file. A workspace with more sessions than this keeps the newest.
     MAX_ENTRIES = 256
@@ -145,7 +159,7 @@ class CheckoutCache:
         # would otherwise make a stale `shipped` look brand new for ever.
         if age < -cls.FUTURE_SKEW_SECONDS:
             return None
-        if age > cls.MAX_REUSE_SECONDS:
+        if age > cls.MAX_DRAW_SECONDS:
             return None
         return found
 
@@ -178,7 +192,7 @@ class CheckoutCache:
         in a VISIBLE renderer, and a tmux session has exactly one current window, so
         there is at most one refresher per workspace outside the brief overlap of a
         switch. A duplicate probe there is idempotent and a lost update is re-probed
-        within `MAX_REUSE_SECONDS`, which is a smaller price than a lock file.
+        within `REFRESH_AFTER_SECONDS`, which is a smaller price than a lock file.
         """
         if not observations:
             return
@@ -274,10 +288,13 @@ class CheckoutRefresher:
     """
 
     INTERVAL_SECONDS = 1.0
-    #: Re-probe at this age, BELOW the cutoff at which a paint stops drawing the
-    #: observation. Waiting for expiry made a healthy icon blink: a pass at 4.9 s
-    #: skipped the row, a paint at 5.1 s drew nothing, and only the pass at 5.9 s
-    #: started `git`. The gap is the slack a probe has to finish in.
+    #: Re-probe at this age, FAR below `CheckoutCache.MAX_DRAW_SECONDS`, the age at
+    #: which a paint stops drawing the observation. Waiting for that cutoff made a
+    #: healthy icon blink: a pass at 4.9 s skipped the row, a paint at 5.1 s drew
+    #: nothing, and only the pass at 5.9 s started `git`. The gap between the two
+    #: numbers is the slack a probe has to finish in, and it is wide on purpose --
+    #: a loaded machine that misses several passes running keeps drawing the last
+    #: known icon rather than emptying the column.
     REFRESH_AFTER_SECONDS = 3.0
     #: Probes per pass, oldest observation first. A workspace with fifty sessions
     #: must not fork three hundred `git` processes in one burst; at this bound a
