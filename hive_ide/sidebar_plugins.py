@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from .errors import UsageError
-from .checkout_cache import CheckoutCache, CheckoutCacheReader
+from .checkout_cache import CheckoutCacheReader, CheckoutRefresher
 from .state_compat import StateIO
 from .pane_lease import LeaseStore
 from .store import StateStore
@@ -225,9 +225,19 @@ class CheckoutProvider:
         "missing": "✅",
         "unknown": "🔀",
     }
-    #: Kept as the provider's public knob, but the freshness rule now lives with
-    #: the file every paint path reads — see `checkout_cache`.
-    cache_seconds = CheckoutCache.MAX_REUSE_SECONDS
+    #: A COMPATIBILITY surface, kept because 3.0.0 exposed it: how long a caller
+    #: may reuse a value this provider returned. Nothing in the package reads it
+    #: and no other provider declares one, so it is not a protocol field -- but it
+    #: was public, and an outside reader of it is not something this package can
+    #: rule out, so it stays rather than being deleted for tidiness.
+    #:
+    #: Deliberately NOT `CheckoutCache.MAX_DRAW_SECONDS`. That is how stale a
+    #: DRAWN observation may be, not how long a value may be HELD: anything that
+    #: memoized this provider for 60 s would hide a fresh observation for a
+    #: minute, which is the per-instance staleness this phase removed. The
+    #: refresher's cadence is the honest answer -- after it, the value may have
+    #: changed.
+    cache_seconds = CheckoutRefresher.REFRESH_AFTER_SECONDS
 
     def __init__(self) -> None:
         #: A READER. This provider never probes: a paint that forks `git` costs a
@@ -272,8 +282,13 @@ class CheckoutProvider:
                 # settle on its own, and it just did — an observation from before the
                 # path returned is not evidence. The next pass re-probes it.
                 return None
-            # Inside the reuse age the observation is drawn as it stands, `shipped`
-            # included: the user chose a possibly-5s-stale icon over a blank column.
+            # Inside the draw age the observation is drawn as it stands, `shipped`
+            # included: the user chose a stale icon over a blank column, and chose
+            # again on 2026-11-25 to widen how stale it may be. The reader is a
+            # `stat` and a parse, so there is no memoization here to go stale on top
+            # of it, and `cache_seconds` above is only a compatibility surface --
+            # the per-instance window whose absence from every cross-pane paint was
+            # this phase's original bug is consulted by nothing here.
             return observed.state
 
         running_subagents = _subagent_count(

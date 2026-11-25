@@ -25,12 +25,28 @@ All notable changes to `hive-ide` will be documented in this file.
   A miss is not an observation: a row whose checkout has not been observed draws
   nothing, rather than falling back to the session record's `worktree_ahead` and
   painting `shipped` over a checkout that has since gained unmerged work. Inside
-  the reuse age the observation is drawn as it stands, `shipped` included — a
-  five-second-old icon is wrong far less often than a blinking empty column is
+  the draw age the observation is drawn as it stands, `shipped` included — a
+  stale icon is wrong far less often than a blinking empty column is
   distracting, and it is evidence of what was observed, never a licence to skip
   `git status` before acting. `missing` is derived from a `stat` instead, so a
   deleted checkout is truthful immediately and a recreated one discards a cached
   `missing` rather than waiting out the age.
+
+  **How stale a drawn icon may be is a separate number from how often one is
+  re-probed** — 60 s and 3 s. They were one number at 5 s and 3 s, which looked
+  like 2 s of slack; exercised in a live 14-window frame it was not. Across ten
+  real switches the oldest cached observation reached 4.26 s, leaving 0.74 s, and
+  a single switch taken while the machine was busy pushed a healthy checkout past
+  the cutoff and blanked its column for three frames. The blank slot is reserved
+  for a genuine unknown, not for a probe that is merely late, so a late probe now
+  costs a slightly stale glyph instead of an empty one, and several missed passes
+  running cannot empty the column.
+
+  The same live run is what shows the switch itself is fixed: the arriving frame
+  is drawn ONCE and is already final, where before it drew a blank checkout
+  column and filled it in about 190 ms later. Keypress-to-painted went from a
+  98/125/324 ms spread to 93/129/176 ms, and the pane stopped changing at the
+  moment it was painted instead of 315 ms later.
 
   The cache file carries its version in its NAME and is disposable: absent,
   truncated, corrupt, an unknown version, an entry of the wrong shape or a
