@@ -45,6 +45,7 @@ from .config import _sidebar_config
 from .layout import IdeLayout
 from .python_cmd import PythonCommand
 from .sidebar_grid import SidebarGrid
+from .checkout_cache import CheckoutRefresher
 from .sidebar_plugins import SidebarProviderRegistry
 from .state_compat import StateIO
 
@@ -1213,6 +1214,7 @@ class IdeSidebar:
                 "sidebar_plugins.py",
                 "state_compat.py",
                 "git_status.py",
+                "checkout_cache.py",
                 "config.py",
             )
         )
@@ -1387,6 +1389,14 @@ class IdeSidebar:
         # Downward focus chain below the list: the filter line, then a hidden "show
         # archive" affordance. `archive_mode` swaps the whole list for the repo's archive.
         on_filter = on_archive = archive_mode = False
+        # The ONLY thing in this package that probes a checkout, and it runs in a
+        # thread of its own: a paint that forks `git` costs a switch 116 ms three
+        # times over, and a probe in this loop would delay a keystroke by the length
+        # of a `git status` — the loop draws BEFORE it reads keys. Started here
+        # because a hidden window has already returned above, stopped in `finally`
+        # so going hidden or exiting to reload ends the probing with the frame.
+        refresher = CheckoutRefresher(skill_dir, repo)
+        refresher.start()
         try:
             while True:
                 # Running stale code? A ship/merge rewrote this module or `ide_state` since
@@ -1416,6 +1426,11 @@ class IdeSidebar:
                     sessions = IdeSidebar._filter(StateIO.list_sessions(skill_dir, repo), query)
                 names = [s.get("name") or "?" for s in sessions]
                 session_ids = [s.get("id") or "" for s in sessions]
+                # What the frame lists is what is worth probing. The refresher never
+                # reads the registry itself, so it cannot decide this for itself.
+                refresher.note_directories(
+                    s.get("working_dir") or s.get("cwd") for s in sessions
+                )
                 # This sidebar belongs to exactly one IDE session window. That window's
                 # session is the current row immediately; querying tmux for a global
                 # active session makes per-window sidebars lag and briefly highlight the
@@ -1666,6 +1681,7 @@ class IdeSidebar:
         except KeyboardInterrupt:
             return 0
         finally:
+            refresher.stop()
             if interactive:
                 # HOME: the frame left behind outlives this process, so leave it in the
                 # resize-safe state `_paint` describes even if the last paint parked the

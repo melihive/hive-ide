@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import hashlib
 import subprocess
+import time
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from hive_ide.store import StateStore  # noqa: E402
 from hive_ide.config import _sidebar_config  # noqa: E402
 from hive_ide.errors import UsageError  # noqa: E402
 from hive_ide.git_status import inspect_linked_checkout  # noqa: E402
+from hive_ide.checkout_cache import CheckoutCache, CheckoutObservation  # noqa: E402
 
 
 def test_version_handshake_allows_stable_package_upgrades(monkeypatch):
@@ -69,21 +71,35 @@ def test_linked_checkout_status_distinguishes_clean_modified_and_main(tmp_path):
     assert inspect_linked_checkout(linked).state == "live"
 
 
-def test_sidebar_linked_checkout_marker_is_cached_and_reports_unknown(monkeypatch, tmp_path):
+def test_sidebar_checkout_marker_is_read_from_the_cache_and_never_probed(
+    monkeypatch, tmp_path
+):
+    """The provider is a READER now.
+
+    It used to probe and keep the result for 5 s on its own INSTANCE, which bought
+    nothing on a window switch: `canonical_frame` builds a fresh registry per call,
+    so every paint paid the full `git` sweep. The observation lives in a
+    per-workspace file, and only `CheckoutRefresher` writes it — so a paint that
+    probes is now a defect, which is what the refusal below pins.
+    """
     directory = tmp_path / "linked"
     directory.mkdir()
-    calls = []
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
 
-    def probe(path):
-        calls.append(path)
-        return SimpleNamespace(state="unknown")
+    def refuse(_path):
+        raise AssertionError("a paint probed a checkout")
 
-    monkeypatch.setattr("hive_ide.sidebar_plugins.inspect_linked_checkout", probe)
+    monkeypatch.setattr("hive_ide.checkout_cache.inspect_linked_checkout", refuse)
+    CheckoutCache.publish(
+        tmp_path,
+        workspace,
+        {CheckoutCache.key(directory): CheckoutObservation(state="unknown", at=time.time())},
+    )
     provider = SidebarProviderRegistry().get("checkout")
-    session = {"working_dir": str(directory)}
+    session = {"working_dir": str(directory), "workspace_key": str(workspace.resolve())}
     assert provider.value(tmp_path, session) == "unknown"
     assert provider.value(tmp_path, session) == "unknown"
-    assert calls == [str(directory)]
 
 
 def test_missing_linked_checkout_has_visible_marker(tmp_path):
@@ -905,9 +921,13 @@ def _plain(line: str) -> str:
 
 
 def test_sidebar_body_hides_workspace_folder_name(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "hive_ide.sidebar_plugins.inspect_linked_checkout",
-        lambda _path: SimpleNamespace(state="live"),
+    workspace = "/workspace/project/worktree/example-feature"
+    # The decoration comes from the cache, as it does on every paint path, and the
+    # record names its own workspace exactly as every writer of one does.
+    CheckoutCache.publish(
+        tmp_path,
+        workspace,
+        {CheckoutCache.key(tmp_path): CheckoutObservation(state="live", at=time.time())},
     )
     monkeypatch.setattr(IdeSidebar, "_rel_time", staticmethod(lambda _ts: "14h"))
     lines = IdeSidebar.render_lines(
@@ -919,10 +939,11 @@ def test_sidebar_body_hides_workspace_folder_name(tmp_path, monkeypatch):
                 "driver": {"id": "codex"},
                 "plan": {"path": "plans/x.md"},
                 "working_dir": str(tmp_path),
+                "workspace_key": workspace,
                 "last_active": "ignored",
             }
         ],
-        "/workspace/project/worktree/example-feature",
+        workspace,
         "session-id",
         0,
         20,
