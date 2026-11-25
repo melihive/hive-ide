@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hive-ide"
-version = "3.0.0"
+version = "3.1.0"
 description = "An agent-aware tmux workspace for coding agents"
 readme = "README.md"
 requires-python = ">=3.10"
