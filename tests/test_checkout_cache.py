@@ -410,3 +410,134 @@ class TestTheReaderRefreshesWhenTheFileChanges:
         assert reader.fresh(state_home, workspace, workspace) is not None
         CheckoutCache.path(state_home, workspace).unlink()
         assert reader.fresh(state_home, workspace, workspace) is None
+
+class TestTheReviewFindings:
+    """Five defects Codex found in the first version of this change, each with the
+    case that reproduces it. All five were edge cases on paths this package does
+    reach: an unresolvable home directory, a slow probe batch, a configuration that
+    draws no checkout, a hostile timestamp, and a directory that always fails."""
+
+    def test_a_path_with_no_resolvable_home_cannot_lose_the_frame(self, state_home, workspace):
+        """`Path("~someone-gone/w").expanduser()` raises RuntimeError, and the
+        refresher is fed from the render thread — outside the per-row handler that
+        used to swallow it for one row."""
+        hostile = "~nosuchuser-zz9/worktree/x"
+        assert CheckoutCache.key(hostile) == hostile          # keyed, not raised
+        refresher = CheckoutRefresher(
+            state_home, workspace, probe=lambda _d: GitCheckoutStatus("live")
+        )
+        refresher.note_directories([hostile, workspace])
+        published = refresher.run_once()
+        assert CheckoutCache.key(workspace) in published      # the sibling still ran
+
+    def test_a_frame_still_draws_every_other_row_beside_an_unresolvable_one(
+        self, state_home, workspace
+    ):
+        from hive_ide.sidebar import IdeSidebar
+
+        rows = [
+            {"id": "a", "name": "GOOD", "working_dir": str(workspace),
+             "workspace_key": str(workspace.resolve()), "last_active": "x"},
+            {"id": "b", "name": "BAD", "working_dir": "~nosuchuser-zz9/w",
+             "workspace_key": str(workspace.resolve()), "last_active": "x"},
+        ]
+        lines = IdeSidebar.render_lines(
+            state_home, rows, str(workspace), "a", 0, 24, focused=False
+        )
+        body = "\n".join(IdeSidebar._strip_ansi(line) for line in lines)
+        assert "GOOD" in body and "BAD" in body
+
+    def test_each_observation_is_published_before_the_pass_ends(self, state_home, workspace, tmp_path):
+        """A batch published at the end of the pass could publish observations that
+        had already expired: eight one-second probes against a 5 s reuse age."""
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        seen_during: list[str | None] = []
+
+        def probe(directory):
+            if str(directory) == CheckoutCache.key(second):
+                known = CheckoutCache.read(state_home, workspace)
+                found = known.get(CheckoutCache.key(first))
+                seen_during.append(found.state if found else None)
+            return GitCheckoutStatus("live")
+
+        refresher = CheckoutRefresher(state_home, workspace, probe=probe)
+        refresher.note_directories([first, second])
+        refresher.run_once()
+        assert seen_during == ["live"]
+
+    def test_a_configuration_that_draws_no_checkout_probes_nothing(self, state_home, workspace):
+        from hive_ide.sidebar import IdeSidebar
+
+        rows = [{"working_dir": str(workspace)}]
+        assert IdeSidebar._checkout_targets({"slots": ["plan"], "state": "activity"}, rows) == []
+        assert IdeSidebar._checkout_targets({"slots": ["plan", "checkout"]}, rows) == [str(workspace)]
+        assert IdeSidebar._checkout_targets({"state": "checkout"}, rows) == [str(workspace)]
+        # Fed nothing, a pass reads nothing and probes nothing.
+        refusing = CheckoutRefresher(
+            state_home, workspace, probe=lambda _d: pytest.fail("probed with no slot")
+        )
+        refusing.note_directories([])
+        assert refusing.run_once() == {}
+
+    def test_only_the_rows_the_frame_draws_are_queued(self, state_home, workspace, tmp_path):
+        from hive_ide.sidebar import IdeSidebar
+
+        viewport = [{"working_dir": str(tmp_path / f"v{i}")} for i in range(3)]
+        offscreen = [{"working_dir": str(tmp_path / f"o{i}")} for i in range(30)]
+        targets = IdeSidebar._checkout_targets({"slots": ["checkout"]}, viewport)
+        assert len(targets) == 3
+        assert all("/o" not in target for target in targets)
+        assert offscreen      # the rows that exist but are not drawn
+
+    @pytest.mark.parametrize(
+        "at",
+        [float("nan"), float("inf"), float("-inf"), -10 ** 400, 10 ** 400],
+    )
+    def test_a_hostile_timestamp_is_dropped_without_losing_its_neighbours(
+        self, state_home, workspace, at
+    ):
+        """`float()` raises OverflowError on an unrepresentable JSON integer, and
+        Python's JSON decoder accepts `NaN` — which compares False against every
+        bound, so it would never look expired and would pin an icon for good."""
+        good = CheckoutCache.key(workspace)
+        payload = json.dumps(
+            {
+                "version": 1,
+                "checkouts": {
+                    "/hostile": {"state": "shipped", "at": at},
+                    good: {"state": "live", "at": time.time()},
+                },
+            }
+        )
+        target = CheckoutCache.path(state_home, workspace)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(payload, encoding="utf-8")
+        entries = CheckoutCache.read(state_home, workspace)
+        assert set(entries) == {good}
+        assert CheckoutProvider().value(state_home, _session(workspace, workspace)) == "live"
+
+    def test_directories_that_always_fail_do_not_starve_a_healthy_one(
+        self, state_home, workspace, tmp_path
+    ):
+        """A failed probe leaves no observation, so without an attempt stamp the
+        failures keep first priority on every pass and the healthy row never runs."""
+        failing = []
+        for index in range(CheckoutRefresher.MAX_PROBES_PER_PASS):
+            directory = tmp_path / f"f{index}"
+            directory.mkdir()
+            failing.append(directory)
+        healthy = tmp_path / "healthy"
+        healthy.mkdir()
+
+        def probe(directory):
+            if str(directory) == CheckoutCache.key(healthy):
+                return GitCheckoutStatus("live")
+            raise RuntimeError("this checkout never answers")
+
+        refresher = CheckoutRefresher(state_home, workspace, probe=probe)
+        refresher.note_directories([*failing, healthy])
+        assert refresher.run_once() == {}                 # the whole first pass fails
+        published = refresher.run_once()
+        assert CheckoutCache.key(healthy) in published    # and now the healthy one

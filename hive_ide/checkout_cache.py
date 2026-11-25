@@ -30,6 +30,7 @@ what was observed, never a licence to skip `git status` before acting.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import threading
@@ -104,9 +105,21 @@ class CheckoutCache:
             at = entry.get("at")
             if not isinstance(at, (int, float)) or isinstance(at, bool):
                 continue
-            if at > moment + cls.FUTURE_SKEW_SECONDS:
+            try:
+                # A JSON integer can be arbitrarily large, and `float()` raises
+                # OverflowError on one that cannot be represented — from ANY row,
+                # which would otherwise lose the whole file (or the whole paint).
+                observed_at = float(at)
+            except (OverflowError, ValueError):
                 continue
-            observations[key] = CheckoutObservation(state=state, at=float(at))
+            # Python's JSON decoder accepts `NaN`, which compares False against
+            # every bound: it would pass the future check, never look expired, and
+            # pin a stale icon for good.
+            if not math.isfinite(observed_at):
+                continue
+            if observed_at > moment + cls.FUTURE_SKEW_SECONDS:
+                continue
+            observations[key] = CheckoutObservation(state=state, at=observed_at)
         return observations
 
     @classmethod
@@ -132,8 +145,19 @@ class CheckoutCache:
 
     @staticmethod
     def key(working_dir: str | Path) -> str:
-        """One key per checkout, so two sessions sharing a directory share a probe."""
-        return str(Path(working_dir).expanduser())
+        """One key per checkout, so two sessions sharing a directory share a probe.
+
+        Never raises. `Path("~someone-who-no-longer-exists/w").expanduser()` raises
+        `RuntimeError`, and this runs on the render thread, outside the per-row
+        handler that used to swallow exactly that for one row. An unnormalisable
+        path is keyed as it stands: the painter and the refresher still agree, so
+        the row simply never has an observation — a blank slot, not a lost frame.
+        """
+        text = str(working_dir)
+        try:
+            return str(Path(text).expanduser())
+        except (RuntimeError, OSError, ValueError):
+            return text
 
     @classmethod
     def publish(
@@ -262,6 +286,10 @@ class CheckoutRefresher:
         self._probe = probe or inspect_linked_checkout
         self._interval = self.INTERVAL_SECONDS if interval is None else interval
         self._directories: tuple[str, ...] = ()
+        #: When each directory was last ATTEMPTED, including failures. In memory
+        #: only: a failed probe is not an observation and has no business in a file
+        #: other painters read.
+        self._attempted: dict[str, float] = {}
         self._guard = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -305,22 +333,38 @@ class CheckoutRefresher:
             for directory in directories
             if CheckoutCache.fresh(known, directory, now=now) is None
         ]
-        stale.sort(key=lambda directory: _age_of(known, directory))
+        stale.sort(key=lambda directory: self._last_look(known, directory))
         observed: dict[str, CheckoutObservation] = {}
         for directory in stale[: self.MAX_PROBES_PER_PASS]:
             if self._stop.is_set():
                 break
+            key = CheckoutCache.key(directory)
+            # Before the probe, so a directory that FAILS still counts as looked at
+            # and rotates behind the untried ones. Without this, eight unreadable
+            # checkouts keep first priority for ever and a healthy ninth starves.
+            self._attempted[key] = time.time()
             try:
                 status = self._probe(directory)
             except Exception:  # noqa: BLE001 — a refresh pass never raises into a frame
                 continue
             state = getattr(status, "state", None) if status is not None else None
-            observed[CheckoutCache.key(directory)] = CheckoutObservation(
-                state=state, at=time.time()
-            )
-        if observed:
-            CheckoutCache.publish(self.state_home, self.workspace_key, observed)
+            fresh = CheckoutObservation(state=state, at=time.time())
+            observed[key] = fresh
+            # Published one at a time, NOT as a batch at the end of the pass: eight
+            # one-second probes against a 5 s reuse age would publish the first
+            # results already expired, so a healthy checkout would stay blank
+            # because unrelated repositories were slow. It also puts each icon on
+            # screen a tick earlier.
+            CheckoutCache.publish(self.state_home, self.workspace_key, {key: fresh})
         return observed
+
+    def _last_look(
+        self, known: dict[str, CheckoutObservation], directory: str | Path
+    ) -> float:
+        """The later of "observed" and "attempted" — oldest look goes first."""
+        return max(_age_of(known, directory), self._attempted.get(
+            CheckoutCache.key(directory), float("-inf")
+        ))
 
     def _run(self) -> None:
         while not self._stop.is_set():

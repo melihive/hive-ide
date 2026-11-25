@@ -1203,6 +1203,27 @@ class IdeSidebar:
         return lines
 
     @staticmethod
+    def _checkout_targets(settings: dict, rows: list[dict]) -> list[str]:
+        """The checkouts worth probing for THIS frame, or nothing at all.
+
+        Nothing when the configuration draws no checkout decoration: removing the
+        slot used to remove its probes with it, and a thread forking `git` for a
+        column nobody renders is worse than the cost it replaced. Otherwise the
+        rows the frame DRAWS — a nine-row viewport in a forty-session workspace
+        must not queue thirty-one probes for rows nobody can see, which is also
+        what the provider used to probe, since `render_lines` is handed the
+        viewport rather than the full list.
+        """
+        drawn = list(settings.get("slots") or []) + [settings.get("state")]
+        if "checkout" not in drawn:
+            return []
+        return [
+            str(directory)
+            for directory in (row.get("working_dir") or row.get("cwd") for row in rows)
+            if directory
+        ]
+
+    @staticmethod
     def _reload_watch() -> dict:
         """Package identity plus module mtimes: the render loop exits to reload when it changes."""
         module_dir = Path(__file__).resolve().parent
@@ -1426,11 +1447,6 @@ class IdeSidebar:
                     sessions = IdeSidebar._filter(StateIO.list_sessions(skill_dir, repo), query)
                 names = [s.get("name") or "?" for s in sessions]
                 session_ids = [s.get("id") or "" for s in sessions]
-                # What the frame lists is what is worth probing. The refresher never
-                # reads the registry itself, so it cannot decide this for itself.
-                refresher.note_directories(
-                    s.get("working_dir") or s.get("cwd") for s in sessions
-                )
                 # This sidebar belongs to exactly one IDE session window. That window's
                 # session is the current row immediately; querying tmux for a global
                 # active session makes per-window sidebars lag and briefly highlight the
@@ -1457,6 +1473,14 @@ class IdeSidebar:
                     sessions, cursor, height, entry_rows, archive_mode
                 )
                 visible_session_ids = [s.get("id") or "" for s in visible_sessions]
+                # The rows this frame DRAWS — after the viewport, not the whole
+                # filtered list. A nine-row viewport in a forty-session workspace
+                # must not queue thirty-one probes for rows nobody can see, which
+                # is also what the provider used to probe: `render_lines` is given
+                # the viewport, never the full list.
+                refresher.note_directories(
+                    IdeSidebar._checkout_targets(sidebar_settings, visible_sessions)
+                )
                 lines = IdeSidebar.render_lines(
                     skill_dir,
                     visible_sessions,
