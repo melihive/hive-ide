@@ -5,6 +5,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -52,13 +53,33 @@ def test_darwin_children_are_direct_and_failed_observations_are_unknown(monkeypa
 
 
 def test_actual_child_environment_is_not_argv():
+    """`_process_env` reads the real environment, not the argv that imitates it.
+
+    The read waits for the child to have EXEC'd. `Popen` returns once the fork has
+    happened, and until the exec completes `/proc/<pid>/environ` still holds the
+    PARENT's copy — which does not carry an env passed only to the child, so a
+    read inside that window answers about the wrong process. Measured on this
+    machine: reading immediately after `Popen` returned, the child-only key was
+    absent in 68 of 300 attempts. The only thing that used to keep this test out
+    of that window was the few milliseconds its `ps` call happens to take, and a
+    loaded machine is enough to lose that — it went red once in a pre-ship verify
+    and passed every run since.
+
+    The wait closes the fork/exec window and nothing else: a `_process_env` that
+    answered from argv, or never answered at all, still fails here once the
+    deadline passes.
+    """
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)", "HIVE_IDE_SESSION_ID=wrong"],
         env=dict(os.environ, HIVE_IDE_SESSION_ID="fixture-owned", HIVE_IDE_TEST_VALUE="a b=c"),
     )
     try:
         assert child.pid in Frame._child_pids(os.getpid())
+        deadline = time.monotonic() + 5.0
         observed = Frame._process_env(child.pid)
+        while "HIVE_IDE_TEST_VALUE" not in observed and time.monotonic() < deadline:
+            time.sleep(0.01)
+            observed = Frame._process_env(child.pid)
         assert observed["HIVE_IDE_SESSION_ID"] == "fixture-owned"
         assert observed["HIVE_IDE_TEST_VALUE"] == "a b=c"
     finally:
