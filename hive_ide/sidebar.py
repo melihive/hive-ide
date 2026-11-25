@@ -45,6 +45,7 @@ from .config import _sidebar_config
 from .layout import IdeLayout
 from .python_cmd import PythonCommand
 from .sidebar_grid import SidebarGrid
+from .checkout_cache import CheckoutRefresher
 from .sidebar_plugins import SidebarProviderRegistry
 from .state_compat import StateIO
 
@@ -1202,6 +1203,36 @@ class IdeSidebar:
         return lines
 
     @staticmethod
+    def _checkout_targets(
+        settings: dict, rows: list[dict], entry_rows: int = ENTRY_ROWS
+    ) -> list[str]:
+        """The checkouts worth probing for THIS frame, or nothing at all.
+
+        Nothing when the configuration draws no checkout decoration: removing the
+        slot used to remove its probes with it, and a thread forking `git` for a
+        column nobody renders is worse than the cost it replaced. Otherwise the
+        rows the frame DRAWS — a nine-row viewport in a forty-session workspace
+        must not queue thirty-one probes for rows nobody can see, which is also
+        what the provider used to probe, since `render_lines` is handed the
+        viewport rather than the full list.
+
+        DENSITY counts too. Slots live on the metadata row, which `render_lines`
+        drops at one-row density (`show_sub = entry_rows >= 2`) — so a pane short
+        enough to lose that row draws no checkout icon, and probing for it is pure
+        waste. The `state` track survives at every density, so a checkout
+        configured THERE is still worth probing.
+        """
+        as_state = settings.get("state") == "checkout"
+        as_slot = "checkout" in (settings.get("slots") or [])
+        if not as_state and not (as_slot and entry_rows >= 2):
+            return []
+        return [
+            str(directory)
+            for directory in (row.get("working_dir") or row.get("cwd") for row in rows)
+            if directory
+        ]
+
+    @staticmethod
     def _reload_watch() -> dict:
         """Package identity plus module mtimes: the render loop exits to reload when it changes."""
         module_dir = Path(__file__).resolve().parent
@@ -1213,6 +1244,7 @@ class IdeSidebar:
                 "sidebar_plugins.py",
                 "state_compat.py",
                 "git_status.py",
+                "checkout_cache.py",
                 "config.py",
             )
         )
@@ -1387,7 +1419,23 @@ class IdeSidebar:
         # Downward focus chain below the list: the filter line, then a hidden "show
         # archive" affordance. `archive_mode` swaps the whole list for the repo's archive.
         on_filter = on_archive = archive_mode = False
+        # The ONLY thing in this package that probes a checkout, and it runs in a
+        # thread of its own: a paint that forks `git` costs a switch 116 ms three
+        # times over, and a probe in this loop would delay a keystroke by the length
+        # of a `git status` — the loop draws BEFORE it reads keys. Started here
+        # because a hidden window has already returned above, stopped in `finally`
+        # so going hidden or exiting to reload ends the probing with the frame.
+        refresher = CheckoutRefresher(skill_dir, repo)
         try:
+            # INSIDE the try, because the terminal is already in cbreak with mouse
+            # reporting on: a `Thread.start()` that raises out here would leave the
+            # pane unusable, having skipped the `finally` below. And a cache worker
+            # that cannot start must not cost the user their sidebar — the frame
+            # paints from whatever the file already holds.
+            try:
+                refresher.start()
+            except RuntimeError:
+                pass
             while True:
                 # Running stale code? A ship/merge rewrote this module or `ide_state` since
                 # we started — exit so the keep-alive wrapper restarts us on fresh code,
@@ -1442,6 +1490,16 @@ class IdeSidebar:
                     sessions, cursor, height, entry_rows, archive_mode
                 )
                 visible_session_ids = [s.get("id") or "" for s in visible_sessions]
+                # The rows this frame DRAWS — after the viewport, not the whole
+                # filtered list. A nine-row viewport in a forty-session workspace
+                # must not queue thirty-one probes for rows nobody can see, which
+                # is also what the provider used to probe: `render_lines` is given
+                # the viewport, never the full list.
+                refresher.note_directories(
+                    IdeSidebar._checkout_targets(
+                        sidebar_settings, visible_sessions, entry_rows
+                    )
+                )
                 lines = IdeSidebar.render_lines(
                     skill_dir,
                     visible_sessions,
@@ -1666,6 +1724,7 @@ class IdeSidebar:
         except KeyboardInterrupt:
             return 0
         finally:
+            refresher.stop()
             if interactive:
                 # HOME: the frame left behind outlives this process, so leave it in the
                 # resize-safe state `_paint` describes even if the last paint parked the

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from datetime import datetime, timezone
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from .errors import UsageError
-from .git_status import inspect_linked_checkout
+from .checkout_cache import CheckoutCache, CheckoutCacheReader
 from .state_compat import StateIO
 from .pane_lease import LeaseStore
 from .store import StateStore
@@ -226,10 +225,16 @@ class CheckoutProvider:
         "missing": "✅",
         "unknown": "🔀",
     }
-    cache_seconds = 5
+    #: Kept as the provider's public knob, but the freshness rule now lives with
+    #: the file every paint path reads — see `checkout_cache`.
+    cache_seconds = CheckoutCache.MAX_REUSE_SECONDS
 
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[float, str | None]] = {}
+        #: A READER. This provider never probes: a paint that forks `git` costs a
+        #: window switch 116 ms three times over, and the same probe inside the
+        #: render loop would delay a keystroke by the length of a `git status`.
+        #: Only `CheckoutRefresher`, in a visible renderer's own thread, probes.
+        self._reader = CheckoutCacheReader()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -243,20 +248,33 @@ class CheckoutProvider:
         hive = ((session.get("host") or {}).get("hive") or {})
         legacy = hive.get("legacy_record") or {}
         working_dir = session.get("working_dir") or session.get("cwd")
-        checkout_state = None
         if working_dir:
-            now = time.monotonic()
-            cached = self._cache.get(str(working_dir))
-            if cached is None or now - cached[0] >= self.cache_seconds:
-                status = inspect_linked_checkout(working_dir)
-                checkout_state = status.state if status else None
-                self._cache[str(working_dir)] = (now, checkout_state)
-            else:
-                checkout_state = cached[1]
-            if checkout_state is not None:
-                return checkout_state
-            if Path(str(working_dir)).expanduser().is_dir():
+            # A `stat`, not a probe: it costs no process, it is always current, and
+            # it is what keeps a deleted — or recreated — checkout truthful between
+            # two refresh passes. `inspect_linked_checkout` answers the same way for
+            # an absent directory, so this is the old verdict reached without git.
+            if not Path(str(working_dir)).expanduser().is_dir():
+                return "missing"
+            workspace_key = session.get("workspace_key") or session.get("repo")
+            observed = (
+                self._reader.fresh(state_home, workspace_key, working_dir)
+                if workspace_key
+                else None
+            )
+            # A MISS IS NOT AN OBSERVATION. Falling through from here would reach
+            # `worktree_ahead` below and paint `shipped` from a record written when
+            # the worktree last shipped, over a checkout that has since moved on.
+            # Nothing is a truthful answer; the refresher fills it in next pass.
+            if observed is None:
                 return None
+            if observed.state == "missing":
+                # The directory is back. `missing` is the one verdict a `stat` can
+                # settle on its own, and it just did — an observation from before the
+                # path returned is not evidence. The next pass re-probes it.
+                return None
+            # Inside the reuse age the observation is drawn as it stands, `shipped`
+            # included: the user chose a possibly-5s-stale icon over a blank column.
+            return observed.state
 
         running_subagents = _subagent_count(
             session, StateIO.read_session_status(state_home, session)
