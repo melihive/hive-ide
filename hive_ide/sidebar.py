@@ -1203,7 +1203,9 @@ class IdeSidebar:
         return lines
 
     @staticmethod
-    def _checkout_targets(settings: dict, rows: list[dict]) -> list[str]:
+    def _checkout_targets(
+        settings: dict, rows: list[dict], entry_rows: int = ENTRY_ROWS
+    ) -> list[str]:
         """The checkouts worth probing for THIS frame, or nothing at all.
 
         Nothing when the configuration draws no checkout decoration: removing the
@@ -1213,9 +1215,16 @@ class IdeSidebar:
         must not queue thirty-one probes for rows nobody can see, which is also
         what the provider used to probe, since `render_lines` is handed the
         viewport rather than the full list.
+
+        DENSITY counts too. Slots live on the metadata row, which `render_lines`
+        drops at one-row density (`show_sub = entry_rows >= 2`) — so a pane short
+        enough to lose that row draws no checkout icon, and probing for it is pure
+        waste. The `state` track survives at every density, so a checkout
+        configured THERE is still worth probing.
         """
-        drawn = list(settings.get("slots") or []) + [settings.get("state")]
-        if "checkout" not in drawn:
+        as_state = settings.get("state") == "checkout"
+        as_slot = "checkout" in (settings.get("slots") or [])
+        if not as_state and not (as_slot and entry_rows >= 2):
             return []
         return [
             str(directory)
@@ -1417,8 +1426,16 @@ class IdeSidebar:
         # because a hidden window has already returned above, stopped in `finally`
         # so going hidden or exiting to reload ends the probing with the frame.
         refresher = CheckoutRefresher(skill_dir, repo)
-        refresher.start()
         try:
+            # INSIDE the try, because the terminal is already in cbreak with mouse
+            # reporting on: a `Thread.start()` that raises out here would leave the
+            # pane unusable, having skipped the `finally` below. And a cache worker
+            # that cannot start must not cost the user their sidebar — the frame
+            # paints from whatever the file already holds.
+            try:
+                refresher.start()
+            except RuntimeError:
+                pass
             while True:
                 # Running stale code? A ship/merge rewrote this module or `ide_state` since
                 # we started — exit so the keep-alive wrapper restarts us on fresh code,
@@ -1479,7 +1496,9 @@ class IdeSidebar:
                 # is also what the provider used to probe: `render_lines` is given
                 # the viewport, never the full list.
                 refresher.note_directories(
-                    IdeSidebar._checkout_targets(sidebar_settings, visible_sessions)
+                    IdeSidebar._checkout_targets(
+                        sidebar_settings, visible_sessions, entry_rows
+                    )
                 )
                 lines = IdeSidebar.render_lines(
                     skill_dir,

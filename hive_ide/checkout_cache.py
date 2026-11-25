@@ -139,7 +139,13 @@ class CheckoutCache:
         found = observations.get(cls.key(working_dir))
         if found is None:
             return None
-        if moment - found.at > cls.MAX_REUSE_SECONDS:
+        age = moment - found.at
+        # Checked at lookup, not only at parse: a long-lived reader keeps its
+        # parsed entries while the file is unchanged, so a clock stepped BACKWARD
+        # would otherwise make a stale `shipped` look brand new for ever.
+        if age < -cls.FUTURE_SKEW_SECONDS:
+            return None
+        if age > cls.MAX_REUSE_SECONDS:
             return None
         return found
 
@@ -268,6 +274,11 @@ class CheckoutRefresher:
     """
 
     INTERVAL_SECONDS = 1.0
+    #: Re-probe at this age, BELOW the cutoff at which a paint stops drawing the
+    #: observation. Waiting for expiry made a healthy icon blink: a pass at 4.9 s
+    #: skipped the row, a paint at 5.1 s drew nothing, and only the pass at 5.9 s
+    #: started `git`. The gap is the slack a probe has to finish in.
+    REFRESH_AFTER_SECONDS = 3.0
     #: Probes per pass, oldest observation first. A workspace with fifty sessions
     #: must not fork three hundred `git` processes in one burst; at this bound a
     #: 14-checkout frame is fully refreshed inside two passes.
@@ -322,22 +333,33 @@ class CheckoutRefresher:
             thread.join(timeout=timeout)
 
     def run_once(self, *, now: float | None = None) -> dict[str, CheckoutObservation]:
-        """One bounded pass. Returns what it published, for a test to assert on."""
-        with self._guard:
-            directories = self._directories
-        if not directories:
-            return {}
-        known = CheckoutCache.read(self.state_home, self.workspace_key, now=now)
-        stale = [
-            directory
-            for directory in directories
-            if CheckoutCache.fresh(known, directory, now=now) is None
-        ]
-        stale.sort(key=lambda directory: self._last_look(known, directory))
+        """One bounded pass. Returns what it published, for a test to assert on.
+
+        The targets and the file are re-read before EVERY probe, not snapshotted
+        for the pass: a scroll, a filter or the archive view changes what the frame
+        draws mid-pass, and the rows that just became visible must not wait behind
+        seven probes for rows nobody can see any more. It also picks up another
+        renderer's publish during the brief overlap of a window switch.
+        """
         observed: dict[str, CheckoutObservation] = {}
-        for directory in stale[: self.MAX_PROBES_PER_PASS]:
+        for _ in range(self.MAX_PROBES_PER_PASS):
             if self._stop.is_set():
                 break
+            moment = time.time() if now is None else now
+            with self._guard:
+                directories = self._directories
+            if not directories:
+                break
+            known = CheckoutCache.read(self.state_home, self.workspace_key, now=moment)
+            due = [
+                directory
+                for directory in directories
+                if self._is_due(known, directory, moment)
+            ]
+            if not due:
+                break
+            due.sort(key=lambda directory: self._last_look(known, directory))
+            directory = due[0]
             key = CheckoutCache.key(directory)
             # Before the probe, so a directory that FAILS still counts as looked at
             # and rotates behind the untried ones. Without this, eight unreadable
@@ -357,6 +379,30 @@ class CheckoutRefresher:
             # screen a tick earlier.
             CheckoutCache.publish(self.state_home, self.workspace_key, {key: fresh})
         return observed
+
+    def _is_due(
+        self,
+        known: dict[str, CheckoutObservation],
+        directory: str | Path,
+        moment: float,
+    ) -> bool:
+        """Whether this checkout is worth a probe right now.
+
+        Two independent brakes. The observation must be older than the refresh
+        age — below the display cutoff, so a replacement lands before a paint
+        stops drawing the old one. And an ATTEMPT inside the same window is
+        enough to wait, even when it published nothing: `publish` swallows a
+        write error by design, so a read-only state directory would otherwise
+        re-probe the same checkout on every pass for ever.
+        """
+        key = CheckoutCache.key(directory)
+        attempted = self._attempted.get(key)
+        if attempted is not None and moment - attempted < self.REFRESH_AFTER_SECONDS:
+            return False
+        found = known.get(key)
+        if found is None:
+            return True
+        return moment - found.at >= self.REFRESH_AFTER_SECONDS
 
     def _last_look(
         self, known: dict[str, CheckoutObservation], directory: str | Path

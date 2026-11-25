@@ -541,3 +541,120 @@ class TestTheReviewFindings:
         assert refresher.run_once() == {}                 # the whole first pass fails
         published = refresher.run_once()
         assert CheckoutCache.key(healthy) in published    # and now the healthy one
+
+
+class TestTheSecondReviewRound:
+    """Seven more, every one of them inside the first round's fixes — the pattern
+    this plan has hit in three phases now. Six taken, one deferred."""
+
+    def test_a_healthy_icon_is_refreshed_before_a_paint_would_drop_it(
+        self, state_home, workspace
+    ):
+        """The one that mattered: the worker waited for EXPIRY, so a pass at 4.9 s
+        skipped the row, a paint at 5.1 s drew nothing, and only the pass at 5.9 s
+        started `git` — a healthy checkout blinking empty every cycle, which is the
+        blank column the user chose against."""
+        _observe(state_home, workspace, workspace, "shipped", age=4.0)
+        refresher = CheckoutRefresher(
+            state_home, workspace, probe=lambda _d: GitCheckoutStatus("shipped")
+        )
+        refresher.note_directories([workspace])
+        assert refresher.run_once()                 # due BEFORE the 5 s cutoff
+        assert CheckoutRefresher.REFRESH_AFTER_SECONDS < CheckoutCache.MAX_REUSE_SECONDS
+        observed = CheckoutCache.fresh(
+            CheckoutCache.read(state_home, workspace), workspace
+        )
+        assert observed is not None and observed.state == "shipped"
+
+    def test_an_observation_younger_than_the_refresh_age_is_left_alone(
+        self, state_home, workspace
+    ):
+        _observe(state_home, workspace, workspace, "live", age=0.5)
+        refresher = CheckoutRefresher(
+            state_home, workspace, probe=lambda _d: pytest.fail("probed too early")
+        )
+        refresher.note_directories([workspace])
+        assert refresher.run_once() == {}
+
+    def test_rows_that_leave_the_viewport_mid_pass_are_abandoned(
+        self, state_home, workspace, tmp_path
+    ):
+        """A scroll used to wait behind every probe the pass had already chosen."""
+        offscreen = []
+        for index in range(4):
+            directory = tmp_path / f"off{index}"
+            directory.mkdir()
+            offscreen.append(directory)
+        arrived = tmp_path / "arrived"
+        arrived.mkdir()
+        refresher = CheckoutRefresher(state_home, workspace, probe=None)
+        probed: list[str] = []
+
+        def probe(directory):
+            probed.append(str(directory))
+            if len(probed) == 1:
+                refresher.note_directories([arrived])      # the viewport moved
+            return GitCheckoutStatus("live")
+
+        refresher._probe = probe
+        refresher.note_directories(offscreen)
+        refresher.run_once()
+        assert len(probed) == 2
+        assert probed[1] == CheckoutCache.key(arrived)
+
+    def test_a_pane_too_short_for_a_metadata_row_probes_nothing(self, state_home, workspace):
+        """Slots live on the metadata row, which one-row density drops."""
+        from hive_ide.sidebar import IdeSidebar
+
+        rows = [{"working_dir": str(workspace)}]
+        assert IdeSidebar._checkout_targets({"slots": ["checkout"]}, rows, 1) == []
+        assert IdeSidebar._checkout_targets({"slots": ["checkout"]}, rows, 2) == [str(workspace)]
+        # The state track survives every density, so a checkout THERE still counts.
+        assert IdeSidebar._checkout_targets({"state": "checkout"}, rows, 1) == [str(workspace)]
+
+    def test_a_cache_that_cannot_be_written_does_not_reprobe_every_pass(
+        self, state_home, workspace, monkeypatch
+    ):
+        """`publish` swallows a write error by design, so without an attempt floor a
+        read-only state directory re-probes the same checkout on every pass."""
+        monkeypatch.setattr(CheckoutCache, "publish", staticmethod(lambda *a, **k: None))
+        probed: list[str] = []
+        refresher = CheckoutRefresher(
+            state_home,
+            workspace,
+            probe=lambda d: probed.append(str(d)) or GitCheckoutStatus("live"),
+        )
+        refresher.note_directories([workspace])
+        refresher.run_once()
+        refresher.run_once()
+        refresher.run_once()
+        assert len(probed) == 1
+
+    def test_a_clock_stepped_backwards_does_not_revive_a_stale_observation(
+        self, state_home, workspace
+    ):
+        """The future bound used to be applied only when parsing the file, and a
+        long-lived reader keeps its parsed entries while the file is unchanged."""
+        entries = {
+            CheckoutCache.key(workspace): CheckoutObservation(state="shipped", at=time.time())
+        }
+        rolled_back = time.time() - 60
+        assert CheckoutCache.fresh(entries, workspace, now=rolled_back) is None
+        assert CheckoutCache.fresh(entries, workspace) is not None
+
+    def test_a_worker_that_cannot_start_does_not_take_the_sidebar_with_it(
+        self, state_home, workspace, monkeypatch
+    ):
+        """The terminal is in cbreak with mouse reporting on by then: a raising
+        `start()` outside the restoring `finally` left the pane unusable."""
+        import threading as threading_module
+
+        def refuse(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading_module.Thread, "start", refuse)
+        refresher = CheckoutRefresher(state_home, workspace)
+        with pytest.raises(RuntimeError):
+            refresher.start()
+        # and the paint path is unaffected, because it only ever reads
+        assert CheckoutProvider().value(state_home, _session(workspace, workspace)) is None
