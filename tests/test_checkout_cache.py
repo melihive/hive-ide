@@ -642,11 +642,19 @@ class TestTheSecondReviewRound:
         assert CheckoutCache.fresh(entries, workspace, now=rolled_back) is None
         assert CheckoutCache.fresh(entries, workspace) is not None
 
-    def test_a_worker_that_cannot_start_does_not_take_the_sidebar_with_it(
+    def test_a_worker_that_cannot_start_can_still_be_stopped(
         self, state_home, workspace, monkeypatch
     ):
-        """The terminal is in cbreak with mouse reporting on by then: a raising
-        `start()` outside the restoring `finally` left the pane unusable."""
+        """The terminal is in cbreak with mouse reporting on by then, and `stop()`
+        runs from the restoring `finally`.
+
+        The round-2 version of this test called `start()` and stopped there, which
+        is why it missed the regression round 3 found: `start()` stored the thread
+        BEFORE starting it, so a raising start left an unstarted thread behind and
+        `stop()` raised `RuntimeError: cannot join thread before it is started` —
+        out of the cleanup path, leaving the pane unusable. Calling `stop()` is the
+        whole point of this test.
+        """
         import threading as threading_module
 
         def refuse(self):
@@ -656,5 +664,111 @@ class TestTheSecondReviewRound:
         refresher = CheckoutRefresher(state_home, workspace)
         with pytest.raises(RuntimeError):
             refresher.start()
+        refresher.stop()        # must not raise — this is the cleanup path
         # and the paint path is unaffected, because it only ever reads
         assert CheckoutProvider().value(state_home, _session(workspace, workspace)) is None
+
+    def test_stopping_a_worker_that_never_started_is_silent(self, state_home, workspace):
+        CheckoutRefresher(state_home, workspace).stop()
+
+    def test_a_failed_start_stores_no_thread(self, state_home, workspace, monkeypatch):
+        """Half of the High finding, asserted on its own.
+
+        Mutating the fix back to assign-then-start SURVIVED a test that only called
+        `start()` then `stop()`, because `stop()`'s own guard swallowed the join
+        error — the two fixes masked each other. This one observes the ordering
+        directly: a start that raised must leave nothing behind to join.
+        """
+        import threading as threading_module
+
+        monkeypatch.setattr(
+            threading_module.Thread,
+            "start",
+            lambda self: (_ for _ in ()).throw(RuntimeError("can't start new thread")),
+        )
+        refresher = CheckoutRefresher(state_home, workspace)
+        with pytest.raises(RuntimeError):
+            refresher.start()
+        assert refresher._thread is None
+
+    def test_stop_never_raises_even_handed_an_unstarted_thread(
+        self, state_home, workspace
+    ):
+        """The other half. `stop()` runs from the `finally` that restores the
+        terminal, so it must survive a thread it cannot join however that state
+        arose — not only in the one way `start()` currently avoids creating it.
+        """
+        import threading as threading_module
+
+        refresher = CheckoutRefresher(state_home, workspace)
+        refresher._thread = threading_module.Thread(target=lambda: None)   # never started
+        refresher.stop()
+        assert refresher._thread is None
+
+
+class TestTheThirdReviewRound:
+    """Four findings on round two's fixes, one of them a regression round two's own
+    fix introduced. Scoped to the fix commit on purpose, to keep the loop bounded."""
+
+    def test_a_clock_stepped_backwards_does_not_suppress_the_next_probe(
+        self, state_home, workspace, monkeypatch
+    ):
+        """The retry cooldown is process-local, so it reads the MONOTONIC clock.
+
+        On the wall clock, a 60 s rollback made `now - attempted` negative, which
+        read as a recent attempt and blocked the replacement probe for a minute —
+        while the reader was already refusing the future-dated observation, so the
+        icon stayed blank throughout.
+        """
+        probed: list[str] = []
+        refresher = CheckoutRefresher(
+            state_home,
+            workspace,
+            probe=lambda d: probed.append(str(d)) or GitCheckoutStatus("live"),
+        )
+        refresher.note_directories([workspace])
+        refresher.run_once()
+        assert len(probed) == 1
+        # The wall clock jumps back a minute; the monotonic clock cannot.
+        rolled_back = time.time() - 60
+        refresher._attempted.clear()          # the cooldown has elapsed monotonically
+        refresher.run_once(now=rolled_back)
+        assert len(probed) == 2
+
+    def test_one_probe_per_directory_per_pass_however_slow_the_probe(
+        self, state_home, workspace, monkeypatch
+    ):
+        """A probe slower than the cooldown whose publish then fails left its own
+        directory eligible again at once: one unwritable entry ate a whole pass."""
+        monkeypatch.setattr(CheckoutCache, "publish", staticmethod(lambda *a, **k: None))
+        probed: list[str] = []
+
+        def slow(directory):
+            probed.append(str(directory))
+            # Older than the cooldown by the time the next iteration looks.
+            refresher._attempted[CheckoutCache.key(directory)] = (
+                time.monotonic() - CheckoutRefresher.REFRESH_AFTER_SECONDS - 1
+            )
+            return GitCheckoutStatus("live")
+
+        refresher = CheckoutRefresher(state_home, workspace, probe=slow)
+        refresher.note_directories([workspace])
+        refresher.run_once()
+        assert probed == [CheckoutCache.key(workspace)]
+
+    def test_an_injected_clock_is_used_for_eligibility_and_for_the_stamp(
+        self, state_home, workspace
+    ):
+        """Eligibility read the injected `now` while the stamp read the wall clock,
+        so a fixed-clock test saw one checkout probed eight times in a pass."""
+        probed: list[str] = []
+        refresher = CheckoutRefresher(
+            state_home,
+            workspace,
+            probe=lambda d: probed.append(str(d)) or GitCheckoutStatus("live"),
+        )
+        refresher.note_directories([workspace])
+        future = time.time() + 1000
+        published = refresher.run_once(now=future)
+        assert len(probed) == 1
+        assert published[CheckoutCache.key(workspace)].at == future

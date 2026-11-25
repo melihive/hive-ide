@@ -297,9 +297,13 @@ class CheckoutRefresher:
         self._probe = probe or inspect_linked_checkout
         self._interval = self.INTERVAL_SECONDS if interval is None else interval
         self._directories: tuple[str, ...] = ()
-        #: When each directory was last ATTEMPTED, including failures. In memory
-        #: only: a failed probe is not an observation and has no business in a file
-        #: other painters read.
+        #: When each directory was last ATTEMPTED, including failures, on the
+        #: MONOTONIC clock — it is process-local, so it must not move when the wall
+        #: clock does: a 60 s rollback made `now - attempted` negative, read as a
+        #: recent attempt, and suppressed the replacement probe for a full minute
+        #: while the reader was already refusing the future-dated observation. In
+        #: memory only: a failed probe is not an observation and has no business in
+        #: a file other painters read.
         self._attempted: dict[str, float] = {}
         self._guard = threading.Lock()
         self._stop = threading.Event()
@@ -321,16 +325,30 @@ class CheckoutRefresher:
         if self._thread is not None:
             return
         self._stop.clear()
-        self._thread = threading.Thread(
+        thread = threading.Thread(
             target=self._run, name="hive-ide-checkout-refresh", daemon=True
         )
-        self._thread.start()
+        # Started FIRST, assigned second. The other way round, a `Thread.start()`
+        # that raises leaves an UNSTARTED thread in `_thread`, and the `stop()` in
+        # the sidebar's cleanup `finally` then raises `RuntimeError: cannot join
+        # thread before it is started` — so the terminal stays in cbreak with
+        # mouse reporting on. That is the exact defect moving `start()` inside the
+        # try was meant to fix, re-entered through the back door.
+        thread.start()
+        self._thread = thread
 
     def stop(self, *, timeout: float = 0.2) -> None:
         self._stop.set()
         thread, self._thread = self._thread, None
-        if thread is not None:
+        if thread is None:
+            return
+        try:
             thread.join(timeout=timeout)
+        except RuntimeError:
+            # Never raise out of a cleanup path: this is called from the `finally`
+            # that restores the terminal, and a thread with nothing to join must
+            # not cost the user their pane.
+            pass
 
     def run_once(self, *, now: float | None = None) -> dict[str, CheckoutObservation]:
         """One bounded pass. Returns what it published, for a test to assert on.
@@ -342,6 +360,10 @@ class CheckoutRefresher:
         renderer's publish during the brief overlap of a window switch.
         """
         observed: dict[str, CheckoutObservation] = {}
+        #: Probed in THIS pass. The cooldown alone is not enough: a probe slower
+        #: than the cooldown whose publish then fails leaves its own directory
+        #: eligible again immediately, and one unwritable entry ate an entire pass.
+        tried: set[str] = set()
         for _ in range(self.MAX_PROBES_PER_PASS):
             if self._stop.is_set():
                 break
@@ -354,23 +376,29 @@ class CheckoutRefresher:
             due = [
                 directory
                 for directory in directories
-                if self._is_due(known, directory, moment)
+                if self._is_due(known, directory, moment, tried)
             ]
             if not due:
                 break
             due.sort(key=lambda directory: self._last_look(known, directory))
             directory = due[0]
             key = CheckoutCache.key(directory)
+            tried.add(key)
             # Before the probe, so a directory that FAILS still counts as looked at
             # and rotates behind the untried ones. Without this, eight unreadable
             # checkouts keep first priority for ever and a healthy ninth starves.
-            self._attempted[key] = time.time()
+            self._attempted[key] = time.monotonic()
             try:
                 status = self._probe(directory)
             except Exception:  # noqa: BLE001 — a refresh pass never raises into a frame
                 continue
             state = getattr(status, "state", None) if status is not None else None
-            fresh = CheckoutObservation(state=state, at=time.time())
+            # ONE clock. Eligibility read `moment` while the stamp read the wall
+            # clock, so a test fixing one and injecting the other saw a checkout
+            # probed eight times in a pass, every result stamped already-due.
+            fresh = CheckoutObservation(
+                state=state, at=time.time() if now is None else now
+            )
             observed[key] = fresh
             # Published one at a time, NOT as a batch at the end of the pass: eight
             # one-second probes against a 5 s reuse age would publish the first
@@ -385,6 +413,7 @@ class CheckoutRefresher:
         known: dict[str, CheckoutObservation],
         directory: str | Path,
         moment: float,
+        tried: set[str] | None = None,
     ) -> bool:
         """Whether this checkout is worth a probe right now.
 
@@ -396,8 +425,13 @@ class CheckoutRefresher:
         re-probe the same checkout on every pass for ever.
         """
         key = CheckoutCache.key(directory)
+        if tried is not None and key in tried:
+            return False
         attempted = self._attempted.get(key)
-        if attempted is not None and moment - attempted < self.REFRESH_AFTER_SECONDS:
+        if (
+            attempted is not None
+            and time.monotonic() - attempted < self.REFRESH_AFTER_SECONDS
+        ):
             return False
         found = known.get(key)
         if found is None:
