@@ -4,6 +4,8 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+## [3.1.0] - 2026-11-25
+
 ### Changed
 
 - **No sidebar paint forks `git`.** The checkout icon on every row came from
