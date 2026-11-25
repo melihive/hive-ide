@@ -4,6 +4,40 @@ All notable changes to `hive-ide` will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- **No sidebar paint forks `git`.** The checkout icon on every row came from
+  `inspect_linked_checkout`, which spends up to SIX `git` invocations per row at
+  two seconds each, and the 5 s cache meant to cover that lived on the provider
+  INSTANCE — while `canonical_frame` builds a fresh provider registry on every
+  call. So every paint paid in full, and a window switch renders the same frame
+  three times in three processes: `nav`'s pre-paint before the switch, the
+  `session-window-changed` hook, and the destination pane's own first tick.
+  Measured on a 14-session frame over 11 distinct checkouts, one frame cost
+  116 ms of `git`; it now costs 9-15 ms with no `git` at all, three times over.
+
+  The observation is cached per workspace beside the rest of that workspace's
+  state, and only the refresher probes — in a VISIBLE renderer's own thread, so
+  `git` is off the first paint and off the input loop as well, which draws before
+  it reads keys. A pass is bounded, it probes only what the frame lists and only
+  what has expired, and two sessions sharing a worktree share one probe.
+
+  A miss is not an observation: a row whose checkout has not been observed draws
+  nothing, rather than falling back to the session record's `worktree_ahead` and
+  painting `shipped` over a checkout that has since gained unmerged work. Inside
+  the reuse age the observation is drawn as it stands, `shipped` included — a
+  five-second-old icon is wrong far less often than a blinking empty column is
+  distracting, and it is evidence of what was observed, never a licence to skip
+  `git status` before acting. `missing` is derived from a `stat` instead, so a
+  deleted checkout is truthful immediately and a recreated one discards a cached
+  `missing` rather than waiting out the age.
+
+  The cache file carries its version in its NAME and is disposable: absent,
+  truncated, corrupt, an unknown version, an entry of the wrong shape or a
+  timestamp from the future are all a MISS, never an error out of a paint — so an
+  older hive-ide still running in a pane after an upgrade, and a downgrade with a
+  newer cache present, both simply miss and re-probe.
+
 ## [3.0.0] - 2026-11-24
 
 A session's conversation is now something it RECORDED, not something inferred
